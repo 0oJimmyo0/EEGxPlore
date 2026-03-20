@@ -7,28 +7,55 @@ import torch.nn as nn
 import warnings
 from torch import Tensor
 from torch.nn import functional as F
+from models.attn_res import FullAttnRes
 
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, encoder_layer, num_layers, norm=None, enable_nested_tensor=True, mask_check=True):
+    def __init__(self, encoder_layer, num_layers, norm=None, enable_nested_tensor=True, mask_check=True,use_attnres=False, d_model=None,
+             final_output_mode='attnres', attnres_variant='none'):
         super().__init__()
         torch._C._log_api_usage_once(f"torch.nn.modules.{self.__class__.__name__}")
         self.layers = _get_clones(encoder_layer, num_layers)
         self.num_layers = num_layers
         self.norm = norm
+        self.use_attnres = use_attnres
+        self.final_output_mode = final_output_mode
+        self.attnres_variant = attnres_variant
+        self.use_final_attnres = attnres_variant in ['final', 'full']
+        if self.use_final_attnres:
+            self.final_attnres = FullAttnRes(d_model)
 
-    def forward(
-            self,
-            src: Tensor,
-            mask: Optional[Tensor] = None,
-            src_key_padding_mask: Optional[Tensor] = None,
-            is_causal: Optional[bool] = None) -> Tensor:
+        if self.use_attnres and self.final_output_mode == 'attnres':
+            self.final_attnres = FullAttnRes(d_model)
 
+    def forward(self, src, mask=None, src_key_padding_mask=None, is_causal=None):
+        if self.attnres_variant == 'none':
+            output = src
+            for mod in self.layers:
+                output, _ = mod(output, src_mask=mask)
+            if self.norm is not None:
+                output = self.norm(output)
+            return output
+
+        sources = [src]
         output = src
+
         for mod in self.layers:
-            output = mod(output, src_mask=mask)
+            output, new_sources = mod(
+                output,
+                sources=sources,
+                src_mask=mask,
+                src_key_padding_mask=src_key_padding_mask,
+                is_causal=is_causal if is_causal is not None else False,
+            )
+            sources.extend(new_sources)
+
+        if self.use_final_attnres:
+            output = self.final_attnres(sources)
+
         if self.norm is not None:
             output = self.norm(output)
+
         return output
 
 
@@ -38,7 +65,7 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 2048, dropout: float = 0.1,
                  activation: Union[str, Callable[[Tensor], Tensor]] = F.relu,
                  layer_norm_eps: float = 1e-5, batch_first: bool = False, norm_first: bool = False,
-                 bias: bool = True, device=None, dtype=None) -> None:
+                 bias: bool = True, device=None, dtype=None, use_attnres: bool = False, attnres_variant: str = 'none') -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         self.self_attn_s = nn.MultiheadAttention(d_model//2, nhead // 2, dropout=dropout,
@@ -58,6 +85,19 @@ class TransformerEncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
+        self.use_attnres = use_attnres
+        self.attnres_variant = attnres_variant
+        self.use_pre_attnres = attnres_variant in ['pre_attn', 'full']
+        self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
+
+        if self.use_pre_attnres:
+            self.pre_attn_res = FullAttnRes(d_model)
+        if self.use_pre_mlpres:
+            self.pre_mlp_res = FullAttnRes(d_model)
+
+        if self.use_attnres:
+            self.pre_attn_res = FullAttnRes(d_model)
+            self.pre_mlp_res = FullAttnRes(d_model)
 
         # Legacy string support for activation function.
         if isinstance(activation, str):
@@ -79,17 +119,55 @@ class TransformerEncoderLayer(nn.Module):
             self.activation = F.relu
 
 
-    def forward(
-            self,
-            src: Tensor,
-            src_mask: Optional[Tensor] = None,
-            src_key_padding_mask: Optional[Tensor] = None,
-            is_causal: bool = False) -> Tensor:
-
+    def _forward_baseline(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
         x = src
         x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
         x = x + self._ff_block(self.norm2(x))
         return x
+
+    def _forward_attnres(self, sources, src_mask=None, src_key_padding_mask=None, is_causal=False):
+    # sources is a Python list:
+    # [patch_emb, out_1, out_2, ..., out_k]
+    # each tensor shape [B, C, S, D]
+
+    # ---- pre-attention depth aggregation ----
+        h_attn = self.pre_attn_res(sources)
+        attn_out = self._sa_block(self.norm1(h_attn), src_mask, src_key_padding_mask, is_causal=is_causal)
+        sources = sources + [attn_out]
+
+        # ---- pre-MLP depth aggregation ----
+        h_mlp = self.pre_mlp_res(sources)
+        ff_out = self._ff_block(self.norm2(h_mlp))
+        sources = sources + [ff_out]
+
+        return sources
+
+    # in TransformerEncoderLayer.forward
+    def forward(self, x, sources=None, src_mask=None, src_key_padding_mask=None, is_causal=False):
+        if self.attnres_variant == 'none':
+            x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
+            x = x + self._ff_block(self.norm2(x))
+            return x, [x]
+
+        new_sources = []
+
+        attn_in = self.pre_attn_res(sources) if self.use_pre_attnres else x
+        x_attn = attn_in + self._sa_block(self.norm1(attn_in), src_mask, src_key_padding_mask, is_causal=is_causal)
+
+        if self.attnres_variant in ['pre_attn', 'pre_mlp', 'full']:
+            new_sources.append(x_attn)
+
+        mlp_source_pool = sources + new_sources if sources is not None else [x_attn]
+        mlp_in = self.pre_mlp_res(mlp_source_pool) if self.use_pre_mlpres else x_attn
+        x_out = mlp_in + self._ff_block(self.norm2(mlp_in))
+
+        # for final-only, collect only block outputs
+        if self.attnres_variant == 'final':
+            new_sources = [x_out]
+        else:
+            new_sources.append(x_out)
+
+        return x_out, new_sources
 
     # self-attention block
     def _sa_block(self, x: Tensor,

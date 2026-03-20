@@ -4,8 +4,16 @@ from models.cbramod import CBraMod
 from einops.layers.torch import Rearrange
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-model = CBraMod().to(device)
-model.load_state_dict(torch.load('pretrained_weights/pretrained_weights.pth', map_location=device))
+model = CBraMod(
+    use_attnres=True,
+    final_output_mode='attnres',
+).to(device)
+
+msg = model.load_state_dict(
+    torch.load('pretrained_weights/pretrained_weights.pth', map_location=device),
+    strict=False
+)
+print(msg)
 model.proj_out = nn.Identity()
 classifier = nn.Sequential(
   Rearrange('b c s p -> b (c s p)'),

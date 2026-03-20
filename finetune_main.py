@@ -44,15 +44,35 @@ def main():
 
     parser.add_argument('--num_workers', type=int, default=16, help='num_workers')
     parser.add_argument('--label_smoothing', type=float, default=0.1, help='label_smoothing')
-    parser.add_argument('--multi_lr', type=bool, default=True,
-                        help='multi_lr')  # set different learning rates for different modules
-    parser.add_argument('--frozen', type=bool,
-                        default=False, help='frozen')
-    parser.add_argument('--use_pretrained_weights', type=bool,
-                        default=True, help='use_pretrained_weights')
+    parser.add_argument(
+        '--multi_lr',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='AdamW/SGD: backbone lr=--lr, head lr scaled like CBraMod (off: --no-multi_lr)',
+    )
+    parser.add_argument('--frozen', action='store_true',
+                        help='frozen only if you are using pretrained weights')
+    parser.add_argument('--use_pretrained_weights', action='store_true',
+                    help='load pretrained CBraMod weights')
     parser.add_argument('--foundation_dir', type=str,
-                        default='pretrained_weights/pretrained_weights.pth',
+                        default='/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth',
                         help='foundation_dir')
+    parser.add_argument('--use_attnres', action='store_true',
+                    help='replace standard residuals with Full AttnRes')
+
+    parser.add_argument('--attnres_final_output', type=str, default='attnres',
+                    choices=['attnres', 'last_source'],
+                    help='how to form the encoder output in AttnRes mode')
+    
+    # AttnRes ablation
+    parser.add_argument(
+        '--attnres_variant',
+        type=str,
+        default='none',
+        choices=['none', 'final', 'pre_attn', 'pre_mlp', 'full'],
+        help='Encoder path: none=original CBraMod stack; other values add FullAttnRes ablations. '
+             'Finetuning uses the same optimizer/scheduler as none (see finetune_trainer).',
+    )
 
     params = parser.parse_args()
     print(params)

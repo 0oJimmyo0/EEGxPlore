@@ -6,22 +6,40 @@ from models.criss_cross_transformer import TransformerEncoderLayer, TransformerE
 
 
 class CBraMod(nn.Module):
-    def __init__(self, in_dim=200, out_dim=200, d_model=200, dim_feedforward=800, seq_len=30, n_layer=12,
-                    nhead=8):
+    def __init__(
+        self,
+        in_dim=200,
+        out_dim=200,
+        d_model=200,
+        dim_feedforward=800,
+        seq_len=30,
+        n_layer=12,
+        nhead=8,
+        attnres_variant='none',
+    ):
         super().__init__()
+
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
+
         encoder_layer = TransformerEncoderLayer(
-            d_model=d_model, nhead=nhead, dim_feedforward=dim_feedforward, batch_first=True, norm_first=True,
-            activation=F.gelu
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            batch_first=True,
+            norm_first=True,
+            activation=F.gelu,
+            attnres_variant=attnres_variant,
         )
-        self.encoder = TransformerEncoder(encoder_layer, num_layers=n_layer, enable_nested_tensor=False)
-        self.proj_out = nn.Sequential(
-            # nn.Linear(d_model, d_model*2),
-            # nn.GELU(),
-            # nn.Linear(d_model*2, d_model),
-            # nn.GELU(),
-            nn.Linear(d_model, out_dim),
+
+        self.encoder = TransformerEncoder(
+            encoder_layer,
+            num_layers=n_layer,
+            enable_nested_tensor=False,
+            attnres_variant=attnres_variant,
+            d_model=d_model,
         )
+
+        self.proj_out = nn.Sequential(nn.Linear(d_model, out_dim))
         self.apply(_weights_init)
 
     def forward(self, x, mask=None):
