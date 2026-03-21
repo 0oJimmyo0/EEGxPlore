@@ -17,8 +17,14 @@ class Model(nn.Module):
             n_layer=12,
             nhead=8,
             attnres_variant=param.attnres_variant,
+            attnres_gated=param.attnres_gated,
+            attnres_gate_init=param.attnres_gate_init,
+            attnres_start_layer=param.attnres_start_layer,
         )
-
+        print(f"[FACED] attnres_variant = {param.attnres_variant}")
+        print(f"[FACED] attnres_gated = {param.attnres_gated}")
+        print(f"[FACED] attnres_gate_init = {param.attnres_gate_init}")
+        print(f"[FACED] attnres_start_layer = {param.attnres_start_layer}")
         # Track which params were actually restored from checkpoint
         self.pretrained_param_names = set()
 

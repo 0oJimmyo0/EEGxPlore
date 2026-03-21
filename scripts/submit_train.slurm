@@ -23,7 +23,7 @@ dataset_dir=/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/FACED
 # -------------------------
 # output
 # -------------------------
-model_dir=/gpfs/radev/scratch/xu_hua/shared/data/localLLM/checkpoints/${downstream_dataset}_attnres_scratch
+model_dir=/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/${downstream_dataset}_attnres_scratch
 mkdir -p "$model_dir"
 
 # -------------------------
@@ -61,5 +61,7 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py
   --model_dir "$model_dir" \
   --label_smoothing "$label_smoothing" \
   --attnres_variant pre_attn \
-
-#  --use_pretrained_weights
+  --use_pretrained_weights \
+  --attnres_gated \
+  --attnres_gate_init -5.0 \
+  --attnres_start_layer 6 \

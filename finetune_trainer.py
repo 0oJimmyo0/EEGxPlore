@@ -118,6 +118,13 @@ class Trainer(object):
                     (timer() - start_time) / 60
                 )
             )
+            if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "encoder"):
+                gate_vals = []
+                for i, layer in enumerate(self.model.backbone.encoder.layers):
+                    if hasattr(layer, "pre_attn_gate") and i >= self.params.attnres_start_layer:
+                        gate_vals.append(f"L{i}:{torch.sigmoid(layer.pre_attn_gate).item():.4f}")
+                if len(gate_vals) > 0:
+                    print("[Gate values] " + " | ".join(gate_vals))
             print(cm)
             if kappa > kappa_best:
                 print("kappa increasing....saving weights !! ")
@@ -131,13 +138,18 @@ class Trainer(object):
                 kappa_best = kappa
                 f1_best = f1
                 cm_best = cm
-                self.best_model_states = copy.deepcopy(self.model.state_dict())
+                #self.best_model_states = copy.deepcopy(self.model.state_dict())
+                self.best_model_states = {
+                    k: v.detach().cpu().clone()
+                    for k, v in self.model.state_dict().items()
+                }
 
         if self.best_model_states is None:
             print('Warning: val kappa never improved; using last epoch weights for test/save.')
             self.best_model_states = copy.deepcopy(self.model.state_dict())
 
         self.model.load_state_dict(self.best_model_states)
+        self.model.cuda()
         with torch.no_grad():
             print("***************************Test************************")
             acc, kappa, f1, cm = self.test_eval.get_metrics_for_multiclass(self.model)

@@ -16,6 +16,9 @@ class CBraMod(nn.Module):
         n_layer=12,
         nhead=8,
         attnres_variant='none',
+        attnres_gated=False,
+        attnres_gate_init=0.0,
+        attnres_start_layer=0,
     ):
         super().__init__()
 
@@ -29,6 +32,9 @@ class CBraMod(nn.Module):
             norm_first=True,
             activation=F.gelu,
             attnres_variant=attnres_variant,
+            attnres_gated=attnres_gated,
+            attnres_gate_init=attnres_gate_init,
+            attnres_start_layer=attnres_start_layer,
         )
 
         self.encoder = TransformerEncoder(
@@ -37,6 +43,7 @@ class CBraMod(nn.Module):
             enable_nested_tensor=False,
             attnres_variant=attnres_variant,
             d_model=d_model,
+            attnres_start_layer=attnres_start_layer,
         )
 
         self.proj_out = nn.Sequential(nn.Linear(d_model, out_dim))

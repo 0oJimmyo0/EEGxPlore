@@ -73,6 +73,25 @@ def main():
         help='Encoder path: none=original CBraMod stack; other values add FullAttnRes ablations. '
              'Finetuning uses the same optimizer/scheduler as none (see finetune_trainer).',
     )
+    parser.add_argument(
+        '--attnres_gated',
+        action='store_true',
+        help='use gated interpolation between baseline input and AttnRes input'
+    )
+
+    parser.add_argument(
+        '--attnres_gate_init',
+        type=float,
+        default=0.0,
+        help='initial value for pre-attn gate parameter before sigmoid'
+    )
+    
+    parser.add_argument(
+    '--attnres_start_layer',
+    type=int,
+    default=0,
+    help='first layer index that uses AttnRes; for 12 layers, 8 means top-4 only'
+)
 
     params = parser.parse_args()
     print(params)

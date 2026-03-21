@@ -12,10 +12,13 @@ from models.attn_res import FullAttnRes
 
 class TransformerEncoder(nn.Module):
     def __init__(self, encoder_layer, num_layers, norm=None, enable_nested_tensor=True, mask_check=True,use_attnres=False, d_model=None,
-             final_output_mode='attnres', attnres_variant='none'):
+             final_output_mode='attnres', attnres_variant='none', attnres_start_layer=0):
         super().__init__()
         torch._C._log_api_usage_once(f"torch.nn.modules.{self.__class__.__name__}")
         self.layers = _get_clones(encoder_layer, num_layers)
+        for idx, layer in enumerate(self.layers):
+            layer.layer_idx = idx
+            layer.attnres_start_layer = attnres_start_layer
         self.num_layers = num_layers
         self.norm = norm
         self.use_attnres = use_attnres
@@ -65,7 +68,9 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 2048, dropout: float = 0.1,
                  activation: Union[str, Callable[[Tensor], Tensor]] = F.relu,
                  layer_norm_eps: float = 1e-5, batch_first: bool = False, norm_first: bool = False,
-                 bias: bool = True, device=None, dtype=None, use_attnres: bool = False, attnres_variant: str = 'none') -> None:
+                 bias: bool = True, device=None, dtype=None, use_attnres: bool = False,
+                 attnres_variant: str = 'none', attnres_gated: bool = False,
+                 attnres_gate_init: float = 0.0, attnres_start_layer: int = 0) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         self.self_attn_s = nn.MultiheadAttention(d_model//2, nhead // 2, dropout=dropout,
@@ -87,11 +92,17 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(dropout)
         self.use_attnres = use_attnres
         self.attnres_variant = attnres_variant
+        self.attnres_gated = attnres_gated
+        self.attnres_start_layer = attnres_start_layer
+        self.layer_idx = -1 
         self.use_pre_attnres = attnres_variant in ['pre_attn', 'full']
         self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
 
         if self.use_pre_attnres:
             self.pre_attn_res = FullAttnRes(d_model)
+            if self.attnres_gated:
+                self.pre_attn_gate = nn.Parameter(torch.tensor(float(attnres_gate_init)))
+
         if self.use_pre_mlpres:
             self.pre_mlp_res = FullAttnRes(d_model)
 
@@ -144,6 +155,7 @@ class TransformerEncoderLayer(nn.Module):
 
     # in TransformerEncoderLayer.forward
     def forward(self, x, sources=None, src_mask=None, src_key_padding_mask=None, is_causal=False):
+
         if self.attnres_variant == 'none':
             x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
             x = x + self._ff_block(self.norm2(x))
@@ -151,7 +163,24 @@ class TransformerEncoderLayer(nn.Module):
 
         new_sources = []
 
-        attn_in = self.pre_attn_res(sources) if self.use_pre_attnres else x
+        # Pre-attention input: pure AttnRes agg, or gated blend with residual (x) when attnres_gated, top k layers only
+        use_pre_attn_here = (
+            self.use_pre_attnres and
+            self.layer_idx >= self.attnres_start_layer
+        )
+
+        if use_pre_attn_here:
+            baseline_in = x
+            attnres_in = self.pre_attn_res(sources)
+
+            if self.attnres_gated:
+                gate = torch.sigmoid(self.pre_attn_gate)
+                attn_in = baseline_in + gate * (attnres_in - baseline_in)
+            else:
+                attn_in = attnres_in
+        else:
+            attn_in = x
+
         x_attn = attn_in + self._sa_block(self.norm1(attn_in), src_mask, src_key_padding_mask, is_causal=is_causal)
 
         if self.attnres_variant in ['pre_attn', 'pre_mlp', 'full']:
