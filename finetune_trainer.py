@@ -70,6 +70,16 @@ class Trainer(object):
 
         print(self.model)
 
+    def _add_moe_load_balance_loss(self, loss):
+        coef = float(getattr(self.params, 'moe_load_balance', 0.0) or 0.0)
+        if coef <= 0 or not getattr(self.params, 'moe', False):
+            return loss
+        bb = getattr(self.model, 'backbone', None)
+        if bb is None or not hasattr(bb, 'moe_auxiliary_loss'):
+            return loss
+        aux = bb.moe_auxiliary_loss()
+        return loss + coef * aux
+
     def train_for_multiclass(self):
         """Same optimizer/schedule for baseline (--attnres_variant none) and AttnRes variants.
 
@@ -95,6 +105,7 @@ class Trainer(object):
                     loss = self.criterion(pred.transpose(1, 2), y)
                 else:
                     loss = self.criterion(pred, y)
+                loss = self._add_moe_load_balance_loss(loss)
 
                 loss.backward()
                 losses.append(loss.data.cpu().numpy())
@@ -120,9 +131,17 @@ class Trainer(object):
             )
             if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "encoder"):
                 gate_vals = []
+                st = self.params.attnres_start_layer
                 for i, layer in enumerate(self.model.backbone.encoder.layers):
-                    if hasattr(layer, "pre_attn_gate") and i >= self.params.attnres_start_layer:
-                        gate_vals.append(f"L{i}:{torch.sigmoid(layer.pre_attn_gate).item():.4f}")
+                    if i < st:
+                        continue
+                    parts = []
+                    if hasattr(layer, "pre_attn_gate"):
+                        parts.append(f"attn={torch.sigmoid(layer.pre_attn_gate).item():.4f}")
+                    if hasattr(layer, "pre_mlp_gate"):
+                        parts.append(f"mlp={torch.sigmoid(layer.pre_mlp_gate).item():.4f}")
+                    if parts:
+                        gate_vals.append(f"L{i}:" + ",".join(parts))
                 if len(gate_vals) > 0:
                     print("[Gate values] " + " | ".join(gate_vals))
             print(cm)
@@ -186,6 +205,7 @@ class Trainer(object):
                 pred = self.model(x)
 
                 loss = self.criterion(pred, y)
+                loss = self._add_moe_load_balance_loss(loss)
 
                 loss.backward()
                 losses.append(loss.data.cpu().numpy())
@@ -261,6 +281,7 @@ class Trainer(object):
                 y = y.cuda()
                 pred = self.model(x)
                 loss = self.criterion(pred, y)
+                loss = self._add_moe_load_balance_loss(loss)
 
                 loss.backward()
                 losses.append(loss.data.cpu().numpy())

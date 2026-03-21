@@ -12,14 +12,20 @@ from models.attn_res import FullAttnRes
 
 class TransformerEncoder(nn.Module):
     def __init__(self, encoder_layer, num_layers, norm=None, enable_nested_tensor=True, mask_check=True,use_attnres=False, d_model=None,
-             final_output_mode='attnres', attnres_variant='none', attnres_start_layer=0):
+             final_output_mode='attnres', attnres_variant='none', attnres_start_layer=0, layers=None):
         super().__init__()
         torch._C._log_api_usage_once(f"torch.nn.modules.{self.__class__.__name__}")
-        self.layers = _get_clones(encoder_layer, num_layers)
+        if layers is not None:
+            self.layers = layers
+            self.num_layers = len(layers)
+        else:
+            if encoder_layer is None:
+                raise ValueError("TransformerEncoder requires encoder_layer when layers is None")
+            self.layers = _get_clones(encoder_layer, num_layers)
+            self.num_layers = num_layers
         for idx, layer in enumerate(self.layers):
             layer.layer_idx = idx
             layer.attnres_start_layer = attnres_start_layer
-        self.num_layers = num_layers
         self.norm = norm
         self.use_attnres = use_attnres
         self.final_output_mode = final_output_mode
@@ -70,7 +76,8 @@ class TransformerEncoderLayer(nn.Module):
                  layer_norm_eps: float = 1e-5, batch_first: bool = False, norm_first: bool = False,
                  bias: bool = True, device=None, dtype=None, use_attnres: bool = False,
                  attnres_variant: str = 'none', attnres_gated: bool = False,
-                 attnres_gate_init: float = 0.0, attnres_start_layer: int = 0) -> None:
+                 attnres_gate_init: float = 0.0, attnres_start_layer: int = 0,
+                 moe_ffn: Optional[nn.Module] = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         self.self_attn_s = nn.MultiheadAttention(d_model//2, nhead // 2, dropout=dropout,
@@ -80,10 +87,16 @@ class TransformerEncoderLayer(nn.Module):
                                                  bias=bias, batch_first=batch_first,
                                                  **factory_kwargs)
 
-        # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
+        self.moe_ffn = moe_ffn
+        # Feedforward: dense linear1/linear2, or MoE replaces both.
+        if moe_ffn is None:
+            self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
+            self.dropout = nn.Dropout(dropout)
+            self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
+        else:
+            self.linear1 = None  # noqa: unused in MoE path
+            self.dropout = nn.Dropout(dropout)
+            self.linear2 = None
 
         self.norm_first = norm_first
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
@@ -105,10 +118,8 @@ class TransformerEncoderLayer(nn.Module):
 
         if self.use_pre_mlpres:
             self.pre_mlp_res = FullAttnRes(d_model)
-
-        if self.use_attnres:
-            self.pre_attn_res = FullAttnRes(d_model)
-            self.pre_mlp_res = FullAttnRes(d_model)
+            if self.attnres_gated:
+                self.pre_mlp_gate = nn.Parameter(torch.tensor(float(attnres_gate_init)))
 
         # Legacy string support for activation function.
         if isinstance(activation, str):
@@ -186,8 +197,20 @@ class TransformerEncoderLayer(nn.Module):
         if self.attnres_variant in ['pre_attn', 'pre_mlp', 'full']:
             new_sources.append(x_attn)
 
+        use_pre_mlp_here = (
+            self.use_pre_mlpres and
+            self.layer_idx >= self.attnres_start_layer
+        )
         mlp_source_pool = sources + new_sources if sources is not None else [x_attn]
-        mlp_in = self.pre_mlp_res(mlp_source_pool) if self.use_pre_mlpres else x_attn
+        if use_pre_mlp_here:
+            mlpres_agg = self.pre_mlp_res(mlp_source_pool)
+            if self.attnres_gated:
+                gate_m = torch.sigmoid(self.pre_mlp_gate)
+                mlp_in = x_attn + gate_m * (mlpres_agg - x_attn)
+            else:
+                mlp_in = mlpres_agg
+        else:
+            mlp_in = x_attn
         x_out = mlp_in + self._ff_block(self.norm2(mlp_in))
 
         # for final-only, collect only block outputs
@@ -221,6 +244,8 @@ class TransformerEncoderLayer(nn.Module):
 
     # feed forward block
     def _ff_block(self, x: Tensor) -> Tensor:
+        if self.moe_ffn is not None:
+            return self.dropout2(self.moe_ffn(x))
         x = self.linear2(self.dropout(self.activation(self.linear1(x))))
         return self.dropout2(x)
 

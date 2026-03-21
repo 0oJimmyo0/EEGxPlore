@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from einops.layers.torch import Rearrange
-from .cbramod import CBraMod
+from .cbramod import CBraMod, backbone_finetune_kwargs, load_foundation_into_backbone
 
 
 class Model(nn.Module):
@@ -16,73 +16,42 @@ class Model(nn.Module):
             seq_len=30,
             n_layer=12,
             nhead=8,
-            attnres_variant=param.attnres_variant,
-            attnres_gated=param.attnres_gated,
-            attnres_gate_init=param.attnres_gate_init,
-            attnres_start_layer=param.attnres_start_layer,
+            **backbone_finetune_kwargs(param),
         )
         print(f"[FACED] attnres_variant = {param.attnres_variant}")
         print(f"[FACED] attnres_gated = {param.attnres_gated}")
         print(f"[FACED] attnres_gate_init = {param.attnres_gate_init}")
         print(f"[FACED] attnres_start_layer = {param.attnres_start_layer}")
-        # Track which params were actually restored from checkpoint
+        if getattr(param, 'moe', False):
+            init_all = not getattr(param, 'moe_expert_zero_only', False)
+            print(
+                f"[FACED] MoE: top-{param.moe_num_layers} layers, "
+                f"experts={param.moe_num_experts}, top_k={param.moe_top_k}, "
+                f"warm_start_all_experts={init_all}"
+            )
         self.pretrained_param_names = set()
 
         if param.use_pretrained_weights:
             map_location = torch.device(f'cuda:{param.cuda}')
             ckpt = torch.load(param.foundation_dir, map_location=map_location)
 
-            # In case a future checkpoint is saved as {"state_dict": ...}
             if isinstance(ckpt, dict) and "state_dict" in ckpt:
                 ckpt = ckpt["state_dict"]
 
-            # -----------------------------
-            # Baseline path: original behavior
-            # -----------------------------
-            if param.attnres_variant == 'none':
-                msg = self.backbone.load_state_dict(ckpt, strict=True)
-                print(msg)
+            loaded_bb = load_foundation_into_backbone(self.backbone, param, ckpt)
+            self.pretrained_param_names = {f'backbone.{k}' for k in loaded_bb}
 
-                # All backbone params are considered pretrained in the baseline
-                self.pretrained_param_names = {
-                    f'backbone.{k}' for k in self.backbone.state_dict().keys()
-                }
-
-                print("[FACED] Baseline mode: strict=True checkpoint loading")
-
-            # -----------------------------
-            # AttnRes path: partial warm-start
-            # -----------------------------
+            if param.attnres_variant == 'none' and not getattr(param, 'moe', False):
+                print("[FACED] Baseline mode: strict foundation load")
+            elif getattr(param, 'moe', False):
+                print(f"[FACED] MoE mode: partial load + dense FFN warm-start into experts")
             else:
-                backbone_state = self.backbone.state_dict()
-                loadable = {
-                    k: v for k, v in ckpt.items()
-                    if k in backbone_state and backbone_state[k].shape == v.shape
-                }
-
-                msg = self.backbone.load_state_dict(loadable, strict=False)
-                print(msg)
-
-                self.pretrained_param_names = {
-                    f'backbone.{k}' for k in loadable.keys()
-                }
-
-                missing_backbone = sorted(
-                    set(backbone_state.keys()) - set(loadable.keys())
-                )
-
                 print(
                     f"[FACED] AttnRes mode ({param.attnres_variant}): "
-                    f"strict=False partial checkpoint loading"
+                    f"partial foundation load"
                 )
-                print(f"[FACED] Loaded backbone tensors: {len(loadable)}")
-                print(f"[FACED] Missing backbone tensors: {len(missing_backbone)}")
-                if len(missing_backbone) > 0:
-                    preview = missing_backbone[:20]
-                    print(f"[FACED] First missing keys: {preview}")
+            print(f"[FACED] Backbone tensors marked pretrained: {len(self.pretrained_param_names)}")
 
-        # IMPORTANT: do this AFTER loading backbone checkpoint
-        # so baseline strict=True still matches the original CBraMod weights
         self.backbone.proj_out = nn.Identity()
 
         if param.classifier == 'avgpooling_patch_reps':

@@ -83,15 +83,57 @@ def main():
         '--attnres_gate_init',
         type=float,
         default=0.0,
-        help='initial value for pre-attn gate parameter before sigmoid'
+        help='Logit for pre-attn (and pre-mlp) gate before sigmoid. Very negative (e.g. -5) ≈ '
+             'pure baseline stream early; with MoE, try -1..0 so AttnRes can actually contribute.'
     )
-    
+
     parser.add_argument(
     '--attnres_start_layer',
     type=int,
     default=0,
     help='first layer index that uses AttnRes; for 12 layers, 8 means top-4 only'
 )
+
+    parser.add_argument(
+        '--moe',
+        action='store_true',
+        help='Replace dense FFN with sparse MoE in the top encoder layers (see --moe_num_layers, ...)',
+    )
+    parser.add_argument(
+        '--moe_num_layers',
+        type=int,
+        default=2,
+        help='Number of top Transformer layers that use MoE (1–12; default 2)',
+    )
+    parser.add_argument(
+        '--moe_num_experts',
+        type=int,
+        default=4,
+        help='Experts per MoE layer',
+    )
+    parser.add_argument(
+        '--moe_top_k',
+        type=int,
+        default=1,
+        help='Top-k experts per token (load-balancing aux is normalized by k so scale matches k=1)',
+    )
+    parser.add_argument(
+        '--moe_expert_zero_only',
+        action='store_true',
+        help='MoE warm-start: copy pretrained dense FFN only into expert 0 (default: copy into all experts)',
+    )
+    parser.add_argument(
+        '--moe_load_balance',
+        type=float,
+        default=0.05,
+        help='Switch-style MoE load-balancing aux weight (0=off). Default 0.05 matches stable FACED MoE runs.',
+    )
+    parser.add_argument(
+        '--moe_router_noise',
+        type=float,
+        default=0.01,
+        help='Gaussian noise std on MoE router logits in training (0=off). Default 0.01; set 0 to ablate.',
+    )
 
     params = parser.parse_args()
     print(params)
