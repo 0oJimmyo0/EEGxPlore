@@ -8,6 +8,9 @@ from models.criss_cross_transformer import TransformerEncoderLayer, TransformerE
 from models.moe import (
     SharedSpecialistMoEFFN,
     SparseMoEFFN,
+    compact_psd_bandpowers,
+    reset_moe_psd_router_features,
+    set_moe_psd_router_features,
     warm_start_moe_from_dense_ckpt,
 )
 
@@ -34,9 +37,15 @@ class CBraMod(nn.Module):
         moe_router_noise_std=0.0,
         moe_shared_specialist=False,
         moe_specialist_linear1_from_dense=True,
+        moe_router_mode: str = "token",
+        moe_router_arch: str = "linear",
+        moe_router_mlp_hidden: int = 128,
+        moe_use_psd_router_features: bool = False,
     ):
         super().__init__()
 
+        self.use_moe = use_moe
+        self.moe_use_psd_router_features = bool(moe_use_psd_router_features)
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         if use_moe:
@@ -55,6 +64,10 @@ class CBraMod(nn.Module):
                             dropout=dropout,
                             activation=F.gelu,
                             router_noise_std=moe_router_noise_std,
+                            router_mode=moe_router_mode,
+                            router_arch=moe_router_arch,
+                            router_mlp_hidden=moe_router_mlp_hidden,
+                            use_psd_router_features=moe_use_psd_router_features,
                         )
                     else:
                         moe_mod = SparseMoEFFN(
@@ -65,6 +78,10 @@ class CBraMod(nn.Module):
                             dropout=dropout,
                             activation=F.gelu,
                             router_noise_std=moe_router_noise_std,
+                            router_mode=moe_router_mode,
+                            router_arch=moe_router_arch,
+                            router_mlp_hidden=moe_router_mlp_hidden,
+                            use_psd_router_features=moe_use_psd_router_features,
                         )
                 layers_list.append(
                     TransformerEncoderLayer(
@@ -125,12 +142,17 @@ class CBraMod(nn.Module):
                     m._zero_specialist_output_weights()
 
     def forward(self, x, mask=None):
-        patch_emb = self.patch_embedding(x, mask)
-        feats = self.encoder(patch_emb)
-
-        out = self.proj_out(feats)
-
-        return out
+        tok_psd = None
+        if self.use_moe and self.moe_use_psd_router_features:
+            tok_psd = set_moe_psd_router_features(compact_psd_bandpowers(x))
+        try:
+            patch_emb = self.patch_embedding(x, mask)
+            feats = self.encoder(patch_emb)
+            out = self.proj_out(feats)
+            return out
+        finally:
+            if tok_psd is not None:
+                reset_moe_psd_router_features(tok_psd)
 
     def moe_auxiliary_loss(self) -> torch.Tensor:
         """Sum of per-layer Switch-style load-balancing terms (multiply by --moe_load_balance in trainer)."""
@@ -231,6 +253,10 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_router_noise_std': getattr(param, 'moe_router_noise', 0.0),
         'moe_shared_specialist': getattr(param, 'moe_shared_specialist', False),
         'moe_specialist_linear1_from_dense': not getattr(param, 'moe_specialist_rand_linear1', False),
+        'moe_router_mode': getattr(param, 'moe_router_mode', 'token'),
+        'moe_router_arch': getattr(param, 'moe_router_arch', 'linear'),
+        'moe_router_mlp_hidden': getattr(param, 'moe_router_mlp_hidden', 128),
+        'moe_use_psd_router_features': getattr(param, 'moe_use_psd_router_features', False),
     }
 
 

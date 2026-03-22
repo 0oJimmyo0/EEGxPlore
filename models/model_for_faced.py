@@ -28,6 +28,10 @@ class Model(nn.Module):
             print(
                 f"[FACED] MoE ({mode}): top-{param.moe_num_layers} layers, "
                 f"experts/specialists={param.moe_num_experts}, top_k={param.moe_top_k}, "
+                f"router_mode={getattr(param, 'moe_router_mode', 'token')}, "
+                f"router_arch={getattr(param, 'moe_router_arch', 'linear')}, "
+                f"mlp_h={getattr(param, 'moe_router_mlp_hidden', 128)}, "
+                f"psd_router={getattr(param, 'moe_use_psd_router_features', False)}, "
                 f"warm_start_all_experts={init_all}"
             )
             if getattr(param, 'moe_shared_specialist', False):

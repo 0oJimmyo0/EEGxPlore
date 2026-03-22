@@ -2,12 +2,130 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Optional, Union
+import contextvars
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+
+MOE_ROUTER_MODES = ("token", "sample_hidden", "sample_attnres")
+MOE_ROUTER_ARCHS = ("linear", "mlp")
+PSD_ROUTER_DIM = 5
+
+# Optional multiclass labels [B] for extended diagnostics (set from trainer via context).
+_MOE_DIAG_LABELS: contextvars.ContextVar[Optional[Tensor]] = contextvars.ContextVar(
+    "moe_diag_labels", default=None
+)
+# Optional [B, PSD_ROUTER_DIM] log1p band powers from raw EEG (set in CBraMod.forward).
+_MOE_PSD_ROUTER: contextvars.ContextVar[Optional[Tensor]] = contextvars.ContextVar(
+    "moe_psd_router", default=None
+)
+
+
+def set_moe_diagnostic_labels(labels: Optional[Tensor]) -> Any:
+    """Trainer: wrap val batch forward so MoE can log class-conditional stats (optional)."""
+    return _MOE_DIAG_LABELS.set(labels)
+
+
+def reset_moe_diagnostic_labels(token: Any) -> None:
+    _MOE_DIAG_LABELS.reset(token)
+
+
+def set_moe_psd_router_features(psd: Optional[Tensor]) -> Any:
+    return _MOE_PSD_ROUTER.set(psd)
+
+
+def reset_moe_psd_router_features(token: Any) -> None:
+    _MOE_PSD_ROUTER.reset(token)
+
+
+def compact_psd_bandpowers(x: Tensor, n_bands: int = PSD_ROUTER_DIM) -> Tensor:
+    """Compact per-sample PSD: mean log1p power in n_bands contiguous bins over rfft axis. x: [B,C,S,T]."""
+    if x.dim() != 4:
+        raise ValueError(f"compact_psd_bandpowers expects [B,C,S,T], got {tuple(x.shape)}")
+    b, c, s, tt = x.shape
+    x2 = x.reshape(b, c * s, tt)
+    spec = torch.fft.rfft(x2, dim=-1, norm="ortho")
+    power = spec.abs().pow(2).mean(dim=1)
+    nbin = power.shape[-1]
+    edges = torch.linspace(0, nbin, n_bands + 1, device=x.device).long().clamp(0, nbin)
+    bands: List[Tensor] = []
+    for i in range(n_bands):
+        a, e = int(edges[i]), int(edges[i + 1])
+        a, e = min(a, nbin), min(e, nbin)
+        bands.append(power[:, a:e].mean(dim=-1) if e > a else torch.zeros(b, device=x.device, dtype=power.dtype))
+    out = torch.stack(bands, dim=-1)
+    return torch.log1p(out)
+
+
+def _make_router_head(d_in: int, num_experts: int, arch: str, hidden: int, factory_kwargs) -> nn.Module:
+    if arch not in MOE_ROUTER_ARCHS:
+        raise ValueError(f"router arch must be one of {MOE_ROUTER_ARCHS}, got {arch!r}")
+    if arch == "linear":
+        m = nn.Linear(d_in, num_experts, bias=True, **factory_kwargs)
+        nn.init.normal_(m.weight, std=0.02)
+        nn.init.zeros_(m.bias)
+        return m
+    seq = nn.Sequential(
+        nn.LayerNorm(d_in),
+        nn.Linear(d_in, hidden, bias=True, **factory_kwargs),
+        nn.GELU(),
+        nn.Linear(hidden, num_experts, bias=True, **factory_kwargs),
+    )
+    for mod in seq:
+        if isinstance(mod, nn.Linear):
+            nn.init.normal_(mod.weight, std=0.02)
+            nn.init.zeros_(mod.bias)
+    return seq
+
+
+def _attnres_router_features(
+    baseline: Tensor,
+    attnres: Tensor,
+    use_psd: bool,
+) -> Tuple[Tensor, Optional[Tuple[List[float], List[float]]]]:
+    p0 = _spatial_mean_bc_sd(baseline)
+    p1 = _spatial_mean_bc_sd(attnres)
+    p2 = _spatial_mean_bc_sd(attnres - baseline)
+    parts: List[Tensor] = [p0, p1, p2]
+    psd_stats: Optional[Tuple[List[float], List[float]]] = None
+    if use_psd:
+        psd = _MOE_PSD_ROUTER.get()
+        if psd is None:
+            raise ValueError(
+                "moe_use_psd_router_features=True requires raw-input PSD; ensure CBraMod.forward sets context."
+            )
+        if psd.shape[0] != p0.shape[0] or psd.shape[-1] != PSD_ROUTER_DIM:
+            raise ValueError(
+                f"PSD features expected [B,{PSD_ROUTER_DIM}], got {tuple(psd.shape)} for batch {p0.shape[0]}"
+            )
+        parts.append(psd)
+        pd = psd.detach().float()
+        psd_stats = (pd.mean(0).cpu().tolist(), pd.std(0).cpu().tolist())
+    feat = torch.cat(parts, dim=-1)
+    return feat, psd_stats
+
+
+def _spatial_mean_bc_sd(x: Tensor) -> Tensor:
+    """[B, C, S, D] -> [B, D] mean over C,S."""
+    return x.mean(dim=(1, 2))
+
+
+def _reshape_to_btd(x: Tensor, d: int) -> Tuple[Tensor, int, int]:
+    """x [..., D] -> x_bt [B, T, D], batch B, tokens T per batch."""
+    leading = x.shape[:-1]
+    b = int(leading[0])
+    if len(leading) == 1:
+        t = 1
+    else:
+        rest = 1
+        for s in leading[1:]:
+            rest *= int(s)
+        t = rest
+    x_bt = x.reshape(b, t, d)
+    return x_bt, b, t
 
 
 class ExpertFFN(nn.Module):
@@ -45,6 +163,42 @@ def _activation_from_arg(activation: Union[str, Callable[[Tensor], Tensor]], fac
 
 
 @torch.no_grad()
+def _optional_class_conditional_moe_stats(
+    routing_weights: Tensor,
+    top1_assign: Tensor,
+    num_experts: int,
+) -> Dict[str, Any]:
+    """routing_weights [U,E], top1 [U]; labels from context [U] if aligned."""
+    labels = _MOE_DIAG_LABELS.get()
+    out: Dict[str, Any] = {}
+    if labels is None or labels.numel() != routing_weights.size(0):
+        return out
+    labels = labels.long().flatten()
+    if labels.numel() != routing_weights.size(0):
+        return out
+    p = routing_weights.clamp_min(1e-10)
+    ent = (-(p * p.log()).sum(dim=-1))
+    n_cls = int(labels.max().item()) + 1
+    sum_e = torch.zeros(n_cls, device=ent.device, dtype=ent.dtype)
+    cnt = torch.zeros(n_cls, device=ent.device, dtype=ent.dtype)
+    sum_e.scatter_add_(0, labels, ent)
+    cnt.scatter_add_(0, labels, torch.ones_like(ent))
+    mean_by_c = (sum_e / (cnt + 1e-9)).cpu().tolist()
+    out["mean_entropy_by_class"] = [float(x) for x in mean_by_c]
+
+    hist_ec = torch.zeros(num_experts, n_cls, device=top1_assign.device, dtype=torch.float32)
+    for e in range(num_experts):
+        m = top1_assign == e
+        if not m.any():
+            continue
+        lbl_e = labels[m]
+        for c in range(n_cls):
+            hist_ec[e, c] = (lbl_e == c).float().sum()
+    out["per_expert_class_histogram"] = hist_ec.cpu().tolist()
+    return out
+
+
+@torch.no_grad()
 def build_moe_diagnostic_dict(
     router_logits: Tensor,
     routing_weights: Tensor,
@@ -53,20 +207,24 @@ def build_moe_diagnostic_dict(
     num_experts: int,
     top_k: int,
     last_lb_loss: Tensor,
+    routing_scope: str = "token",
+    mean_shared_output_norm: Optional[float] = None,
+    mean_specialist_residual_norm: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Detached stats for logging (one forward). Answers: collapse, traffic, dominance, entropy."""
-    n_tokens = router_logits.size(0)
+    """Detached stats for logging (one forward). routing_scope: token (per position) or sample (per batch item)."""
+    n_units = router_logits.size(0)
     p = routing_weights.clamp_min(1e-10)
     mean_entropy = float((-(p * p.log()).sum(dim=-1)).mean().item())
 
-    # Top-1 assignment = primary expert in top-k selection
     top1_assign = sel_idx[:, 0]
     hist = torch.bincount(top1_assign, minlength=num_experts).float()
-    frac = hist / max(float(n_tokens), 1.0)
+    frac = hist / max(float(n_units), 1.0)
     max_frac = float(frac.max().item())
 
     out: Dict[str, Any] = {
-        "n_tokens": int(n_tokens),
+        "routing_scope": routing_scope,
+        "n_routing_units": int(n_units),
+        "n_tokens": int(n_units),
         "mean_entropy": mean_entropy,
         "top1_histogram": hist.cpu().tolist(),
         "fraction_per_expert": frac.cpu().tolist(),
@@ -83,11 +241,16 @@ def build_moe_diagnostic_dict(
         out["top1_top2_distinct_fraction"] = None
         out["mean_weight_top1"] = float(sel_weights[:, 0].mean().item())
         out["mean_weight_top2"] = None
+    if mean_shared_output_norm is not None:
+        out["mean_shared_output_norm"] = mean_shared_output_norm
+    if mean_specialist_residual_norm is not None:
+        out["mean_specialist_residual_norm"] = mean_specialist_residual_norm
+    out.update(_optional_class_conditional_moe_stats(routing_weights, top1_assign, num_experts))
     return out
 
 
 class SparseMoEFFN(nn.Module):
-    """Token-wise sparse MoE: router picks top-k experts; output is a weighted mixture (replaces dense FFN)."""
+    """Sparse MoE: router picks top-k experts; output is a weighted mixture (replaces dense FFN)."""
 
     def __init__(
         self,
@@ -99,12 +262,22 @@ class SparseMoEFFN(nn.Module):
         activation: Union[str, Callable[[Tensor], Tensor]],
         bias: bool = True,
         router_noise_std: float = 0.0,
+        router_mode: str = "token",
+        router_arch: str = "linear",
+        router_mlp_hidden: int = 128,
+        use_psd_router_features: bool = False,
         device=None,
         dtype=None,
     ) -> None:
         super().__init__()
         if top_k < 1 or top_k > num_experts:
             raise ValueError(f"top_k must be in [1, num_experts], got top_k={top_k}, num_experts={num_experts}")
+        if router_mode not in MOE_ROUTER_MODES:
+            raise ValueError(f"router_mode must be one of {MOE_ROUTER_MODES}, got {router_mode!r}")
+        if router_arch not in MOE_ROUTER_ARCHS:
+            raise ValueError(f"router_arch must be one of {MOE_ROUTER_ARCHS}, got {router_arch!r}")
+        if use_psd_router_features and router_mode != "sample_attnres":
+            raise ValueError("moe_use_psd_router_features requires moe_router_mode=sample_attnres")
         factory_kwargs = {"device": device, "dtype": dtype}
         activation_fn = _activation_from_arg(activation, factory_kwargs)
 
@@ -112,9 +285,19 @@ class SparseMoEFFN(nn.Module):
         self.top_k = top_k
         self.d_model = d_model
         self.router_noise_std = router_noise_std
-        self.router = nn.Linear(d_model, num_experts, bias=True, **factory_kwargs)
-        nn.init.normal_(self.router.weight, std=0.02)
-        nn.init.zeros_(self.router.bias)
+        self.router_mode = router_mode
+        self.router_arch = router_arch
+        self.router_mlp_hidden = router_mlp_hidden
+        self.use_psd_router_features = use_psd_router_features
+        if router_mode in ("token", "sample_hidden"):
+            self.router = _make_router_head(d_model, num_experts, router_arch, router_mlp_hidden, factory_kwargs)
+        else:
+            self.router = None
+        if router_mode == "sample_attnres":
+            ain = 3 * d_model + (PSD_ROUTER_DIM if use_psd_router_features else 0)
+            self.router_attnres = _make_router_head(ain, num_experts, router_arch, router_mlp_hidden, factory_kwargs)
+        else:
+            self.router_attnres = None
         self.experts = nn.ModuleList(
             ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
             for _ in range(num_experts)
@@ -122,33 +305,109 @@ class SparseMoEFFN(nn.Module):
         self.last_diagnostics: Optional[Dict[str, Any]] = None
         self.moe_kind = "replace"
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, router_context: Optional[Dict[str, Tensor]] = None) -> Tensor:
         leading = x.shape[:-1]
         d = x.shape[-1]
         x_flat = x.reshape(-1, d)
         n_tokens = x_flat.size(0)
-        router_logits = self.router(x_flat)
+        x_bt, b, t = _reshape_to_btd(x, d)
+        psd_stats: Optional[Tuple[List[float], List[float]]] = None
+
+        if self.router_mode == "token":
+            assert self.router is not None
+            router_logits_flat = self.router(x_flat)
+            routing_scope = "token"
+            logits_for_diag = router_logits_flat
+            router_in_dim_meta = d
+        elif self.router_mode == "sample_hidden":
+            assert self.router is not None
+            pooled = x_bt.mean(dim=1)
+            logits_s = self.router(pooled)
+            logits_for_diag = logits_s
+            router_logits_flat = logits_s.unsqueeze(1).expand(-1, t, -1).reshape(-1, self.num_experts)
+            routing_scope = "sample"
+            router_in_dim_meta = d
+        elif self.router_mode == "sample_attnres":
+            if router_context is None or router_context.get("baseline") is None or router_context.get("attnres") is None:
+                raise ValueError(
+                    "MoE router_mode='sample_attnres' requires encoder to pass router_context with "
+                    "'baseline' and 'attnres' [B,C,S,D] (pre-attn AttnRes path)."
+                )
+            baseline = router_context["baseline"]
+            attnres = router_context["attnres"]
+            if baseline.shape != x.shape or attnres.shape != x.shape:
+                raise ValueError(
+                    "sample_attnres: baseline/attnres must match MoE input shape [B,C,S,D]"
+                )
+            feat, psd_stats = _attnres_router_features(baseline, attnres, self.use_psd_router_features)
+            logits_s = self.router_attnres(feat)
+            logits_for_diag = logits_s
+            router_logits_flat = logits_s.unsqueeze(1).expand(-1, t, -1).reshape(-1, self.num_experts)
+            routing_scope = "sample"
+            router_in_dim_meta = int(feat.shape[-1])
+        else:
+            raise RuntimeError(f"unknown router_mode {self.router_mode}")
+
         if self.training and self.router_noise_std > 0:
-            router_logits = router_logits + torch.randn_like(router_logits) * self.router_noise_std
-        routing_weights = F.softmax(router_logits, dim=-1)
-        sel_weights, sel_idx = torch.topk(routing_weights, self.top_k, dim=-1)
+            if routing_scope == "token":
+                router_logits_flat = router_logits_flat + torch.randn_like(router_logits_flat) * self.router_noise_std
+                logits_for_diag = router_logits_flat
+            else:
+                noise = torch.randn_like(logits_for_diag) * self.router_noise_std
+                logits_for_diag = logits_for_diag + noise
+                router_logits_flat = (
+                    logits_for_diag.unsqueeze(1).expand(-1, t, -1).reshape(-1, self.num_experts)
+                )
+
+        routing_weights_flat = F.softmax(router_logits_flat, dim=-1)
+        sel_weights, sel_idx = torch.topk(routing_weights_flat, self.top_k, dim=-1)
         sel_weights = sel_weights / (sel_weights.sum(dim=-1, keepdim=True) + 1e-9)
 
         if self.training and n_tokens > 0:
-            dispatch = torch.zeros(n_tokens, self.num_experts, device=x.device, dtype=routing_weights.dtype)
-            for k in range(self.top_k):
-                dispatch.scatter_(1, sel_idx[:, k : k + 1], 1.0)
-            fi = dispatch.mean(0).detach() / float(max(self.top_k, 1))
-            pi = routing_weights.mean(0)
+            if routing_scope == "token":
+                dispatch = torch.zeros(n_tokens, self.num_experts, device=x.device, dtype=routing_weights_flat.dtype)
+                for k in range(self.top_k):
+                    dispatch.scatter_(1, sel_idx[:, k : k + 1], 1.0)
+                fi = dispatch.mean(0).detach() / float(max(self.top_k, 1))
+                pi = routing_weights_flat.mean(0)
+            else:
+                rw_s = F.softmax(logits_for_diag, dim=-1)
+                _, sel_s = torch.topk(rw_s, self.top_k, dim=-1)
+                dispatch = torch.zeros(b, self.num_experts, device=x.device, dtype=rw_s.dtype)
+                for k in range(self.top_k):
+                    dispatch.scatter_(1, sel_s[:, k : k + 1], 1.0)
+                fi = dispatch.mean(0).detach() / float(max(self.top_k, 1))
+                pi = rw_s.mean(0)
             self._last_lb_loss = self.num_experts * (fi * pi).sum()
         else:
             self._last_lb_loss = x_flat.new_zeros(())
 
+        if routing_scope == "token":
+            diag_rw = routing_weights_flat
+            diag_sel_idx = sel_idx
+            diag_sel_w = sel_weights
+        else:
+            diag_rw = F.softmax(logits_for_diag, dim=-1)
+            diag_sel_w, diag_sel_idx = torch.topk(diag_rw, self.top_k, dim=-1)
+            diag_sel_w = diag_sel_w / (diag_sel_w.sum(dim=-1, keepdim=True) + 1e-9)
+
         self.last_diagnostics = build_moe_diagnostic_dict(
-            router_logits, routing_weights, sel_idx, sel_weights,
-            self.num_experts, self.top_k, self._last_lb_loss.detach(),
+            logits_for_diag,
+            diag_rw,
+            diag_sel_idx,
+            diag_sel_w,
+            self.num_experts,
+            self.top_k,
+            self._last_lb_loss.detach(),
+            routing_scope=routing_scope,
         )
         self.last_diagnostics["moe_kind"] = "replace"
+        self.last_diagnostics["router_arch"] = self.router_arch
+        self.last_diagnostics["router_in_dim"] = router_in_dim_meta
+        self.last_diagnostics["moe_use_psd_router_features"] = self.use_psd_router_features
+        if psd_stats is not None:
+            self.last_diagnostics["psd_feature_mean"] = psd_stats[0]
+            self.last_diagnostics["psd_feature_std"] = psd_stats[1]
 
         out_flat = torch.zeros_like(x_flat)
         for k in range(self.top_k):
@@ -180,12 +439,22 @@ class SharedSpecialistMoEFFN(nn.Module):
         activation: Union[str, Callable[[Tensor], Tensor]],
         bias: bool = True,
         router_noise_std: float = 0.0,
+        router_mode: str = "token",
+        router_arch: str = "linear",
+        router_mlp_hidden: int = 128,
+        use_psd_router_features: bool = False,
         device=None,
         dtype=None,
     ) -> None:
         super().__init__()
         if top_k < 1 or top_k > num_specialists:
             raise ValueError(f"top_k must be in [1, num_specialists], got {top_k}, {num_specialists}")
+        if router_mode not in MOE_ROUTER_MODES:
+            raise ValueError(f"router_mode must be one of {MOE_ROUTER_MODES}, got {router_mode!r}")
+        if router_arch not in MOE_ROUTER_ARCHS:
+            raise ValueError(f"router_arch must be one of {MOE_ROUTER_ARCHS}, got {router_arch!r}")
+        if use_psd_router_features and router_mode != "sample_attnres":
+            raise ValueError("moe_use_psd_router_features requires moe_router_mode=sample_attnres")
         factory_kwargs = {"device": device, "dtype": dtype}
         activation_fn = _activation_from_arg(activation, factory_kwargs)
 
@@ -194,10 +463,20 @@ class SharedSpecialistMoEFFN(nn.Module):
         self.top_k = top_k
         self.d_model = d_model
         self.router_noise_std = router_noise_std
+        self.router_mode = router_mode
+        self.router_arch = router_arch
+        self.router_mlp_hidden = router_mlp_hidden
+        self.use_psd_router_features = use_psd_router_features
         self.shared = ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
-        self.router = nn.Linear(d_model, num_specialists, bias=True, **factory_kwargs)
-        nn.init.normal_(self.router.weight, std=0.02)
-        nn.init.zeros_(self.router.bias)
+        if router_mode in ("token", "sample_hidden"):
+            self.router = _make_router_head(d_model, num_specialists, router_arch, router_mlp_hidden, factory_kwargs)
+        else:
+            self.router = None
+        if router_mode == "sample_attnres":
+            ain = 3 * d_model + (PSD_ROUTER_DIM if use_psd_router_features else 0)
+            self.router_attnres = _make_router_head(ain, num_specialists, router_arch, router_mlp_hidden, factory_kwargs)
+        else:
+            self.router_attnres = None
         self.specialists = nn.ModuleList(
             ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
             for _ in range(num_specialists)
@@ -212,35 +491,92 @@ class SharedSpecialistMoEFFN(nn.Module):
             if s.linear2.bias is not None:
                 nn.init.zeros_(s.linear2.bias)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, router_context: Optional[Dict[str, Tensor]] = None) -> Tensor:
         leading = x.shape[:-1]
         d = x.shape[-1]
         x_flat = x.reshape(-1, d)
         n_tokens = x_flat.size(0)
+        x_bt, b, t = _reshape_to_btd(x, d)
         h_shared = self.shared(x_flat)
+        psd_stats: Optional[Tuple[List[float], List[float]]] = None
 
-        router_logits = self.router(x_flat)
+        if self.router_mode == "token":
+            assert self.router is not None
+            router_logits_flat = self.router(x_flat)
+            routing_scope = "token"
+            logits_for_diag = router_logits_flat
+            router_in_dim_meta = d
+        elif self.router_mode == "sample_hidden":
+            assert self.router is not None
+            pooled = x_bt.mean(dim=1)
+            logits_s = self.router(pooled)
+            logits_for_diag = logits_s
+            router_logits_flat = logits_s.unsqueeze(1).expand(-1, t, -1).reshape(-1, self.num_specialists)
+            routing_scope = "sample"
+            router_in_dim_meta = d
+        elif self.router_mode == "sample_attnres":
+            if router_context is None or router_context.get("baseline") is None or router_context.get("attnres") is None:
+                raise ValueError(
+                    "MoE router_mode='sample_attnres' requires encoder to pass router_context with "
+                    "'baseline' and 'attnres' [B,C,S,D] (pre-attn AttnRes path)."
+                )
+            baseline = router_context["baseline"]
+            attnres = router_context["attnres"]
+            if baseline.shape != x.shape or attnres.shape != x.shape:
+                raise ValueError(
+                    "sample_attnres: baseline/attnres must match MoE input shape [B,C,S,D]"
+                )
+            feat, psd_stats = _attnres_router_features(baseline, attnres, self.use_psd_router_features)
+            logits_s = self.router_attnres(feat)
+            logits_for_diag = logits_s
+            router_logits_flat = logits_s.unsqueeze(1).expand(-1, t, -1).reshape(-1, self.num_specialists)
+            routing_scope = "sample"
+            router_in_dim_meta = int(feat.shape[-1])
+        else:
+            raise RuntimeError(f"unknown router_mode {self.router_mode}")
+
         if self.training and self.router_noise_std > 0:
-            router_logits = router_logits + torch.randn_like(router_logits) * self.router_noise_std
-        routing_weights = F.softmax(router_logits, dim=-1)
-        sel_weights, sel_idx = torch.topk(routing_weights, self.top_k, dim=-1)
+            if routing_scope == "token":
+                router_logits_flat = router_logits_flat + torch.randn_like(router_logits_flat) * self.router_noise_std
+                logits_for_diag = router_logits_flat
+            else:
+                noise = torch.randn_like(logits_for_diag) * self.router_noise_std
+                logits_for_diag = logits_for_diag + noise
+                router_logits_flat = (
+                    logits_for_diag.unsqueeze(1).expand(-1, t, -1).reshape(-1, self.num_specialists)
+                )
+
+        routing_weights_flat = F.softmax(router_logits_flat, dim=-1)
+        sel_weights, sel_idx = torch.topk(routing_weights_flat, self.top_k, dim=-1)
         sel_weights = sel_weights / (sel_weights.sum(dim=-1, keepdim=True) + 1e-9)
 
         if self.training and n_tokens > 0:
-            dispatch = torch.zeros(n_tokens, self.num_specialists, device=x.device, dtype=routing_weights.dtype)
-            for k in range(self.top_k):
-                dispatch.scatter_(1, sel_idx[:, k : k + 1], 1.0)
-            fi = dispatch.mean(0).detach() / float(max(self.top_k, 1))
-            pi = routing_weights.mean(0)
+            if routing_scope == "token":
+                dispatch = torch.zeros(n_tokens, self.num_specialists, device=x.device, dtype=routing_weights_flat.dtype)
+                for k in range(self.top_k):
+                    dispatch.scatter_(1, sel_idx[:, k : k + 1], 1.0)
+                fi = dispatch.mean(0).detach() / float(max(self.top_k, 1))
+                pi = routing_weights_flat.mean(0)
+            else:
+                rw_s = F.softmax(logits_for_diag, dim=-1)
+                _, sel_s = torch.topk(rw_s, self.top_k, dim=-1)
+                dispatch = torch.zeros(b, self.num_specialists, device=x.device, dtype=rw_s.dtype)
+                for k in range(self.top_k):
+                    dispatch.scatter_(1, sel_s[:, k : k + 1], 1.0)
+                fi = dispatch.mean(0).detach() / float(max(self.top_k, 1))
+                pi = rw_s.mean(0)
             self._last_lb_loss = self.num_specialists * (fi * pi).sum()
         else:
             self._last_lb_loss = x_flat.new_zeros(())
 
-        self.last_diagnostics = build_moe_diagnostic_dict(
-            router_logits, routing_weights, sel_idx, sel_weights,
-            self.num_specialists, self.top_k, self._last_lb_loss.detach(),
-        )
-        self.last_diagnostics["moe_kind"] = "shared_specialist"
+        if routing_scope == "token":
+            diag_rw = routing_weights_flat
+            diag_sel_idx = sel_idx
+            diag_sel_w = sel_weights
+        else:
+            diag_rw = F.softmax(logits_for_diag, dim=-1)
+            diag_sel_w, diag_sel_idx = torch.topk(diag_rw, self.top_k, dim=-1)
+            diag_sel_w = diag_sel_w / (diag_sel_w.sum(dim=-1, keepdim=True) + 1e-9)
 
         residual = torch.zeros_like(x_flat)
         for k in range(self.top_k):
@@ -252,6 +588,29 @@ class SharedSpecialistMoEFFN(nn.Module):
                 residual[mask] = residual[mask] + sel_weights[mask, k : k + 1] * y
 
         out = h_shared + residual
+        mean_shared_norm = float(h_shared.float().norm(dim=-1).mean().item())
+        mean_res_norm = float(residual.float().norm(dim=-1).mean().item())
+
+        self.last_diagnostics = build_moe_diagnostic_dict(
+            logits_for_diag,
+            diag_rw,
+            diag_sel_idx,
+            diag_sel_w,
+            self.num_specialists,
+            self.top_k,
+            self._last_lb_loss.detach(),
+            routing_scope=routing_scope,
+            mean_shared_output_norm=mean_shared_norm,
+            mean_specialist_residual_norm=mean_res_norm,
+        )
+        self.last_diagnostics["moe_kind"] = "shared_specialist"
+        self.last_diagnostics["router_arch"] = self.router_arch
+        self.last_diagnostics["router_in_dim"] = router_in_dim_meta
+        self.last_diagnostics["moe_use_psd_router_features"] = self.use_psd_router_features
+        if psd_stats is not None:
+            self.last_diagnostics["psd_feature_mean"] = psd_stats[0]
+            self.last_diagnostics["psd_feature_std"] = psd_stats[1]
+
         return out.view(*leading, d)
 
 
@@ -346,15 +705,35 @@ def warm_start_moe_from_dense_ckpt(
 
 def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[str]:
     """Human-readable lines for logging."""
+    scope = diag.get("routing_scope", "token")
+    n_u = diag.get("n_routing_units", diag.get("n_tokens", 0))
+    r_arch = diag.get("router_arch", "linear")
+    r_in = diag.get("router_in_dim", "?")
+    use_psd = diag.get("moe_use_psd_router_features", False)
     lines = [
-        f"  [MoE L{layer_idx}] kind={diag.get('moe_kind', 'replace')}  n_tokens={diag['n_tokens']}  "
+        f"  [MoE L{layer_idx}] kind={diag.get('moe_kind', 'replace')}  scope={scope}  n_units={n_u}  "
+        f"router_arch={r_arch}  router_in_dim={r_in}  psd_feats={use_psd}  "
         f"H_mean={diag['mean_entropy']:.4f}  max_expert_frac={diag['max_expert_fraction']:.4f}  "
         f"lb={diag['lb_loss']:.6f}  logit_var={diag['router_logit_var_mean']:.6f}",
         f"    histogram_top1: {diag['top1_histogram']}  frac: {[round(f, 4) for f in diag['fraction_per_expert']]}",
     ]
+    if diag.get("psd_feature_mean") is not None and diag.get("psd_feature_std") is not None:
+        lines.append(
+            f"    psd_mean={ [round(v, 4) for v in diag['psd_feature_mean']]}  "
+            f"psd_std={ [round(v, 4) for v in diag['psd_feature_std']]}"
+        )
     if diag.get("top1_top2_distinct_fraction") is not None:
         lines.append(
             f"    top1!=top2_frac={diag['top1_top2_distinct_fraction']:.4f}  "
             f"w_top1={diag.get('mean_weight_top1', 0):.4f}  w_top2={diag.get('mean_weight_top2', 0):.4f}"
         )
+    if diag.get("mean_shared_output_norm") is not None:
+        lines.append(
+            f"    ||shared||_mean={diag['mean_shared_output_norm']:.4f}  "
+            f"||spec_residual||_mean={diag.get('mean_specialist_residual_norm', 0):.4f}"
+        )
+    if diag.get("mean_entropy_by_class") is not None:
+        lines.append(f"    H_mean_by_class: {[round(h, 4) for h in diag['mean_entropy_by_class']]}")
+    if diag.get("per_expert_class_histogram") is not None:
+        lines.append(f"    per_expert_class_hist: {diag['per_expert_class_histogram']}")
     return lines

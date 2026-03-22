@@ -8,7 +8,11 @@ from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss, MSELoss
 from tqdm import tqdm
 
 from finetune_evaluator import Evaluator
-from models.moe import format_moe_diagnostics_lines
+from models.moe import (
+    format_moe_diagnostics_lines,
+    reset_moe_diagnostic_labels,
+    set_moe_diagnostic_labels,
+)
 
 
 class Trainer(object):
@@ -96,9 +100,21 @@ class Trainer(object):
                 self.model.train()
             return
         x = batch[0].cuda()
-        with torch.no_grad():
-            _ = self.model(x)
-        print('[MoE diagnostics] one val batch, eval (no router noise)')
+        label_tok = None
+        if len(batch) > 1:
+            label_tok = set_moe_diagnostic_labels(batch[1].cuda())
+        try:
+            with torch.no_grad():
+                _ = self.model(x)
+        finally:
+            if label_tok is not None:
+                reset_moe_diagnostic_labels(label_tok)
+        print(
+            '[MoE diagnostics] one val batch, eval (no router noise)  '
+            f"router_mode={getattr(self.params, 'moe_router_mode', '?')}  "
+            f"router_arch={getattr(self.params, 'moe_router_arch', '?')}  "
+            f"psd_feats={getattr(self.params, 'moe_use_psd_router_features', False)}"
+        )
         for i, layer in enumerate(bb.encoder.layers):
             m = getattr(layer, 'moe_ffn', None)
             diag = getattr(m, 'last_diagnostics', None) if m is not None else None

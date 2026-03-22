@@ -1,5 +1,5 @@
 import copy
-from typing import Optional, Any, Union, Callable
+from typing import Dict, Optional, Any, Union, Callable
 
 import torch
 import torch.nn as nn
@@ -144,7 +144,7 @@ class TransformerEncoderLayer(nn.Module):
     def _forward_baseline(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
         x = src
         x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
-        x = x + self._ff_block(self.norm2(x))
+        x = x + self._ff_block(self.norm2(x), router_context=None)
         return x
 
     def _forward_attnres(self, sources, src_mask=None, src_key_padding_mask=None, is_causal=False):
@@ -159,7 +159,7 @@ class TransformerEncoderLayer(nn.Module):
 
         # ---- pre-MLP depth aggregation ----
         h_mlp = self.pre_mlp_res(sources)
-        ff_out = self._ff_block(self.norm2(h_mlp))
+        ff_out = self._ff_block(self.norm2(h_mlp), router_context=None)
         sources = sources + [ff_out]
 
         return sources
@@ -169,12 +169,14 @@ class TransformerEncoderLayer(nn.Module):
 
         if self.attnres_variant == 'none':
             x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
-            x = x + self._ff_block(self.norm2(x))
+            x = x + self._ff_block(self.norm2(x), router_context=None)
             return x, [x]
 
         new_sources = []
 
         # Pre-attention input: pure AttnRes agg, or gated blend with residual (x) when attnres_gated, top k layers only
+        baseline_in = None
+        attnres_in = None
         use_pre_attn_here = (
             self.use_pre_attnres and
             self.layer_idx >= self.attnres_start_layer
@@ -211,7 +213,13 @@ class TransformerEncoderLayer(nn.Module):
                 mlp_in = mlpres_agg
         else:
             mlp_in = x_attn
-        x_out = mlp_in + self._ff_block(self.norm2(mlp_in))
+        ffn_in = self.norm2(mlp_in)
+        # sample_attnres PSD extras (if any) come from raw EEG via CBraMod.forward context, not here.
+        router_ctx: Optional[Dict[str, Tensor]] = None
+        moe = self.moe_ffn
+        if moe is not None and getattr(moe, "router_mode", "token") == "sample_attnres":
+            router_ctx = {"baseline": baseline_in, "attnres": attnres_in}
+        x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 
         # for final-only, collect only block outputs
         if self.attnres_variant == 'final':
@@ -243,9 +251,9 @@ class TransformerEncoderLayer(nn.Module):
         return self.dropout1(x)
 
     # feed forward block
-    def _ff_block(self, x: Tensor) -> Tensor:
+    def _ff_block(self, x: Tensor, router_context: Optional[Dict[str, Tensor]] = None) -> Tensor:
         if self.moe_ffn is not None:
-            return self.dropout2(self.moe_ffn(x))
+            return self.dropout2(self.moe_ffn(x, router_context=router_context))
         x = self.linear2(self.dropout(self.activation(self.linear1(x))))
         return self.dropout2(x)
 

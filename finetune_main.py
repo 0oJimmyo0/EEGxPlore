@@ -125,13 +125,13 @@ def main():
     parser.add_argument(
         '--moe_load_balance',
         type=float,
-        default=0.05,
+        default=0.0,
         help='Switch-style MoE load-balancing aux weight (0=off). Default 0.05 matches stable FACED MoE runs.',
     )
     parser.add_argument(
         '--moe_router_noise',
         type=float,
-        default=0.01,
+        default=0.0,
         help='Gaussian noise std on MoE router logits in training (0=off). Default 0.01; set 0 to ablate.',
     )
     parser.add_argument(
@@ -148,6 +148,32 @@ def main():
         '--moe_diagnostics',
         action='store_true',
         help='After each val epoch, log MoE expert usage / entropy / load-balance (one val batch, eval mode)',
+    )
+    parser.add_argument(
+        '--moe_router_mode',
+        type=str,
+        default='token',
+        choices=['token', 'sample_hidden', 'sample_attnres'],
+        help='MoE routing: token (default), sample_hidden (mean-pool FFN input per sample), '
+             'sample_attnres (pre-attn AttnRes: concat pooled baseline, attnres, diff → 3D router)',
+    )
+    parser.add_argument(
+        '--moe_router_arch',
+        type=str,
+        default='linear',
+        choices=['linear', 'mlp'],
+        help='MoE router head: linear or LayerNorm→Linear→GELU→Linear (hidden=moe_router_mlp_hidden)',
+    )
+    parser.add_argument(
+        '--moe_router_mlp_hidden',
+        type=int,
+        default=128,
+        help='Hidden size when --moe_router_arch mlp',
+    )
+    parser.add_argument(
+        '--moe_use_psd_router_features',
+        action='store_true',
+        help='sample_attnres only: concat 5-band log1p PSD from raw EEG (set with sample_attnres)',
     )
 
     params = parser.parse_args()
