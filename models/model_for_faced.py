@@ -32,6 +32,7 @@ class Model(nn.Module):
                 f"router_arch={getattr(param, 'moe_router_arch', 'linear')}, "
                 f"mlp_h={getattr(param, 'moe_router_mlp_hidden', 128)}, "
                 f"psd_router={getattr(param, 'moe_use_psd_router_features', False)}, "
+                f"expert_type={getattr(param, 'moe_expert_type', 'generic')}, "
                 f"warm_start_all_experts={init_all}"
             )
             if getattr(param, 'moe_shared_specialist', False):

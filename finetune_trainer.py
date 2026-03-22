@@ -1,6 +1,6 @@
-import copy
 import os
 from timeit import default_timer as timer
+from typing import Any, Dict
 
 import numpy as np
 import torch
@@ -13,6 +13,11 @@ from models.moe import (
     reset_moe_diagnostic_labels,
     set_moe_diagnostic_labels,
 )
+
+
+def _state_dict_to_cpu(model: torch.nn.Module) -> Dict[str, Any]:
+    """Checkpoint snapshot without deepcopy: avoids duplicating GPU weights (OOM on large models)."""
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
 class Trainer(object):
@@ -113,7 +118,8 @@ class Trainer(object):
             '[MoE diagnostics] one val batch, eval (no router noise)  '
             f"router_mode={getattr(self.params, 'moe_router_mode', '?')}  "
             f"router_arch={getattr(self.params, 'moe_router_arch', '?')}  "
-            f"psd_feats={getattr(self.params, 'moe_use_psd_router_features', False)}"
+            f"psd_feats={getattr(self.params, 'moe_use_psd_router_features', False)}  "
+            f"moe_expert_type={getattr(self.params, 'moe_expert_type', 'generic')}"
         )
         for i, layer in enumerate(bb.encoder.layers):
             m = getattr(layer, 'moe_ffn', None)
@@ -203,15 +209,11 @@ class Trainer(object):
                 kappa_best = kappa
                 f1_best = f1
                 cm_best = cm
-                #self.best_model_states = copy.deepcopy(self.model.state_dict())
-                self.best_model_states = {
-                    k: v.detach().cpu().clone()
-                    for k, v in self.model.state_dict().items()
-                }
+                self.best_model_states = _state_dict_to_cpu(self.model)
 
         if self.best_model_states is None:
             print('Warning: val kappa never improved; using last epoch weights for test/save.')
-            self.best_model_states = copy.deepcopy(self.model.state_dict())
+            self.best_model_states = _state_dict_to_cpu(self.model)
 
         self.model.load_state_dict(self.best_model_states)
         self.model.cuda()
@@ -290,10 +292,10 @@ class Trainer(object):
                     pr_auc_best = pr_auc
                     roc_auc_best = roc_auc
                     cm_best = cm
-                    self.best_model_states = copy.deepcopy(self.model.state_dict())
+                    self.best_model_states = _state_dict_to_cpu(self.model)
         if self.best_model_states is None:
             print('Warning: val roc_auc never improved; using last epoch weights.')
-            self.best_model_states = copy.deepcopy(self.model.state_dict())
+            self.best_model_states = _state_dict_to_cpu(self.model)
         self.model.load_state_dict(self.best_model_states)
         with torch.no_grad():
             print("***************************Test************************")
@@ -365,11 +367,11 @@ class Trainer(object):
                     corrcoef_best = corrcoef
                     r2_best = r2
                     rmse_best = rmse
-                    self.best_model_states = copy.deepcopy(self.model.state_dict())
+                    self.best_model_states = _state_dict_to_cpu(self.model)
 
         if self.best_model_states is None:
             print('Warning: val r2 never improved; using last epoch weights.')
-            self.best_model_states = copy.deepcopy(self.model.state_dict())
+            self.best_model_states = _state_dict_to_cpu(self.model)
         self.model.load_state_dict(self.best_model_states)
         with torch.no_grad():
             print("***************************Test************************")

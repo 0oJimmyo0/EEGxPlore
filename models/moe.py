@@ -22,6 +22,11 @@ _MOE_DIAG_LABELS: contextvars.ContextVar[Optional[Tensor]] = contextvars.Context
 _MOE_PSD_ROUTER: contextvars.ContextVar[Optional[Tensor]] = contextvars.ContextVar(
     "moe_psd_router", default=None
 )
+# Future FACED sample metadata (cohort, segment idx, age bucket, …) — not used by routers yet.
+_MOE_FACED_METADATA: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar(
+    "moe_faced_metadata", default=None
+)
+
 
 
 def set_moe_diagnostic_labels(labels: Optional[Tensor]) -> Any:
@@ -39,6 +44,15 @@ def set_moe_psd_router_features(psd: Optional[Tensor]) -> Any:
 
 def reset_moe_psd_router_features(token: Any) -> None:
     _MOE_PSD_ROUTER.reset(token)
+
+
+def set_moe_faced_metadata(meta: Optional[Dict[str, Any]]) -> Any:
+    """Placeholder for future cohort / segment index / age bucket (not consumed by routers yet)."""
+    return _MOE_FACED_METADATA.set(meta)
+
+
+def reset_moe_faced_metadata(token: Any) -> None:
+    _MOE_FACED_METADATA.reset(token)
 
 
 def compact_psd_bandpowers(x: Tensor, n_bands: int = PSD_ROUTER_DIM) -> Tensor:
@@ -81,15 +95,24 @@ def _make_router_head(d_in: int, num_experts: int, arch: str, hidden: int, facto
     return seq
 
 
+def _attnres_base_features(baseline: Tensor, attnres: Tensor) -> Tensor:
+    """[B, 3*d_model] sample-level AttnRes routing features (no PSD)."""
+    return torch.cat(
+        [
+            _spatial_mean_bc_sd(baseline),
+            _spatial_mean_bc_sd(attnres),
+            _spatial_mean_bc_sd(attnres - baseline),
+        ],
+        dim=-1,
+    )
+
+
 def _attnres_router_features(
     baseline: Tensor,
     attnres: Tensor,
     use_psd: bool,
 ) -> Tuple[Tensor, Optional[Tuple[List[float], List[float]]]]:
-    p0 = _spatial_mean_bc_sd(baseline)
-    p1 = _spatial_mean_bc_sd(attnres)
-    p2 = _spatial_mean_bc_sd(attnres - baseline)
-    parts: List[Tensor] = [p0, p1, p2]
+    feat = _attnres_base_features(baseline, attnres)
     psd_stats: Optional[Tuple[List[float], List[float]]] = None
     if use_psd:
         psd = _MOE_PSD_ROUTER.get()
@@ -97,14 +120,13 @@ def _attnres_router_features(
             raise ValueError(
                 "moe_use_psd_router_features=True requires raw-input PSD; ensure CBraMod.forward sets context."
             )
-        if psd.shape[0] != p0.shape[0] or psd.shape[-1] != PSD_ROUTER_DIM:
+        if psd.shape[0] != feat.shape[0] or psd.shape[-1] != PSD_ROUTER_DIM:
             raise ValueError(
-                f"PSD features expected [B,{PSD_ROUTER_DIM}], got {tuple(psd.shape)} for batch {p0.shape[0]}"
+                f"PSD features expected [B,{PSD_ROUTER_DIM}], got {tuple(psd.shape)} for batch {feat.shape[0]}"
             )
-        parts.append(psd)
+        feat = torch.cat([feat, psd], dim=-1)
         pd = psd.detach().float()
         psd_stats = (pd.mean(0).cpu().tolist(), pd.std(0).cpu().tolist())
-    feat = torch.cat(parts, dim=-1)
     return feat, psd_stats
 
 
@@ -614,6 +636,209 @@ class SharedSpecialistMoEFFN(nn.Module):
         return out.view(*leading, d)
 
 
+def _spectral_router_input_feats(
+    base_feat: Tensor,
+    use_psd: bool,
+) -> Tuple[Tensor, Optional[Tuple[List[float], List[float]]]]:
+    """Spectral bank: same AttnRes features as spatial, optionally + PSD (only spectral router)."""
+    if not use_psd:
+        return base_feat, None
+    psd = _MOE_PSD_ROUTER.get()
+    if psd is None:
+        raise ValueError(
+            "Spectral router with PSD requires moe_use_psd_router_features and CBraMod.forward PSD context."
+        )
+    if psd.shape[0] != base_feat.shape[0] or psd.shape[-1] != PSD_ROUTER_DIM:
+        raise ValueError(f"PSD expected [B,{PSD_ROUTER_DIM}], got {tuple(psd.shape)}")
+    out = torch.cat([base_feat, psd], dim=-1)
+    pd = psd.detach().float()
+    return out, (pd.mean(0).cpu().tolist(), pd.std(0).cpu().tolist())
+
+
+class TypedDualBankSharedMoEFFN(nn.Module):
+    """
+    Shared dense FFN + two specialist banks (spatial / spectral), one expert per bank per sample:
+    y = shared(x) + spatial_e(x) + spectral_e'(x). Routers: sample-level AttnRes features; PSD only on spectral.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        dim_feedforward: int,
+        num_specialists: int,
+        dropout: float,
+        activation: Union[str, Callable[[Tensor], Tensor]],
+        bias: bool = True,
+        router_noise_std: float = 0.0,
+        router_arch: str = "linear",
+        router_mlp_hidden: int = 128,
+        use_psd_router_features: bool = False,
+        device=None,
+        dtype=None,
+    ) -> None:
+        super().__init__()
+        if router_arch not in MOE_ROUTER_ARCHS:
+            raise ValueError(f"router_arch must be one of {MOE_ROUTER_ARCHS}, got {router_arch!r}")
+        factory_kwargs = {"device": device, "dtype": dtype}
+        activation_fn = _activation_from_arg(activation, factory_kwargs)
+
+        self.d_model = d_model
+        self.num_specialists = num_specialists
+        self.num_experts = num_specialists
+        self.top_k = 1
+        self.router_noise_std = router_noise_std
+        self.router_arch = router_arch
+        self.router_mlp_hidden = router_mlp_hidden
+        self.use_psd_router_features = use_psd_router_features
+        self.shared = ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
+
+        spatial_in = 3 * d_model
+        spectral_in = spatial_in + (PSD_ROUTER_DIM if use_psd_router_features else 0)
+        self.spatial_router = _make_router_head(
+            spatial_in, num_specialists, router_arch, router_mlp_hidden, factory_kwargs
+        )
+        self.spectral_router = _make_router_head(
+            spectral_in, num_specialists, router_arch, router_mlp_hidden, factory_kwargs
+        )
+        self.spatial_specialists = nn.ModuleList(
+            ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
+            for _ in range(num_specialists)
+        )
+        self.spectral_specialists = nn.ModuleList(
+            ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
+            for _ in range(num_specialists)
+        )
+        self._zero_specialist_output_weights()
+        self.last_diagnostics: Optional[Dict[str, Any]] = None
+        self.moe_kind = "typed_shared_specialist"
+
+    def _zero_specialist_output_weights(self) -> None:
+        for bank in (self.spatial_specialists, self.spectral_specialists):
+            for s in bank:
+                nn.init.zeros_(s.linear2.weight)
+                if s.linear2.bias is not None:
+                    nn.init.zeros_(s.linear2.bias)
+
+    def forward(self, x: Tensor, router_context: Optional[Dict[str, Tensor]] = None) -> Tensor:
+        leading = x.shape[:-1]
+        d = x.shape[-1]
+        x_flat = x.reshape(-1, d)
+        n_tokens = x_flat.size(0)
+        x_bt, b, t = _reshape_to_btd(x, d)
+        h_shared = self.shared(x_flat)
+
+        if router_context is None or router_context.get("baseline") is None or router_context.get("attnres") is None:
+            raise ValueError(
+                "TypedDualBankSharedMoEFFN requires router_context with 'baseline' and 'attnres' [B,C,S,D]."
+            )
+        baseline = router_context["baseline"]
+        attnres = router_context["attnres"]
+        if baseline.shape != x.shape or attnres.shape != x.shape:
+            raise ValueError("typed MoE: baseline/attnres must match FFN input shape [B,C,S,D]")
+
+        base_feat = _attnres_base_features(baseline, attnres)
+        spec_in, psd_stats = _spectral_router_input_feats(base_feat, self.use_psd_router_features)
+
+        logits_sp = self.spatial_router(base_feat)
+        logits_spec = self.spectral_router(spec_in)
+
+        if self.training and self.router_noise_std > 0:
+            logits_sp = logits_sp + torch.randn_like(logits_sp) * self.router_noise_std
+            logits_spec = logits_spec + torch.randn_like(logits_spec) * self.router_noise_std
+
+        rw_sp = F.softmax(logits_sp, dim=-1)
+        rw_spec = F.softmax(logits_spec, dim=-1)
+        sel_w_sp, sel_idx_sp = torch.topk(rw_sp, 1, dim=-1)
+        sel_w_spec, sel_idx_spec = torch.topk(rw_spec, 1, dim=-1)
+
+        E = self.num_specialists
+        lb_sp = x_flat.new_zeros(())
+        lb_s = x_flat.new_zeros(())
+        if self.training and b > 0:
+            dispatch_sp = torch.zeros(b, E, device=x.device, dtype=rw_sp.dtype)
+            dispatch_sp.scatter_(1, sel_idx_sp, 1.0)
+            fi_sp = dispatch_sp.mean(0).detach()
+            pi_sp = rw_sp.mean(0)
+            lb_sp = E * (fi_sp * pi_sp).sum()
+
+            dispatch_spec = torch.zeros(b, E, device=x.device, dtype=rw_spec.dtype)
+            dispatch_spec.scatter_(1, sel_idx_spec, 1.0)
+            fi_s = dispatch_spec.mean(0).detach()
+            pi_s = rw_spec.mean(0)
+            lb_s = E * (fi_s * pi_s).sum()
+            self._last_lb_loss = lb_sp + lb_s
+        else:
+            self._last_lb_loss = x_flat.new_zeros(())
+
+        batch_idx = torch.arange(b, device=x.device, dtype=torch.long).unsqueeze(1).expand(-1, t).reshape(-1)
+        per_tok_sp = sel_idx_sp.squeeze(-1)[batch_idx]
+        per_tok_spec = sel_idx_spec.squeeze(-1)[batch_idx]
+
+        res_sp = torch.zeros_like(x_flat)
+        res_spec = torch.zeros_like(x_flat)
+        for e in range(E):
+            m = per_tok_sp == e
+            if m.any():
+                res_sp[m] = self.spatial_specialists[e](x_flat[m])
+        for e in range(E):
+            m = per_tok_spec == e
+            if m.any():
+                res_spec[m] = self.spectral_specialists[e](x_flat[m])
+
+        out = h_shared + res_sp + res_spec
+        mean_shared = float(h_shared.float().norm(dim=-1).mean().item())
+        mean_n_sp = float(res_sp.float().norm(dim=-1).mean().item())
+        mean_n_spec = float(res_spec.float().norm(dim=-1).mean().item())
+
+        diag_sp = build_moe_diagnostic_dict(
+            logits_sp,
+            rw_sp,
+            sel_idx_sp,
+            sel_w_sp,
+            E,
+            1,
+            lb_sp.detach() if self.training else lb_sp,
+            routing_scope="sample",
+            mean_shared_output_norm=None,
+            mean_specialist_residual_norm=mean_n_sp,
+        )
+        diag_sp["moe_kind"] = "typed_bank_spatial"
+
+        diag_spec = build_moe_diagnostic_dict(
+            logits_spec,
+            rw_spec,
+            sel_idx_spec,
+            sel_w_spec,
+            E,
+            1,
+            lb_s.detach() if self.training else lb_s,
+            routing_scope="sample",
+            mean_shared_output_norm=None,
+            mean_specialist_residual_norm=mean_n_spec,
+        )
+        diag_spec["moe_kind"] = "typed_bank_spectral"
+
+        self.last_diagnostics = {
+            "moe_kind": "typed_shared_specialist",
+            "routing_scope": "sample",
+            "router_arch": self.router_arch,
+            "spatial_router_in_dim": 3 * self.d_model,
+            "spectral_router_in_dim": int(spec_in.shape[-1]),
+            "psd_on_spectral_router": self.use_psd_router_features,
+            "spatial": diag_sp,
+            "spectral": diag_spec,
+            "mean_shared_output_norm": mean_shared,
+            "mean_spatial_residual_norm": mean_n_sp,
+            "mean_spectral_residual_norm": mean_n_spec,
+            "moe_use_psd_router_features": self.use_psd_router_features,
+        }
+        if psd_stats is not None:
+            self.last_diagnostics["psd_feature_mean"] = psd_stats[0]
+            self.last_diagnostics["psd_feature_std"] = psd_stats[1]
+
+        return out.view(*leading, d)
+
+
 @torch.no_grad()
 def warm_start_sparse_moe_from_dense_ckpt(
     moe: SparseMoEFFN,
@@ -686,6 +911,45 @@ def warm_start_shared_specialist_from_dense_ckpt(
     moe._zero_specialist_output_weights()
 
 
+@torch.no_grad()
+def warm_start_typed_dual_bank_from_dense_ckpt(
+    moe: TypedDualBankSharedMoEFFN,
+    ckpt: Dict[str, Any],
+    layer_idx: int,
+    copy_dense_into_specialist_linear1: bool,
+) -> None:
+    """Shared path from dense; both banks get optional linear1 copy + symmetry noise; linear2 zero."""
+    p1w = f"encoder.layers.{layer_idx}.linear1.weight"
+    p1b = f"encoder.layers.{layer_idx}.linear1.bias"
+    p2w = f"encoder.layers.{layer_idx}.linear2.weight"
+    p2b = f"encoder.layers.{layer_idx}.linear2.bias"
+    for key in (p1w, p2w):
+        if key not in ckpt:
+            raise KeyError(f"Checkpoint missing {key} for typed MoE warm-start at layer {layer_idx}")
+    w1, w2 = ckpt[p1w], ckpt[p2w]
+    b1, b2 = ckpt.get(p1b), ckpt.get(p2b)
+
+    for mod in (moe.shared,):
+        mod.linear1.weight.copy_(w1)
+        mod.linear2.weight.copy_(w2)
+        if b1 is not None and mod.linear1.bias is not None:
+            mod.linear1.bias.copy_(b1)
+        if b2 is not None and mod.linear2.bias is not None:
+            mod.linear2.bias.copy_(b2)
+
+    _sym_eps = 1e-4
+    for bank in (moe.spatial_specialists, moe.spectral_specialists):
+        for spec in bank:
+            if copy_dense_into_specialist_linear1:
+                spec.linear1.weight.copy_(w1)
+                if b1 is not None and spec.linear1.bias is not None:
+                    spec.linear1.bias.copy_(b1)
+                spec.linear1.weight.add_(torch.randn_like(spec.linear1.weight) * _sym_eps)
+                if spec.linear1.bias is not None:
+                    spec.linear1.bias.add_(torch.randn_like(spec.linear1.bias) * _sym_eps)
+    moe._zero_specialist_output_weights()
+
+
 def warm_start_moe_from_dense_ckpt(
     moe: nn.Module,
     ckpt: Dict[str, Any],
@@ -696,15 +960,54 @@ def warm_start_moe_from_dense_ckpt(
 ) -> None:
     """Dispatch warm-start for replacement MoE vs shared+specialist MoE."""
     if moe_shared_specialist:
-        warm_start_shared_specialist_from_dense_ckpt(
-            moe, ckpt, layer_idx, copy_dense_into_specialist_linear1=copy_specialist_linear1_from_dense
-        )
+        if isinstance(moe, TypedDualBankSharedMoEFFN):
+            warm_start_typed_dual_bank_from_dense_ckpt(
+                moe, ckpt, layer_idx, copy_dense_into_specialist_linear1=copy_specialist_linear1_from_dense
+            )
+        else:
+            warm_start_shared_specialist_from_dense_ckpt(
+                moe, ckpt, layer_idx, copy_dense_into_specialist_linear1=copy_specialist_linear1_from_dense
+            )
     else:
         warm_start_sparse_moe_from_dense_ckpt(moe, ckpt, layer_idx, copy_to_all_experts)
 
 
+def _format_typed_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[str]:
+    lines = [
+        f"  [MoE L{layer_idx}] kind=typed_shared_specialist  scope=sample  "
+        f"router_arch={diag.get('router_arch')}  "
+        f"spatial_in_dim={diag.get('spatial_router_in_dim')}  "
+        f"spectral_in_dim={diag.get('spectral_router_in_dim')}  "
+        f"psd_on_spectral={diag.get('psd_on_spectral_router')}  "
+        f"||shared||={diag.get('mean_shared_output_norm', 0):.4f}  "
+        f"||spatial_res||={diag.get('mean_spatial_residual_norm', 0):.4f}  "
+        f"||spectral_res||={diag.get('mean_spectral_residual_norm', 0):.4f}",
+    ]
+    if diag.get("psd_feature_mean") is not None and diag.get("psd_feature_std") is not None:
+        lines.append(
+            f"    psd_mean={ [round(v, 4) for v in diag['psd_feature_mean']]}  "
+            f"psd_std={ [round(v, 4) for v in diag['psd_feature_std']]}"
+        )
+    for label, key in (("spatial bank", "spatial"), ("spectral bank", "spectral")):
+        sub = diag.get(key)
+        if not isinstance(sub, dict):
+            continue
+        lines.append(
+            f"    [{label}] H={sub.get('mean_entropy', 0):.4f}  max_expert_frac={sub.get('max_expert_fraction', 0):.4f}  "
+            f"lb={sub.get('lb_loss', 0):.6f}  ||res||={sub.get('mean_specialist_residual_norm', 0):.4f}"
+        )
+        lines.append(f"      hist_top1: {sub.get('top1_histogram')}  frac: {sub.get('fraction_per_expert')}")
+        if sub.get("mean_entropy_by_class") is not None:
+            lines.append(f"      H_mean_by_class: {[round(h, 4) for h in sub['mean_entropy_by_class']]}")
+        if sub.get("per_expert_class_histogram") is not None:
+            lines.append(f"      per_expert_class_hist: {sub['per_expert_class_histogram']}")
+    return lines
+
+
 def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[str]:
     """Human-readable lines for logging."""
+    if diag.get("moe_kind") == "typed_shared_specialist":
+        return _format_typed_moe_diagnostics_lines(layer_idx, diag)
     scope = diag.get("routing_scope", "token")
     n_u = diag.get("n_routing_units", diag.get("n_tokens", 0))
     r_arch = diag.get("router_arch", "linear")

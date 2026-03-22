@@ -57,9 +57,6 @@ def main():
     parser.add_argument('--foundation_dir', type=str,
                         default='/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth',
                         help='foundation_dir')
-    parser.add_argument('--use_attnres', action='store_true',
-                    help='replace standard residuals with Full AttnRes')
-
     parser.add_argument('--attnres_final_output', type=str, default='attnres',
                     choices=['attnres', 'last_source'],
                     help='how to form the encoder output in AttnRes mode')
@@ -71,6 +68,7 @@ def main():
         default='none',
         choices=['none', 'final', 'pre_attn', 'pre_mlp', 'full'],
         help='Encoder path: none=original CBraMod stack; other values add FullAttnRes ablations. '
+             'This is the only switch for AttnRes in finetuning (do not use a separate use_attnres flag). '
              'Finetuning uses the same optimizer/scheduler as none (see finetune_trainer).',
     )
     parser.add_argument(
@@ -174,6 +172,14 @@ def main():
         '--moe_use_psd_router_features',
         action='store_true',
         help='sample_attnres only: concat 5-band log1p PSD from raw EEG (set with sample_attnres)',
+    )
+    parser.add_argument(
+        '--moe_expert_type',
+        type=str,
+        default='generic',
+        choices=['generic', 'typed'],
+        help='With --moe_shared_specialist: generic=one specialist pool; typed=spatial+spectral banks '
+             '(requires --moe_router_mode sample_attnres --moe_top_k 1). PSD attaches only to spectral router.',
     )
 
     params = parser.parse_args()
