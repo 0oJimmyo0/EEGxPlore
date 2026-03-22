@@ -2,8 +2,8 @@
 #SBATCH --job-name=FACED_TUNE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_hier_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_hier_%j.err
-#SBATCH --partition=gpu_devel
-#SBATCH --gres=gpu:a40:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -21,9 +21,10 @@ downstream_dataset=FACED
 dataset_dir=/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/FACED
 
 # -------------------------
-# output (use a unique path per experiment family)
+# output — use a different subdir per MoE mode so runs do not overwrite each other
+#   e.g. FACED_moe_opt (replacement) vs FACED_moe_shared_spec (shared + specialists)
 # -------------------------
-model_dir=/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/${downstream_dataset}_moe_opt
+model_dir=/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/${downstream_dataset}_moe_shared_spec
 mkdir -p "$model_dir"
 
 # -------------------------
@@ -40,13 +41,14 @@ seed=3407
 cuda_id=0
 
 # -------------------------
-# Recommended MoE baseline (before you add new MoE modules):
-#   --attnres_variant none     strongest FACED test acc in recent sweeps (~0.585 κ~0.53)
-#   --moe_top_k 1              simpler router, slightly faster than k=2
-#   moe_load_balance / moe_router_noise: defaults in finetune_main.py are now 0.05 / 0.01
+# This job: shared dense FFN + routed specialist residuals + per-epoch MoE diagnostics.
+#   --moe_shared_specialist   pretrained dense always on; specialists start with zero output
+#   --moe_diagnostics         after each val epoch, log histogram / entropy / lb / etc. (one val batch)
 #
-# Recent reference (same hparams): MoE-only > AttnRes+MoE on test; pre_attn+k2 ~0.58 after LB fix;
-# final/full ~0.578–0.579. Re-enable AttnRes only when comparing, not as default MoE shell.
+# Replacement MoE baseline (no shared path): omit --moe_shared_specialist, use model_dir ..._moe_opt
+#
+# Optional: --moe_specialist_rand_linear1  (full Kaiming linear1; default dense copy + 1e-4 symmetry noise)
+# Optional: --moe_top_k 2  to log top1 vs top2 stats in diagnostics
 # -------------------------
 python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py \
   --seed "$seed" \
@@ -65,19 +67,23 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py
   --model_dir "$model_dir" \
   --label_smoothing "$label_smoothing" \
   --num_workers 8 \
-  --attnres_variant none \
+  --attnres_variant pre_attn \
   --use_pretrained_weights \
   --moe \
+  --moe_shared_specialist \
+  --moe_diagnostics \
+  --moe_specialist_rand_linear1 \
   --moe_num_layers 2 \
   --moe_num_experts 4 \
   --moe_top_k 1
 
-# Explicit tuning (optional; matches new argparse defaults — omit to use defaults):
-#   --moe_load_balance 0.05 --moe_router_noise 0.01
-
 # -------------------------
 # Optional experiments (comment main block above, uncomment one)
 # -------------------------
+# Replacement MoE only (compare acc vs shared+specialist):
+# model_dir=.../FACED_moe_opt
+#   ... same flags but NO --moe_shared_specialist, NO --moe_diagnostics (optional add diagnostics)
+#
 # MoE + pre_attn, warmer gate, top-2 experts (~0.58 test in 1400054):
 #   --attnres_variant pre_attn --attnres_start_layer 6 \
 #   --attnres_gated --attnres_gate_init -1.0 \

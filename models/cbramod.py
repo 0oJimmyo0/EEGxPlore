@@ -5,7 +5,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.criss_cross_transformer import TransformerEncoderLayer, TransformerEncoder
-from models.moe import SparseMoEFFN, warm_start_moe_from_dense_ckpt
+from models.moe import (
+    SharedSpecialistMoEFFN,
+    SparseMoEFFN,
+    warm_start_moe_from_dense_ckpt,
+)
 
 
 class CBraMod(nn.Module):
@@ -28,6 +32,8 @@ class CBraMod(nn.Module):
         moe_num_experts=4,
         moe_top_k=1,
         moe_router_noise_std=0.0,
+        moe_shared_specialist=False,
+        moe_specialist_linear1_from_dense=True,
     ):
         super().__init__()
 
@@ -40,15 +46,26 @@ class CBraMod(nn.Module):
             for idx in range(n_layer):
                 moe_mod = None
                 if idx >= moe_start:
-                    moe_mod = SparseMoEFFN(
-                        d_model=d_model,
-                        dim_feedforward=dim_feedforward,
-                        num_experts=moe_num_experts,
-                        top_k=moe_top_k,
-                        dropout=dropout,
-                        activation=F.gelu,
-                        router_noise_std=moe_router_noise_std,
-                    )
+                    if moe_shared_specialist:
+                        moe_mod = SharedSpecialistMoEFFN(
+                            d_model=d_model,
+                            dim_feedforward=dim_feedforward,
+                            num_specialists=moe_num_experts,
+                            top_k=moe_top_k,
+                            dropout=dropout,
+                            activation=F.gelu,
+                            router_noise_std=moe_router_noise_std,
+                        )
+                    else:
+                        moe_mod = SparseMoEFFN(
+                            d_model=d_model,
+                            dim_feedforward=dim_feedforward,
+                            num_experts=moe_num_experts,
+                            top_k=moe_top_k,
+                            dropout=dropout,
+                            activation=F.gelu,
+                            router_noise_std=moe_router_noise_std,
+                        )
                 layers_list.append(
                     TransformerEncoderLayer(
                         d_model=d_model,
@@ -101,6 +118,11 @@ class CBraMod(nn.Module):
 
         self.proj_out = nn.Sequential(nn.Linear(d_model, out_dim))
         self.apply(_weights_init)
+        if use_moe and moe_shared_specialist:
+            for li, layer in enumerate(self.encoder.layers):
+                m = getattr(layer, 'moe_ffn', None)
+                if isinstance(m, SharedSpecialistMoEFFN):
+                    m._zero_specialist_output_weights()
 
     def forward(self, x, mask=None):
         patch_emb = self.patch_embedding(x, mask)
@@ -207,6 +229,8 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_num_experts': getattr(param, 'moe_num_experts', 4),
         'moe_top_k': getattr(param, 'moe_top_k', 1),
         'moe_router_noise_std': getattr(param, 'moe_router_noise', 0.0),
+        'moe_shared_specialist': getattr(param, 'moe_shared_specialist', False),
+        'moe_specialist_linear1_from_dense': not getattr(param, 'moe_specialist_rand_linear1', False),
     }
 
 
@@ -217,7 +241,13 @@ def _moe_warm_started_expert_keys(backbone: nn.Module) -> Set[str]:
             continue
         prefix = f'encoder.layers.{idx}.moe_ffn.'
         for k in backbone.state_dict().keys():
-            if k.startswith(prefix) and '.experts.' in k:
+            if not k.startswith(prefix):
+                continue
+            if '.experts.' in k:
+                keys.add(k)
+            if '.shared.' in k:
+                keys.add(k)
+            if '.specialists.' in k and '.linear1.' in k:
                 keys.add(k)
     return keys
 
@@ -240,11 +270,20 @@ def load_foundation_into_backbone(backbone: nn.Module, param, ckpt_state: Dict[s
         moe_n = min(getattr(param, 'moe_num_layers', 2), n)
         copy_all = not getattr(param, 'moe_expert_zero_only', False)
         start = max(0, n - moe_n)
+        moe_ss = getattr(param, 'moe_shared_specialist', False)
+        spec_l1 = not getattr(param, 'moe_specialist_rand_linear1', False)
         for idx in range(start, n):
             layer = backbone.encoder.layers[idx]
             if layer.moe_ffn is None:
                 continue
-            warm_start_moe_from_dense_ckpt(layer.moe_ffn, ckpt_state, idx, copy_all)
+            warm_start_moe_from_dense_ckpt(
+                layer.moe_ffn,
+                ckpt_state,
+                idx,
+                copy_all,
+                moe_shared_specialist=moe_ss,
+                copy_specialist_linear1_from_dense=spec_l1,
+            )
 
     if attnres == 'none' and not use_moe:
         backbone.load_state_dict(ckpt_state, strict=True)

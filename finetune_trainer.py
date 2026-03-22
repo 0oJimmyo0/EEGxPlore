@@ -8,6 +8,7 @@ from torch.nn import CrossEntropyLoss, BCEWithLogitsLoss, MSELoss
 from tqdm import tqdm
 
 from finetune_evaluator import Evaluator
+from models.moe import format_moe_diagnostics_lines
 
 
 class Trainer(object):
@@ -80,6 +81,34 @@ class Trainer(object):
         aux = bb.moe_auxiliary_loss()
         return loss + coef * aux
 
+    def _log_moe_diagnostics(self):
+        if not getattr(self.params, 'moe_diagnostics', False) or not getattr(self.params, 'moe', False):
+            return
+        bb = getattr(self.model, 'backbone', None)
+        if bb is None or not hasattr(bb, 'encoder'):
+            return
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            batch = next(iter(self.data_loader['val']))
+        except StopIteration:
+            if was_training:
+                self.model.train()
+            return
+        x = batch[0].cuda()
+        with torch.no_grad():
+            _ = self.model(x)
+        print('[MoE diagnostics] one val batch, eval (no router noise)')
+        for i, layer in enumerate(bb.encoder.layers):
+            m = getattr(layer, 'moe_ffn', None)
+            diag = getattr(m, 'last_diagnostics', None) if m is not None else None
+            if diag is None:
+                continue
+            for line in format_moe_diagnostics_lines(i, diag):
+                print(line)
+        if was_training:
+            self.model.train()
+
     def train_for_multiclass(self):
         """Same optimizer/schedule for baseline (--attnres_variant none) and AttnRes variants.
 
@@ -144,6 +173,7 @@ class Trainer(object):
                         gate_vals.append(f"L{i}:" + ",".join(parts))
                 if len(gate_vals) > 0:
                     print("[Gate values] " + " | ".join(gate_vals))
+            self._log_moe_diagnostics()
             print(cm)
             if kappa > kappa_best:
                 print("kappa increasing....saving weights !! ")
@@ -231,6 +261,7 @@ class Trainer(object):
                     )
                 )
                 print(cm)
+                self._log_moe_diagnostics()
                 if roc_auc > roc_auc_best:
                     print("roc_auc increasing....saving weights !! ")
                     print("Val Evaluation: acc: {:.5f}, pr_auc: {:.5f}, roc_auc: {:.5f}".format(
@@ -306,6 +337,7 @@ class Trainer(object):
                         (timer() - start_time) / 60
                     )
                 )
+                self._log_moe_diagnostics()
                 if r2 > r2_best:
                     print("r2 increasing....saving weights !! ")
                     print("Val Evaluation: corrcoef: {:.5f}, r2: {:.5f}, rmse: {:.5f}".format(

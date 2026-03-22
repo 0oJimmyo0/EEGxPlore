@@ -24,11 +24,21 @@ class Model(nn.Module):
         print(f"[FACED] attnres_start_layer = {param.attnres_start_layer}")
         if getattr(param, 'moe', False):
             init_all = not getattr(param, 'moe_expert_zero_only', False)
+            mode = "shared_specialist+dense" if getattr(param, 'moe_shared_specialist', False) else "replace"
             print(
-                f"[FACED] MoE: top-{param.moe_num_layers} layers, "
-                f"experts={param.moe_num_experts}, top_k={param.moe_top_k}, "
+                f"[FACED] MoE ({mode}): top-{param.moe_num_layers} layers, "
+                f"experts/specialists={param.moe_num_experts}, top_k={param.moe_top_k}, "
                 f"warm_start_all_experts={init_all}"
             )
+            if getattr(param, 'moe_shared_specialist', False):
+                print(
+                    "[FACED] specialist linear1: "
+                    + (
+                        "dense copy"
+                        if not getattr(param, 'moe_specialist_rand_linear1', False)
+                        else "kaiming"
+                    )
+                )
         self.pretrained_param_names = set()
 
         if param.use_pretrained_weights:

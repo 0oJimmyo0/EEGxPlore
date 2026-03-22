@@ -134,6 +134,21 @@ def main():
         default=0.01,
         help='Gaussian noise std on MoE router logits in training (0=off). Default 0.01; set 0 to ablate.',
     )
+    parser.add_argument(
+        '--moe_shared_specialist',
+        action='store_true',
+        help='MoE: keep pretrained dense FFN as shared path; routed specialists add residual (vs full replacement)',
+    )
+    parser.add_argument(
+        '--moe_specialist_rand_linear1',
+        action='store_true',
+        help='With --moe_shared_specialist: Kaiming specialist linear1 instead of dense copy (+symmetry noise)',
+    )
+    parser.add_argument(
+        '--moe_diagnostics',
+        action='store_true',
+        help='After each val epoch, log MoE expert usage / entropy / load-balance (one val batch, eval mode)',
+    )
 
     params = parser.parse_args()
     print(params)
