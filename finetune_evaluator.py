@@ -1,8 +1,10 @@
+from typing import Optional
+
 import numpy as np
 import torch
 from sklearn.metrics import balanced_accuracy_score, f1_score, confusion_matrix, cohen_kappa_score, roc_auc_score, \
     precision_recall_curve, auc, r2_score, mean_squared_error
-from tqdm import tqdm
+from utils.tqdm_auto import tqdm_auto
 
 
 class Evaluator:
@@ -10,12 +12,15 @@ class Evaluator:
         self.params = params
         self.data_loader = data_loader
 
-    def get_metrics_for_multiclass(self, model):
+    def get_metrics_for_multiclass(self, model, epoch_for_log: Optional[int] = None):
         model.eval()
 
         truths = []
         preds = []
-        for x, y in tqdm(self.data_loader, mininterval=1):
+        for batch_idx, batch in enumerate(tqdm_auto(self.data_loader, self.params, mininterval=1)):
+            if batch_idx == 0 and epoch_for_log is not None:
+                print(f"entered first val batch for epoch {epoch_for_log}", flush=True)
+            x, y = batch[0], batch[1]
             x = x.cuda()
             y = y.cuda()
 
@@ -25,6 +30,10 @@ class Evaluator:
             truths += y.cpu().squeeze().numpy().tolist()
             preds += pred_y.cpu().squeeze().numpy().tolist()
 
+        if epoch_for_log is not None:
+            print(f"finished validation loop for epoch {epoch_for_log}", flush=True)
+        print("starting confusion matrix / metrics aggregation", flush=True)
+
         truths = np.array(truths)
         preds = np.array(preds)
         acc = balanced_accuracy_score(truths, preds)
@@ -33,13 +42,16 @@ class Evaluator:
         cm = confusion_matrix(truths, preds)
         return acc, kappa, f1, cm
 
-    def get_metrics_for_binaryclass(self, model):
+    def get_metrics_for_binaryclass(self, model, epoch_for_log: Optional[int] = None):
         model.eval()
 
         truths = []
         preds = []
         scores = []
-        for x, y in tqdm(self.data_loader, mininterval=1):
+        for batch_idx, batch in enumerate(tqdm_auto(self.data_loader, self.params, mininterval=1)):
+            if batch_idx == 0 and epoch_for_log is not None:
+                print(f"entered first val batch for epoch {epoch_for_log}", flush=True)
+            x, y = batch[0], batch[1]
             x = x.cuda()
             y = y.cuda()
             pred = model(x)
@@ -48,6 +60,10 @@ class Evaluator:
             truths += y.long().cpu().squeeze().numpy().tolist()
             preds += pred_y.cpu().squeeze().numpy().tolist()
             scores += score_y.cpu().numpy().tolist()
+
+        if epoch_for_log is not None:
+            print(f"finished validation loop for epoch {epoch_for_log}", flush=True)
+        print("starting confusion matrix / metrics aggregation", flush=True)
 
         truths = np.array(truths)
         preds = np.array(preds)
@@ -59,17 +75,24 @@ class Evaluator:
         cm = confusion_matrix(truths, preds)
         return acc, pr_auc, roc_auc, cm
 
-    def get_metrics_for_regression(self, model):
+    def get_metrics_for_regression(self, model, epoch_for_log: Optional[int] = None):
         model.eval()
 
         truths = []
         preds = []
-        for x, y in tqdm(self.data_loader, mininterval=1):
+        for batch_idx, batch in enumerate(tqdm_auto(self.data_loader, self.params, mininterval=1)):
+            if batch_idx == 0 and epoch_for_log is not None:
+                print(f"entered first val batch for epoch {epoch_for_log}", flush=True)
+            x, y = batch[0], batch[1]
             x = x.cuda()
             y = y.cuda()
             pred = model(x)
             truths += y.cpu().squeeze().numpy().tolist()
             preds += pred.cpu().squeeze().numpy().tolist()
+
+        if epoch_for_log is not None:
+            print(f"finished validation loop for epoch {epoch_for_log}", flush=True)
+        print("starting confusion matrix / metrics aggregation", flush=True)
 
         truths = np.array(truths)
         preds = np.array(preds)

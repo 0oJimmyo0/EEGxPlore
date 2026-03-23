@@ -12,8 +12,10 @@ class CustomDataset(Dataset):
             self,
             data_dir,
             mode='train',
+            return_keys: bool = False,
     ):
         super(CustomDataset, self).__init__()
+        self.return_keys = return_keys
         self.db = lmdb.open(data_dir, readonly=True, lock=False, readahead=True, meminit=False)
         with self.db.begin(write=False) as txn:
             self.keys = pickle.loads(txn.get('__keys__'.encode()))[mode]
@@ -23,13 +25,22 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx):
         key = self.keys[idx]
+        enc = key.encode() if isinstance(key, str) else key
         with self.db.begin(write=False) as txn:
-            pair = pickle.loads(txn.get(key.encode()))
+            pair = pickle.loads(txn.get(enc))
         data = pair['sample']
         label = pair['label']
-        return data/100, label
+        kstr = key.decode() if isinstance(key, bytes) else str(key)
+        if self.return_keys:
+            return data / 100, label, kstr
+        return data / 100, label
 
     def collate(self, batch):
+        if self.return_keys:
+            x_data = np.array([x[0] for x in batch])
+            y_label = np.array([x[1] for x in batch])
+            keys = [x[2] for x in batch]
+            return to_tensor(x_data), to_tensor(y_label).long(), keys
         x_data = np.array([x[0] for x in batch])
         y_label = np.array([x[1] for x in batch])
         return to_tensor(x_data), to_tensor(y_label).long()
@@ -41,9 +52,10 @@ class LoadDataset(object):
         self.datasets_dir = params.datasets_dir
 
     def get_data_loader(self):
-        train_set = CustomDataset(self.datasets_dir, mode='train')
-        val_set = CustomDataset(self.datasets_dir, mode='val')
-        test_set = CustomDataset(self.datasets_dir, mode='test')
+        rk = getattr(self.params, "return_sample_keys", False)
+        train_set = CustomDataset(self.datasets_dir, mode='train', return_keys=rk)
+        val_set = CustomDataset(self.datasets_dir, mode='val', return_keys=rk)
+        test_set = CustomDataset(self.datasets_dir, mode='test', return_keys=rk)
         print(len(train_set), len(val_set), len(test_set))
         print(len(train_set)+len(val_set)+len(test_set))
         data_loader = {

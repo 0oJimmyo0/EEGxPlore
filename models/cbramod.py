@@ -199,7 +199,11 @@ class CBraMod(nn.Module):
                 reset_moe_faced_metadata(tok_meta)
 
     def moe_auxiliary_loss(self) -> torch.Tensor:
-        """Sum of per-layer Switch-style load-balancing terms (multiply by --moe_load_balance in trainer)."""
+        """Sum of per-layer Switch-style load-balancing terms (multiply by --moe_load_balance in trainer).
+
+        When moe_load_balance is 0, finetune_trainer clears each layer's _last_lb_loss after optimizer.step()
+        so stale graph-carrying scalars are not kept across steps.
+        """
         device = next(self.parameters()).device
         tot = torch.zeros((), device=device, dtype=torch.float32)
         for layer in self.encoder.layers:

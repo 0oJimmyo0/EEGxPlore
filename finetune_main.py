@@ -182,6 +182,39 @@ def main():
              '(requires --moe_router_mode sample_attnres --moe_top_k 1). PSD attaches only to spectral router.',
     )
 
+    parser.add_argument(
+        '--tqdm',
+        dest='use_tqdm',
+        action='store_true',
+        help='Force tqdm progress bars even when stderr is not a TTY (e.g. batch logs).',
+    )
+    parser.add_argument(
+        '--no-tqdm',
+        dest='use_tqdm',
+        action='store_false',
+        help='Disable tqdm (recommended on cluster to avoid quota issues from progress bar writes).',
+    )
+    parser.set_defaults(use_tqdm=None)
+
+    parser.add_argument(
+        '--routing_export_dir',
+        type=str,
+        default='',
+        help='FACED typed MoE: after training, write per-sample routing CSVs under this directory (empty=off).',
+    )
+    parser.add_argument(
+        '--routing_export_splits',
+        type=str,
+        default='test',
+        help='Comma-separated: val, test (default: test only).',
+    )
+    parser.add_argument(
+        '--faced_meta_csv',
+        type=str,
+        default='/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv',
+        help='Recording_info.csv for cohort / sample rate / age join (analysis export only).',
+    )
+
     params = parser.parse_args()
     print(params)
 
@@ -189,6 +222,7 @@ def main():
     torch.cuda.set_device(params.cuda)
     print('The downstream dataset is {}'.format(params.downstream_dataset))
     if params.downstream_dataset == 'FACED':
+        params.return_sample_keys = bool(getattr(params, 'routing_export_dir', None))
         load_dataset = faced_dataset.LoadDataset(params)
         data_loader = load_dataset.get_data_loader()
         model = model_for_faced.Model(params)

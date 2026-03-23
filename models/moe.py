@@ -836,6 +836,21 @@ class TypedDualBankSharedMoEFFN(nn.Module):
             self.last_diagnostics["psd_feature_mean"] = psd_stats[0]
             self.last_diagnostics["psd_feature_std"] = psd_stats[1]
 
+        with torch.no_grad():
+            eps = 1e-10
+            ent_sp = -(rw_sp * (rw_sp.clamp_min(eps)).log()).sum(dim=-1)
+            ent_sc = -(rw_spec * (rw_spec.clamp_min(eps)).log()).sum(dim=-1)
+        self._routing_export_cache = {
+            "logits_spatial": logits_sp.detach().cpu(),
+            "logits_spectral": logits_spec.detach().cpu(),
+            "probs_spatial": rw_sp.detach().cpu(),
+            "probs_spectral": rw_spec.detach().cpu(),
+            "entropy_spatial": ent_sp.cpu(),
+            "entropy_spectral": ent_sc.cpu(),
+            "expert_spatial": sel_idx_sp.squeeze(-1).detach().cpu(),
+            "expert_spectral": sel_idx_spec.squeeze(-1).detach().cpu(),
+        }
+
         return out.view(*leading, d)
 
 
