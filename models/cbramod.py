@@ -81,12 +81,11 @@ class CBraMod(nn.Module):
                                 raise ValueError(
                                     "moe_expert_type=typed requires moe_router_mode=sample_attnres"
                                 )
-                            if moe_top_k != 1:
-                                raise ValueError("moe_expert_type=typed requires moe_top_k=1")
                             moe_mod = TypedDualBankSharedMoEFFN(
                                 d_model=d_model,
                                 dim_feedforward=dim_feedforward,
                                 num_specialists=moe_num_experts,
+                                top_k=moe_top_k,
                                 dropout=dropout,
                                 activation=F.gelu,
                                 router_noise_std=moe_router_noise_std,

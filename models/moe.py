@@ -657,8 +657,9 @@ def _spectral_router_input_feats(
 
 class TypedDualBankSharedMoEFFN(nn.Module):
     """
-    Shared dense FFN + two specialist banks (spatial / spectral), one expert per bank per sample:
-    y = shared(x) + spatial_e(x) + spectral_e'(x). Routers: sample-level AttnRes features; PSD only on spectral.
+    Shared dense FFN + two specialist banks (spatial / spectral), top_k experts per bank per sample:
+    y = shared(x) + sum_k w_sp,k * spatial_{e_sp,k}(x) + sum_k w_spec,k * spectral_{e_spec,k}(x).
+    Routers: sample-level AttnRes features; PSD only on spectral.
     """
 
     def __init__(
@@ -666,6 +667,7 @@ class TypedDualBankSharedMoEFFN(nn.Module):
         d_model: int,
         dim_feedforward: int,
         num_specialists: int,
+        top_k: int,
         dropout: float,
         activation: Union[str, Callable[[Tensor], Tensor]],
         bias: bool = True,
@@ -682,10 +684,12 @@ class TypedDualBankSharedMoEFFN(nn.Module):
         factory_kwargs = {"device": device, "dtype": dtype}
         activation_fn = _activation_from_arg(activation, factory_kwargs)
 
+        if top_k < 1 or top_k > num_specialists:
+            raise ValueError(f"top_k must be in [1, num_specialists], got top_k={top_k}, num_specialists={num_specialists}")
         self.d_model = d_model
         self.num_specialists = num_specialists
         self.num_experts = num_specialists
-        self.top_k = 1
+        self.top_k = top_k
         self.router_noise_std = router_noise_std
         self.router_arch = router_arch
         self.router_mlp_hidden = router_mlp_hidden
@@ -748,21 +752,27 @@ class TypedDualBankSharedMoEFFN(nn.Module):
 
         rw_sp = F.softmax(logits_sp, dim=-1)
         rw_spec = F.softmax(logits_spec, dim=-1)
-        sel_w_sp, sel_idx_sp = torch.topk(rw_sp, 1, dim=-1)
-        sel_w_spec, sel_idx_spec = torch.topk(rw_spec, 1, dim=-1)
+        sel_w_sp, sel_idx_sp = torch.topk(rw_sp, self.top_k, dim=-1)
+        sel_w_spec, sel_idx_spec = torch.topk(rw_spec, self.top_k, dim=-1)
+        sel_w_sp = sel_w_sp / (sel_w_sp.sum(dim=-1, keepdim=True) + 1e-9)
+        sel_w_spec = sel_w_spec / (sel_w_spec.sum(dim=-1, keepdim=True) + 1e-9)
 
         E = self.num_specialists
         lb_sp = x_flat.new_zeros(())
         lb_s = x_flat.new_zeros(())
         if self.training and b > 0:
             dispatch_sp = torch.zeros(b, E, device=x.device, dtype=rw_sp.dtype)
-            dispatch_sp.scatter_(1, sel_idx_sp, 1.0)
+            dispatch_sp.scatter_(
+                1, sel_idx_sp, torch.ones_like(sel_idx_sp, dtype=dispatch_sp.dtype)
+            )
             fi_sp = dispatch_sp.mean(0).detach()
             pi_sp = rw_sp.mean(0)
             lb_sp = E * (fi_sp * pi_sp).sum()
 
             dispatch_spec = torch.zeros(b, E, device=x.device, dtype=rw_spec.dtype)
-            dispatch_spec.scatter_(1, sel_idx_spec, 1.0)
+            dispatch_spec.scatter_(
+                1, sel_idx_spec, torch.ones_like(sel_idx_spec, dtype=dispatch_spec.dtype)
+            )
             fi_s = dispatch_spec.mean(0).detach()
             pi_s = rw_spec.mean(0)
             lb_s = E * (fi_s * pi_s).sum()
@@ -771,19 +781,31 @@ class TypedDualBankSharedMoEFFN(nn.Module):
             self._last_lb_loss = x_flat.new_zeros(())
 
         batch_idx = torch.arange(b, device=x.device, dtype=torch.long).unsqueeze(1).expand(-1, t).reshape(-1)
-        per_tok_sp = sel_idx_sp.squeeze(-1)[batch_idx]
-        per_tok_spec = sel_idx_spec.squeeze(-1)[batch_idx]
 
         res_sp = torch.zeros_like(x_flat)
         res_spec = torch.zeros_like(x_flat)
-        for e in range(E):
-            m = per_tok_sp == e
-            if m.any():
-                res_sp[m] = self.spatial_specialists[e](x_flat[m])
-        for e in range(E):
-            m = per_tok_spec == e
-            if m.any():
-                res_spec[m] = self.spectral_specialists[e](x_flat[m])
+        for ki in range(self.top_k):
+            idx_sp_k = sel_idx_sp[:, ki]
+            w_sp_k = sel_w_sp[:, ki]
+            per_tok_sp = idx_sp_k[batch_idx]
+            per_tok_w_sp = w_sp_k[batch_idx]
+            for e in range(E):
+                m = per_tok_sp == e
+                if m.any():
+                    res_sp[m] = res_sp[m] + per_tok_w_sp[m].unsqueeze(-1) * self.spatial_specialists[e](
+                        x_flat[m]
+                    )
+        for ki in range(self.top_k):
+            idx_spec_k = sel_idx_spec[:, ki]
+            w_spec_k = sel_w_spec[:, ki]
+            per_tok_spec = idx_spec_k[batch_idx]
+            per_tok_w_spec = w_spec_k[batch_idx]
+            for e in range(E):
+                m = per_tok_spec == e
+                if m.any():
+                    res_spec[m] = res_spec[m] + per_tok_w_spec[m].unsqueeze(-1) * self.spectral_specialists[e](
+                        x_flat[m]
+                    )
 
         out = h_shared + res_sp + res_spec
         mean_shared = float(h_shared.float().norm(dim=-1).mean().item())
@@ -796,7 +818,7 @@ class TypedDualBankSharedMoEFFN(nn.Module):
             sel_idx_sp,
             sel_w_sp,
             E,
-            1,
+            self.top_k,
             lb_sp.detach() if self.training else lb_sp,
             routing_scope="sample",
             mean_shared_output_norm=None,
@@ -810,7 +832,7 @@ class TypedDualBankSharedMoEFFN(nn.Module):
             sel_idx_spec,
             sel_w_spec,
             E,
-            1,
+            self.top_k,
             lb_s.detach() if self.training else lb_s,
             routing_scope="sample",
             mean_shared_output_norm=None,
@@ -847,8 +869,8 @@ class TypedDualBankSharedMoEFFN(nn.Module):
             "probs_spectral": rw_spec.detach().cpu(),
             "entropy_spatial": ent_sp.cpu(),
             "entropy_spectral": ent_sc.cpu(),
-            "expert_spatial": sel_idx_sp.squeeze(-1).detach().cpu(),
-            "expert_spectral": sel_idx_spec.squeeze(-1).detach().cpu(),
+            "expert_spatial": sel_idx_sp[:, 0].detach().cpu(),
+            "expert_spectral": sel_idx_spec[:, 0].detach().cpu(),
         }
 
         return out.view(*leading, d)

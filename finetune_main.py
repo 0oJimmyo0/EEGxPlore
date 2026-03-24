@@ -123,13 +123,13 @@ def main():
     parser.add_argument(
         '--moe_load_balance',
         type=float,
-        default=0.0,
+        default=0.005,
         help='Switch-style MoE load-balancing aux weight (0=off). Default 0.05 matches stable FACED MoE runs.',
     )
     parser.add_argument(
         '--moe_router_noise',
         type=float,
-        default=0.0,
+        default=0.005,
         help='Gaussian noise std on MoE router logits in training (0=off). Default 0.01; set 0 to ablate.',
     )
     parser.add_argument(
@@ -213,6 +213,12 @@ def main():
         type=str,
         default='/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv',
         help='Recording_info.csv for cohort / sample rate / age join (analysis export only).',
+    )
+    parser.add_argument(
+        '--routing_run_name',
+        type=str,
+        default='',
+        help='Optional label stored in per-sample routing CSV (e.g. Slurm job id); analysis only.',
     )
 
     params = parser.parse_args()

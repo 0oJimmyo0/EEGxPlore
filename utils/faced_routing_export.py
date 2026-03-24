@@ -54,12 +54,23 @@ def export_facced_routing_split(
     num_e = moe.num_specialists
     base = f"faced_routing_{split}_e{epoch_tag}_{checkpoint_tag}".replace(" ", "_")
     per_path = os.path.join(out_dir, f"{base}_per_sample.csv")
+    md = getattr(params, "model_dir", "") or ""
+    model_dir_basename = os.path.basename(os.path.normpath(md)) if md else ""
+    routing_run_name = str(getattr(params, "routing_run_name", "") or "")
+
+    print("[routing_export] entered exporter", flush=True)
+    print(f"[routing_export] split={split!r} out_dir={out_dir!r}", flush=True)
+    print(f"[routing_export] per_sample path={per_path!r}", flush=True)
 
     rows: List[Dict[str, Any]] = []
     dataset_index = 0
+    _first_routing_batch = True
 
     model.eval()
     for batch in tqdm_auto(data_loader, params, desc=f"routing[{split}]", mininterval=2):
+        if _first_routing_batch:
+            print(f"[routing_export] first batch len(batch)={len(batch)} (expect 3 if sample keys on)", flush=True)
+            _first_routing_batch = False
         if len(batch) == 3:
             x, y, keys = batch
         else:
@@ -72,6 +83,9 @@ def export_facced_routing_split(
         conf, pred_cls = prob.max(dim=-1)
 
         rc = getattr(moe, "_routing_export_cache", None)
+        has_cache = rc is not None
+        if dataset_index == 0:
+            print(f"[routing_export] after first forward: _routing_export_cache present={has_cache}", flush=True)
         if rc is None:
             raise RuntimeError("MoE did not set _routing_export_cache (forward typed MoE layer?)")
 
@@ -91,6 +105,8 @@ def export_facced_routing_split(
                 "dataset_index": dataset_index,
                 "epoch_tag": epoch_tag,
                 "checkpoint_tag": checkpoint_tag,
+                "model_dir_basename": model_dir_basename,
+                "routing_run_name": routing_run_name,
                 "lmdb_key": key,
                 "subject_id": str(meta.get("sub_id", "") or ""),
                 "true_label": y_i,

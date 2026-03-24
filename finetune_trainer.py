@@ -363,25 +363,55 @@ class Trainer(object):
                         acc,
                         kappa,
                         f1,
-                    )
+                    ),
+                    flush=True,
                 )
-                print(cm)
-                if not os.path.isdir(self.params.model_dir):
-                    os.makedirs(self.params.model_dir)
-                model_path = self.params.model_dir + "/epoch{}_acc_{:.5f}_kappa_{:.5f}_f1_{:.5f}.pth".format(
-                    best_f1_epoch, acc, kappa, f1)
-                torch.save(self.model.state_dict(), model_path)
-                print("model save in " + model_path)
+                print(cm, flush=True)
+                print("[post_test] after test confusion matrix", flush=True)
 
                 rd = getattr(self.params, "routing_export_dir", None) or ""
-                if self.params.downstream_dataset == "FACED" and rd:
-                    try:
+                model_path = ""
+                try:
+                    print("[post_test] before checkpoint save", flush=True)
+                    if not os.path.isdir(self.params.model_dir):
+                        os.makedirs(self.params.model_dir)
+                    model_path = self.params.model_dir + "/epoch{}_acc_{:.5f}_kappa_{:.5f}_f1_{:.5f}.pth".format(
+                        best_f1_epoch, acc, kappa, f1
+                    )
+                    ck_tag = os.path.basename(model_path).replace(".pth", "")
+                    epoch_tag = f"best_ep{best_f1_epoch}"
+                    raw_splits = getattr(self.params, "routing_export_splits", "test") or "test"
+                    split_list = [s.strip() for s in raw_splits.split(",") if s.strip()]
+                    print(
+                        "[post_test] expected routing per-sample pattern: "
+                        f"faced_routing_<split>_e{epoch_tag}_<checkpoint_tag>_per_sample.csv "
+                        f"(checkpoint_tag={ck_tag!r})",
+                        flush=True,
+                    )
+                    for sp in split_list:
+                        print(
+                            f"[post_test]   example: faced_routing_{sp}_e{epoch_tag}_{ck_tag}_per_sample.csv",
+                            flush=True,
+                        )
+
+                    torch.save(self.model.state_dict(), model_path)
+                    print("[post_test] after checkpoint save", flush=True)
+                    exists = os.path.isfile(model_path)
+                    sz = os.path.getsize(model_path) if exists else -1
+                    print(
+                        f"[post_test] checkpoint exists on disk: {exists} path={model_path!r} size_bytes={sz}",
+                        flush=True,
+                    )
+                    print("model save in " + model_path, flush=True)
+
+                    print(
+                        f"[post_test] before routing export routing_export_dir={rd!r} downstream={self.params.downstream_dataset!r}",
+                        flush=True,
+                    )
+                    if self.params.downstream_dataset == "FACED" and rd:
                         from utils.faced_routing_export import export_facced_routing_split
 
-                        ck_tag = os.path.basename(model_path).replace(".pth", "")
-                        raw = getattr(self.params, "routing_export_splits", "test") or "test"
-                        splits = [s.strip() for s in raw.split(",") if s.strip()]
-                        for sp in splits:
+                        for sp in split_list:
                             if sp not in self.data_loader:
                                 print(f"[routing_export] skip unknown split {sp!r}", flush=True)
                                 continue
@@ -390,12 +420,16 @@ class Trainer(object):
                                 self.data_loader[sp],
                                 self.params,
                                 sp,
-                                f"best_ep{best_f1_epoch}",
+                                epoch_tag,
                                 ck_tag,
                             )
-                    except Exception as ex:
-                        print(f"[routing_export] failed: {ex!r}", flush=True)
-                        traceback.print_exc()
+                    print("[post_test] after routing export", flush=True)
+                except Exception:
+                    print("[post_test] EXCEPTION in checkpoint save / routing export block", flush=True)
+                    traceback.print_exc()
+                    print(f"[post_test] model_path={model_path!r}", flush=True)
+                    print(f"[post_test] routing_export_dir={rd!r}", flush=True)
+                    raise
         except Exception as e:
             _cuda_oom = getattr(torch.cuda, "OutOfMemoryError", None)
             if _cuda_oom is not None and isinstance(e, _cuda_oom):
