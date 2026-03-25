@@ -7,6 +7,15 @@ from sklearn.metrics import balanced_accuracy_score, f1_score, confusion_matrix,
 from utils.tqdm_auto import tqdm_auto
 
 
+def _forward_with_optional_meta(model, x, batch_meta):
+    if batch_meta is None:
+        return model(x)
+    try:
+        return model(x, batch_meta=batch_meta)
+    except TypeError:
+        return model(x)
+
+
 class Evaluator:
     def __init__(self, params, data_loader):
         self.params = params
@@ -24,7 +33,10 @@ class Evaluator:
             x = x.cuda()
             y = y.cuda()
 
-            pred = model(x)
+            batch_meta = None
+            if len(batch) >= 4 and isinstance(batch[3], dict):
+                batch_meta = {k: v.cuda(non_blocking=True) for k, v in batch[3].items() if torch.is_tensor(v)}
+            pred = _forward_with_optional_meta(model, x, batch_meta)
             pred_y = torch.max(pred, dim=-1)[1]
 
             truths += y.cpu().squeeze().numpy().tolist()
@@ -54,7 +66,10 @@ class Evaluator:
             x, y = batch[0], batch[1]
             x = x.cuda()
             y = y.cuda()
-            pred = model(x)
+            batch_meta = None
+            if len(batch) >= 4 and isinstance(batch[3], dict):
+                batch_meta = {k: v.cuda(non_blocking=True) for k, v in batch[3].items() if torch.is_tensor(v)}
+            pred = _forward_with_optional_meta(model, x, batch_meta)
             score_y = torch.sigmoid(pred)
             pred_y = torch.gt(score_y, 0.5).long()
             truths += y.long().cpu().squeeze().numpy().tolist()
@@ -86,7 +101,10 @@ class Evaluator:
             x, y = batch[0], batch[1]
             x = x.cuda()
             y = y.cuda()
-            pred = model(x)
+            batch_meta = None
+            if len(batch) >= 4 and isinstance(batch[3], dict):
+                batch_meta = {k: v.cuda(non_blocking=True) for k, v in batch[3].items() if torch.is_tensor(v)}
+            pred = _forward_with_optional_meta(model, x, batch_meta)
             truths += y.cpu().squeeze().numpy().tolist()
             preds += pred.cpu().squeeze().numpy().tolist()
 

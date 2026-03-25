@@ -214,17 +214,14 @@ class TransformerEncoderLayer(nn.Module):
         else:
             mlp_in = x_attn
         ffn_in = self.norm2(mlp_in)
-        # sample_attnres + typed dual-bank MoE need pre-attn baseline/attnres [B,C,S,D] (not here: PSD from backbone).
+        # typed_capacity_domain MoE needs pre-attn baseline/attnres [B,C,S,D] (PSD is set from backbone context).
         router_ctx: Optional[Dict[str, Tensor]] = None
         moe = self.moe_ffn
-        needs_pre_attn_ctx = moe is not None and (
-            getattr(moe, "router_mode", None) == "sample_attnres"
-            or getattr(moe, "moe_kind", "") == "typed_shared_specialist"
-        )
+        needs_pre_attn_ctx = moe is not None and getattr(moe, "moe_kind", "") == "typed_capacity_domain"
         if needs_pre_attn_ctx:
             if baseline_in is None or attnres_in is None:
                 raise ValueError(
-                    "MoE (sample_attnres or typed_shared_specialist) requires pre-attn AttnRes on this layer: "
+                    "MoE typed_capacity_domain requires pre-attn AttnRes on this layer: "
                     "use attnres_variant pre_attn or full, attnres_start_layer <= layer index, and ensure "
                     "the MoE layer is not above the last layer with pre-attn (see CBraMod typed MoE guard)."
                 )

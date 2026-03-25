@@ -6,9 +6,7 @@ import torch.nn.functional as F
 
 from models.criss_cross_transformer import TransformerEncoderLayer, TransformerEncoder
 from models.moe import (
-    SharedSpecialistMoEFFN,
-    SparseMoEFFN,
-    TypedDualBankSharedMoEFFN,
+    TypedCapacityDomainMoEFFN,
     compact_psd_bandpowers,
     reset_moe_faced_metadata,
     reset_moe_psd_router_features,
@@ -36,91 +34,59 @@ class CBraMod(nn.Module):
         use_moe=False,
         moe_num_layers=2,
         moe_num_experts=4,
-        moe_top_k=1,
-        moe_router_noise_std=0.0,
-        moe_shared_specialist=False,
+        moe_route_mode: str = "typed_capacity_domain",
+        moe_capacity_factor: float = 1.0,
+        moe_domain_bias: bool = False,
+        moe_domain_emb_dim: int = 16,
         moe_specialist_linear1_from_dense=True,
-        moe_router_mode: str = "token",
         moe_router_arch: str = "linear",
         moe_router_mlp_hidden: int = 128,
         moe_use_psd_router_features: bool = False,
-        moe_expert_type: str = "generic",
+        moe_load_balance: float = 0.0,
+        moe_domain_bias_reg: float = 0.0,
     ):
         super().__init__()
 
         self.use_moe = use_moe
         self.moe_use_psd_router_features = bool(moe_use_psd_router_features)
-        self.moe_expert_type = moe_expert_type
-        if use_moe and moe_expert_type == "typed" and not moe_shared_specialist:
-            raise ValueError("moe_expert_type=typed requires moe_shared_specialist=True")
+        self.moe_route_mode = moe_route_mode
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         if use_moe:
             moe_num_layers = min(max(1, moe_num_layers), n_layer)
             moe_start = n_layer - moe_num_layers
-            if moe_shared_specialist and (
-                moe_expert_type == "typed" or moe_router_mode == "sample_attnres"
-            ):
-                if attnres_variant not in ("pre_attn", "full"):
-                    raise ValueError(
-                        "sample_attnres / typed MoE requires attnres_variant pre_attn or full "
-                        "(pre-attn AttnRes path for router inputs)."
-                    )
-                if attnres_start_layer > moe_start:
-                    raise ValueError(
-                        f"attnres_start_layer must be <= first MoE layer index ({moe_start}); "
-                        f"got {attnres_start_layer}. Otherwise MoE runs without baseline/attnres."
-                    )
+            if moe_route_mode != "typed_capacity_domain":
+                raise ValueError("Only moe_route_mode=typed_capacity_domain is supported")
+            if attnres_variant not in ("pre_attn", "full"):
+                raise ValueError(
+                    "typed_capacity_domain requires attnres_variant pre_attn or full "
+                    "(pre-attn AttnRes path for router inputs)."
+                )
+            if attnres_start_layer > moe_start:
+                raise ValueError(
+                    f"attnres_start_layer must be <= first MoE layer index ({moe_start}); "
+                    f"got {attnres_start_layer}. Otherwise MoE runs without baseline/attnres."
+                )
             layers_list = []
             for idx in range(n_layer):
                 moe_mod = None
                 if idx >= moe_start:
-                    if moe_shared_specialist:
-                        if moe_expert_type == "typed":
-                            if moe_router_mode != "sample_attnres":
-                                raise ValueError(
-                                    "moe_expert_type=typed requires moe_router_mode=sample_attnres"
-                                )
-                            moe_mod = TypedDualBankSharedMoEFFN(
-                                d_model=d_model,
-                                dim_feedforward=dim_feedforward,
-                                num_specialists=moe_num_experts,
-                                top_k=moe_top_k,
-                                dropout=dropout,
-                                activation=F.gelu,
-                                router_noise_std=moe_router_noise_std,
-                                router_arch=moe_router_arch,
-                                router_mlp_hidden=moe_router_mlp_hidden,
-                                use_psd_router_features=moe_use_psd_router_features,
-                            )
-                        else:
-                            moe_mod = SharedSpecialistMoEFFN(
-                                d_model=d_model,
-                                dim_feedforward=dim_feedforward,
-                                num_specialists=moe_num_experts,
-                                top_k=moe_top_k,
-                                dropout=dropout,
-                                activation=F.gelu,
-                                router_noise_std=moe_router_noise_std,
-                                router_mode=moe_router_mode,
-                                router_arch=moe_router_arch,
-                                router_mlp_hidden=moe_router_mlp_hidden,
-                                use_psd_router_features=moe_use_psd_router_features,
-                            )
-                    else:
-                        moe_mod = SparseMoEFFN(
-                            d_model=d_model,
-                            dim_feedforward=dim_feedforward,
-                            num_experts=moe_num_experts,
-                            top_k=moe_top_k,
-                            dropout=dropout,
-                            activation=F.gelu,
-                            router_noise_std=moe_router_noise_std,
-                            router_mode=moe_router_mode,
-                            router_arch=moe_router_arch,
-                            router_mlp_hidden=moe_router_mlp_hidden,
-                            use_psd_router_features=moe_use_psd_router_features,
-                        )
+                    moe_mod = TypedCapacityDomainMoEFFN(
+                        d_model=d_model,
+                        dim_feedforward=dim_feedforward,
+                        num_specialists=moe_num_experts,
+                        dropout=dropout,
+                        activation=F.gelu,
+                        route_mode=moe_route_mode,
+                        capacity_factor=moe_capacity_factor,
+                        domain_bias=moe_domain_bias,
+                        domain_emb_dim=moe_domain_emb_dim,
+                        router_arch=moe_router_arch,
+                        router_mlp_hidden=moe_router_mlp_hidden,
+                        use_psd_router_features=moe_use_psd_router_features,
+                        load_balance_coef=moe_load_balance,
+                        domain_bias_reg_coef=moe_domain_bias_reg,
+                    )
                 layers_list.append(
                     TransformerEncoderLayer(
                         d_model=d_model,
@@ -173,19 +139,19 @@ class CBraMod(nn.Module):
 
         self.proj_out = nn.Sequential(nn.Linear(d_model, out_dim))
         self.apply(_weights_init)
-        if use_moe and moe_shared_specialist:
+        if use_moe:
             for li, layer in enumerate(self.encoder.layers):
                 m = getattr(layer, 'moe_ffn', None)
-                if isinstance(m, (SharedSpecialistMoEFFN, TypedDualBankSharedMoEFFN)):
+                if isinstance(m, TypedCapacityDomainMoEFFN):
                     m._zero_specialist_output_weights()
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, batch_meta=None):
         tok_psd = None
         tok_meta = None
         if self.use_moe and self.moe_use_psd_router_features:
             tok_psd = set_moe_psd_router_features(compact_psd_bandpowers(x))
-        if self.use_moe:
-            tok_meta = set_moe_faced_metadata(None)
+        if self.use_moe and self.moe_route_mode == "typed_capacity_domain":
+            tok_meta = set_moe_faced_metadata(batch_meta)
         try:
             patch_emb = self.patch_embedding(x, mask)
             feats = self.encoder(patch_emb)
@@ -198,18 +164,15 @@ class CBraMod(nn.Module):
                 reset_moe_faced_metadata(tok_meta)
 
     def moe_auxiliary_loss(self) -> torch.Tensor:
-        """Sum of per-layer Switch-style load-balancing terms (multiply by --moe_load_balance in trainer).
-
-        When moe_load_balance is 0, finetune_trainer clears each layer's _last_lb_loss after optimizer.step()
-        so stale graph-carrying scalars are not kept across steps.
-        """
+        """Combined MoE auxiliary loss from all active MoE layers."""
         device = next(self.parameters()).device
         tot = torch.zeros((), device=device, dtype=torch.float32)
         for layer in self.encoder.layers:
             moe = getattr(layer, 'moe_ffn', None)
             if moe is None:
                 continue
-            tot = tot + moe._last_lb_loss.to(dtype=tot.dtype)
+            if hasattr(moe, 'auxiliary_loss'):
+                tot = tot + moe.auxiliary_loss().to(dtype=tot.dtype)
         return tot
 
 class PatchEmbedding(nn.Module):
@@ -296,15 +259,16 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'use_moe': getattr(param, 'moe', False),
         'moe_num_layers': getattr(param, 'moe_num_layers', 2),
         'moe_num_experts': getattr(param, 'moe_num_experts', 4),
-        'moe_top_k': getattr(param, 'moe_top_k', 1),
-        'moe_router_noise_std': getattr(param, 'moe_router_noise', 0.0),
-        'moe_shared_specialist': getattr(param, 'moe_shared_specialist', False),
+        'moe_route_mode': getattr(param, 'moe_route_mode', 'typed_capacity_domain'),
+        'moe_capacity_factor': getattr(param, 'moe_capacity_factor', 1.0),
+        'moe_domain_bias': getattr(param, 'moe_domain_bias', False),
+        'moe_domain_emb_dim': getattr(param, 'moe_domain_emb_dim', 16),
         'moe_specialist_linear1_from_dense': not getattr(param, 'moe_specialist_rand_linear1', False),
-        'moe_router_mode': getattr(param, 'moe_router_mode', 'token'),
         'moe_router_arch': getattr(param, 'moe_router_arch', 'linear'),
         'moe_router_mlp_hidden': getattr(param, 'moe_router_mlp_hidden', 128),
         'moe_use_psd_router_features': getattr(param, 'moe_use_psd_router_features', False),
-        'moe_expert_type': getattr(param, 'moe_expert_type', 'generic'),
+        'moe_load_balance': getattr(param, 'moe_load_balance', 0.0),
+        'moe_domain_bias_reg': getattr(param, 'moe_domain_bias_reg', 0.0),
     }
 
 
@@ -320,8 +284,6 @@ def _moe_warm_started_expert_keys(backbone: nn.Module) -> Set[str]:
             if '.experts.' in k:
                 keys.add(k)
             if '.shared.' in k:
-                keys.add(k)
-            if '.specialists.' in k and '.linear1.' in k:
                 keys.add(k)
             if '.spatial_specialists.' in k and '.linear1.' in k:
                 keys.add(k)
@@ -346,9 +308,7 @@ def load_foundation_into_backbone(backbone: nn.Module, param, ckpt_state: Dict[s
     if use_moe:
         n = backbone.encoder.num_layers
         moe_n = min(getattr(param, 'moe_num_layers', 2), n)
-        copy_all = not getattr(param, 'moe_expert_zero_only', False)
         start = max(0, n - moe_n)
-        moe_ss = getattr(param, 'moe_shared_specialist', False)
         spec_l1 = not getattr(param, 'moe_specialist_rand_linear1', False)
         for idx in range(start, n):
             layer = backbone.encoder.layers[idx]
@@ -358,8 +318,6 @@ def load_foundation_into_backbone(backbone: nn.Module, param, ckpt_state: Dict[s
                 layer.moe_ffn,
                 ckpt_state,
                 idx,
-                copy_all,
-                moe_shared_specialist=moe_ss,
                 copy_specialist_linear1_from_dense=spec_l1,
             )
 

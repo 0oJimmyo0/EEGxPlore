@@ -23,27 +23,17 @@ class Model(nn.Module):
         print(f"[FACED] attnres_gate_init = {param.attnres_gate_init}")
         print(f"[FACED] attnres_start_layer = {param.attnres_start_layer}")
         if getattr(param, 'moe', False):
-            init_all = not getattr(param, 'moe_expert_zero_only', False)
-            mode = "shared_specialist+dense" if getattr(param, 'moe_shared_specialist', False) else "replace"
             print(
-                f"[FACED] MoE ({mode}): top-{param.moe_num_layers} layers, "
-                f"experts/specialists={param.moe_num_experts}, top_k={param.moe_top_k}, "
-                f"router_mode={getattr(param, 'moe_router_mode', 'token')}, "
-                f"router_arch={getattr(param, 'moe_router_arch', 'linear')}, "
-                f"mlp_h={getattr(param, 'moe_router_mlp_hidden', 128)}, "
+                f"[FACED] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "
+                f"experts/bank={param.moe_num_experts}, "
+                f"route_mode={getattr(param, 'moe_route_mode', 'typed_capacity_domain')}, "
+                f"capacity_factor={getattr(param, 'moe_capacity_factor', 1.0)}, "
                 f"psd_router={getattr(param, 'moe_use_psd_router_features', False)}, "
-                f"expert_type={getattr(param, 'moe_expert_type', 'generic')}, "
-                f"warm_start_all_experts={init_all}"
+                f"domain_bias={getattr(param, 'moe_domain_bias', False)}, "
+                f"domain_emb_dim={getattr(param, 'moe_domain_emb_dim', 16)}, "
+                f"moe_load_balance={getattr(param, 'moe_load_balance', 0.0)}, "
+                f"moe_domain_bias_reg={getattr(param, 'moe_domain_bias_reg', 0.0)}"
             )
-            if getattr(param, 'moe_shared_specialist', False):
-                print(
-                    "[FACED] specialist linear1: "
-                    + (
-                        "dense copy"
-                        if not getattr(param, 'moe_specialist_rand_linear1', False)
-                        else "kaiming"
-                    )
-                )
         self.pretrained_param_names = set()
 
         if param.use_pretrained_weights:
@@ -109,7 +99,7 @@ class Model(nn.Module):
         print(f'Loaded pretrained params: {len(self.pretrained_param_names)}')
         print(f'New params: {len(self.new_param_names)}')
 
-    def forward(self, x):
-        feats = self.backbone(x)
+    def forward(self, x, batch_meta=None):
+        feats = self.backbone(x, batch_meta=batch_meta)
         out = self.classifier(feats)
         return out

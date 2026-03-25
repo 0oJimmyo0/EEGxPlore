@@ -95,7 +95,7 @@ def main():
     parser.add_argument(
         '--moe',
         action='store_true',
-        help='Replace dense FFN with sparse MoE in the top encoder layers (see --moe_num_layers, ...)',
+        help='Enable typed routed MoE in the top encoder layers.',
     )
     parser.add_argument(
         '--moe_num_layers',
@@ -107,79 +107,53 @@ def main():
         '--moe_num_experts',
         type=int,
         default=4,
-        help='Experts per MoE layer',
+        help='Experts per MoE layer for spatial/spectral specialist banks.',
     )
     parser.add_argument(
-        '--moe_top_k',
-        type=int,
-        default=1,
-        help='Top-k experts per token (load-balancing aux is normalized by k so scale matches k=1)',
+        '--moe_route_mode',
+        type=str,
+        default='typed_capacity_domain',
+        choices=['typed_capacity_domain'],
+        help='Routed MoE mode (single supported mode in this refactor).',
     )
     parser.add_argument(
-        '--moe_expert_zero_only',
-        action='store_true',
-        help='MoE warm-start: copy pretrained dense FFN only into expert 0 (default: copy into all experts)',
+        '--moe_capacity_factor',
+        type=float,
+        default=1.0,
+        help='Per-expert capacity factor for top-1 routing (capacity=ceil(factor*B/E)).',
     )
     parser.add_argument(
         '--moe_load_balance',
         type=float,
         default=0.005,
-        help='Switch-style MoE load-balancing aux weight (0=off). Default 0.05 matches stable FACED MoE runs.',
+        help='Load-balance auxiliary coefficient (0=off).',
     )
     parser.add_argument(
-        '--moe_router_noise',
+        '--moe_domain_bias',
+        action='store_true',
+        help='Enable additive domain-aware logit bias (zero-init).',
+    )
+    parser.add_argument(
+        '--moe_domain_emb_dim',
+        type=int,
+        default=16,
+        help='Domain metadata embedding dim for domain-aware routing bias.',
+    )
+    parser.add_argument(
+        '--moe_domain_bias_reg',
         type=float,
-        default=0.005,
-        help='Gaussian noise std on MoE router logits in training (0=off). Default 0.01; set 0 to ablate.',
-    )
-    parser.add_argument(
-        '--moe_shared_specialist',
-        action='store_true',
-        help='MoE: keep pretrained dense FFN as shared path; routed specialists add residual (vs full replacement)',
-    )
-    parser.add_argument(
-        '--moe_specialist_rand_linear1',
-        action='store_true',
-        help='With --moe_shared_specialist: Kaiming specialist linear1 instead of dense copy (+symmetry noise)',
+        default=0.0,
+        help='Domain-bias regularization coefficient (0=off).',
     )
     parser.add_argument(
         '--moe_diagnostics',
         action='store_true',
-        help='After each val epoch, log MoE expert usage / entropy / load-balance (one val batch, eval mode)',
-    )
-    parser.add_argument(
-        '--moe_router_mode',
-        type=str,
-        default='token',
-        choices=['token', 'sample_hidden', 'sample_attnres'],
-        help='MoE routing: token (default), sample_hidden (mean-pool FFN input per sample), '
-             'sample_attnres (pre-attn AttnRes: concat pooled baseline, attnres, diff → 3D router)',
-    )
-    parser.add_argument(
-        '--moe_router_arch',
-        type=str,
-        default='linear',
-        choices=['linear', 'mlp'],
-        help='MoE router head: linear or LayerNorm→Linear→GELU→Linear (hidden=moe_router_mlp_hidden)',
-    )
-    parser.add_argument(
-        '--moe_router_mlp_hidden',
-        type=int,
-        default=128,
-        help='Hidden size when --moe_router_arch mlp',
+        help='After each val epoch, log MoE routing/capacity diagnostics (one val batch, eval mode).',
     )
     parser.add_argument(
         '--moe_use_psd_router_features',
         action='store_true',
-        help='sample_attnres only: concat 5-band log1p PSD from raw EEG (set with sample_attnres)',
-    )
-    parser.add_argument(
-        '--moe_expert_type',
-        type=str,
-        default='generic',
-        choices=['generic', 'typed'],
-        help='With --moe_shared_specialist: generic=one specialist pool; typed=spatial+spectral banks '
-             '(requires --moe_router_mode sample_attnres --moe_top_k 1). PSD attaches only to spectral router.',
+        help='Append PSD features to the spectral bank router only.',
     )
 
     parser.add_argument(
@@ -212,7 +186,7 @@ def main():
         '--faced_meta_csv',
         type=str,
         default='/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv',
-        help='Recording_info.csv for cohort / sample rate / age join (analysis export only).',
+        help='Recording_info.csv used for FACED domain ids (routing) and export joins.',
     )
     parser.add_argument(
         '--routing_run_name',
@@ -229,6 +203,7 @@ def main():
     print('The downstream dataset is {}'.format(params.downstream_dataset))
     if params.downstream_dataset == 'FACED':
         params.return_sample_keys = bool(getattr(params, 'routing_export_dir', None))
+        params.return_domain_ids = bool(getattr(params, 'moe', False) and params.moe_route_mode == 'typed_capacity_domain')
         load_dataset = faced_dataset.LoadDataset(params)
         data_loader = load_dataset.get_data_loader()
         model = model_for_faced.Model(params)

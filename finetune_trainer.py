@@ -62,6 +62,25 @@ def _state_dict_to_cpu(model: torch.nn.Module) -> Dict[str, Any]:
     return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
+def _move_meta_to_cuda(batch_meta):
+    if not isinstance(batch_meta, dict):
+        return None
+    out = {}
+    for k, v in batch_meta.items():
+        if torch.is_tensor(v):
+            out[k] = v.cuda(non_blocking=True)
+    return out
+
+
+def _forward_with_optional_meta(model, x, batch_meta):
+    if batch_meta is None:
+        return model(x)
+    try:
+        return model(x, batch_meta=batch_meta)
+    except TypeError:
+        return model(x)
+
+
 class Trainer(object):
     def __init__(self, params, data_loader, model):
         self.params = params
@@ -122,15 +141,14 @@ class Trainer(object):
 
         print(self.model)
 
-    def _add_moe_load_balance_loss(self, loss):
-        coef = float(getattr(self.params, 'moe_load_balance', 0.0) or 0.0)
-        if coef <= 0 or not getattr(self.params, 'moe', False):
+    def _add_moe_auxiliary_loss(self, loss):
+        if not getattr(self.params, 'moe', False):
             return loss
         bb = getattr(self.model, 'backbone', None)
         if bb is None or not hasattr(bb, 'moe_auxiliary_loss'):
             return loss
         aux = bb.moe_auxiliary_loss()
-        return loss + coef * aux
+        return loss + aux
 
     def _log_moe_diagnostics(self):
         if not getattr(self.params, 'moe_diagnostics', False) or not getattr(self.params, 'moe', False):
@@ -147,21 +165,21 @@ class Trainer(object):
                 self.model.train()
             return
         x = batch[0].cuda()
+        batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
         label_tok = None
         if len(batch) > 1:
             label_tok = set_moe_diagnostic_labels(batch[1].cuda())
         try:
             with torch.no_grad():
-                _ = self.model(x)
+                _ = _forward_with_optional_meta(self.model, x, batch_meta)
         finally:
             if label_tok is not None:
                 reset_moe_diagnostic_labels(label_tok)
         print(
             '[MoE diagnostics] one val batch, eval (no router noise)  '
-            f"router_mode={getattr(self.params, 'moe_router_mode', '?')}  "
-            f"router_arch={getattr(self.params, 'moe_router_arch', '?')}  "
+            f"route_mode={getattr(self.params, 'moe_route_mode', '?')}  "
             f"psd_feats={getattr(self.params, 'moe_use_psd_router_features', False)}  "
-            f"moe_expert_type={getattr(self.params, 'moe_expert_type', 'generic')}"
+            f"domain_bias={getattr(self.params, 'moe_domain_bias', False)}"
         )
         for i, layer in enumerate(bb.encoder.layers):
             m = getattr(layer, 'moe_ffn', None)
@@ -175,22 +193,6 @@ class Trainer(object):
 
     def _model_dir(self) -> str:
         return getattr(self.params, "model_dir", ".") or "."
-
-    def _maybe_reset_moe_lb_after_step(self) -> None:
-        """When load-balance coef is 0, drop graph-carrying _last_lb_loss on MoE layers after optimizer.step."""
-        if float(getattr(self.params, "moe_load_balance", 0.0) or 0.0) > 0:
-            return
-        if not getattr(self.params, "moe", False):
-            return
-        bb = getattr(self.model, "backbone", None)
-        if bb is None or not hasattr(bb, "encoder"):
-            return
-        dev = next(self.model.parameters()).device
-        z = torch.zeros((), device=dev, dtype=torch.float32)
-        for layer in bb.encoder.layers:
-            m = getattr(layer, "moe_ffn", None)
-            if m is not None and hasattr(m, "_last_lb_loss"):
-                m._last_lb_loss = z
 
     def _epoch_end_gc(self) -> None:
         gc.collect()
@@ -243,12 +245,13 @@ class Trainer(object):
                         self.optimizer.zero_grad(set_to_none=True)
                         x = x.cuda()
                         y = y.cuda()
-                        pred = self.model(x)
+                        batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
+                        pred = _forward_with_optional_meta(self.model, x, batch_meta)
                         if self.params.downstream_dataset == 'ISRUC':
                             loss = self.criterion(pred.transpose(1, 2), y)
                         else:
                             loss = self.criterion(pred, y)
-                        loss = self._add_moe_load_balance_loss(loss)
+                        loss = self._add_moe_auxiliary_loss(loss)
 
                         if not torch.isfinite(loss).all():
                             lv = float(loss.detach().item()) if loss.numel() == 1 else "non_scalar"
@@ -262,7 +265,6 @@ class Trainer(object):
                         if self.params.clip_value > 0:
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                         self.optimizer.step()
-                        self._maybe_reset_moe_lb_after_step()
                         self.optimizer_scheduler.step()
                         train_steps += 1
                         if train_steps % 50 == 0:
@@ -466,10 +468,11 @@ class Trainer(object):
                     self.optimizer.zero_grad(set_to_none=True)
                     x = x.cuda()
                     y = y.cuda()
-                    pred = self.model(x)
+                    batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
+                    pred = _forward_with_optional_meta(self.model, x, batch_meta)
 
                     loss = self.criterion(pred, y)
-                    loss = self._add_moe_load_balance_loss(loss)
+                    loss = self._add_moe_auxiliary_loss(loss)
                     if not torch.isfinite(loss).all():
                         print(f"[train] non-finite loss ep={epoch + 1} batch={batch_idx}")
                         raise RuntimeError("non-finite training loss")
@@ -479,7 +482,6 @@ class Trainer(object):
                     if self.params.clip_value > 0:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                     self.optimizer.step()
-                    self._maybe_reset_moe_lb_after_step()
                     self.optimizer_scheduler.step()
                     train_steps += 1
                     if train_steps % 50 == 0:
@@ -596,9 +598,10 @@ class Trainer(object):
                     self.optimizer.zero_grad(set_to_none=True)
                     x = x.cuda()
                     y = y.cuda()
-                    pred = self.model(x)
+                    batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
+                    pred = _forward_with_optional_meta(self.model, x, batch_meta)
                     loss = self.criterion(pred, y)
-                    loss = self._add_moe_load_balance_loss(loss)
+                    loss = self._add_moe_auxiliary_loss(loss)
                     if not torch.isfinite(loss).all():
                         print(f"[train] non-finite loss ep={epoch + 1} batch={batch_idx}")
                         raise RuntimeError("non-finite training loss")
@@ -608,7 +611,6 @@ class Trainer(object):
                     if self.params.clip_value > 0:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                     self.optimizer.step()
-                    self._maybe_reset_moe_lb_after_step()
                     self.optimizer_scheduler.step()
                     train_steps += 1
                     if train_steps % 50 == 0:
