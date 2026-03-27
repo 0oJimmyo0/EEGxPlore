@@ -109,8 +109,18 @@ def export_facced_routing_split(
                 row[f"layer{li}_spectral_logits_pre_capacity"] = ",".join(
                     f"{float(rc['logits_spectral'][i, e].item()):.8g}" for e in range(moe.num_specialists)
                 )
+                row[f"layer{li}_raw_top1_spatial"] = int(rc["raw_top1_spatial"][i].item())
+                row[f"layer{li}_raw_top1_spectral"] = int(rc["raw_top1_spectral"][i].item())
+                row[f"layer{li}_pre_entropy_spatial"] = float(rc["pre_entropy_spatial"][i].item())
+                row[f"layer{li}_pre_entropy_spectral"] = float(rc["pre_entropy_spectral"][i].item())
+                row[f"layer{li}_pre_margin_logit_spatial"] = float(rc["pre_margin_logit_spatial"][i].item())
+                row[f"layer{li}_pre_margin_logit_spectral"] = float(rc["pre_margin_logit_spectral"][i].item())
+                row[f"layer{li}_pre_margin_prob_spatial"] = float(rc["pre_margin_prob_spatial"][i].item())
+                row[f"layer{li}_pre_margin_prob_spectral"] = float(rc["pre_margin_prob_spectral"][i].item())
                 row[f"layer{li}_assigned_spatial_expert"] = int(rc["assigned_spatial"][i].item())
                 row[f"layer{li}_assigned_spectral_expert"] = int(rc["assigned_spectral"][i].item())
+                row[f"layer{li}_rerouted_spatial"] = int(bool(rc["rerouted_spatial"][i].item()))
+                row[f"layer{li}_rerouted_spectral"] = int(bool(rc["rerouted_spectral"][i].item()))
                 row[f"layer{li}_spatial_fallback"] = int(bool(rc["fallback_spatial"][i].item()))
                 row[f"layer{li}_spectral_fallback"] = int(bool(rc["fallback_spectral"][i].item()))
                 row[f"layer{li}_cohort_id"] = int(rc["cohort_id"][i].item())
@@ -135,8 +145,8 @@ def export_facced_routing_split(
     li0 = moe_layers[0][0]
     for r in rows:
         rc = dict(r)
-        rc["spatial_top1_expert"] = rc.get(f"layer{li0}_assigned_spatial_expert", -1)
-        rc["spectral_top1_expert"] = rc.get(f"layer{li0}_assigned_spectral_expert", -1)
+        rc["spatial_top1_expert"] = rc.get(f"layer{li0}_raw_top1_spatial", -1)
+        rc["spectral_top1_expert"] = rc.get(f"layer{li0}_raw_top1_spectral", -1)
         canonical_rows.append(rc)
     write_all_analyses(canonical_rows, out_dir, base, num_e)
 

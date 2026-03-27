@@ -288,25 +288,60 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         return self.domain_proj_spectral(emb)
 
     @staticmethod
-    def _capacity_assign_top1(logits: Tensor, capacity: int) -> Tuple[Tensor, Tensor, Tensor]:
-        """Greedy top-1 with per-expert capacity and next-best fallback."""
+    def _capacity_assign_top1(
+        logits: Tensor,
+        capacity: int,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Use raw argmax as primary route; reroute only overflow samples."""
         b, e = logits.shape
-        assigned = torch.full((b,), -1, device=logits.device, dtype=torch.long)
-        counts = torch.zeros(e, device=logits.device, dtype=torch.long)
+        raw_top1 = logits.argmax(dim=-1)
+        assigned = raw_top1.clone()
         if b == 0:
-            return assigned, torch.zeros(0, device=logits.device, dtype=torch.bool), counts
+            z = torch.zeros(0, device=logits.device, dtype=torch.bool)
+            c = torch.zeros(e, device=logits.device, dtype=torch.long)
+            return assigned, z, z, c, c
 
-        order = logits.max(dim=1).values.argsort(descending=True)
+        counts_pre = torch.bincount(raw_top1, minlength=e).to(dtype=torch.long)
+        counts_work = counts_pre.clone()
         ranked = logits.argsort(dim=1, descending=True)
-        for i in order.tolist():
-            for k in range(e):
-                ex = int(ranked[i, k].item())
-                if int(counts[ex].item()) < capacity:
-                    assigned[i] = ex
-                    counts[ex] += 1
-                    break
-        fallback = assigned < 0
-        return assigned, fallback, counts
+        rerouted = torch.zeros(b, device=logits.device, dtype=torch.bool)
+        fallback = torch.zeros(b, device=logits.device, dtype=torch.bool)
+
+        for ex in range(e):
+            excess = int(max(0, int(counts_work[ex].item()) - capacity))
+            if excess <= 0:
+                continue
+            idx_e = torch.nonzero(raw_top1 == ex, as_tuple=False).flatten()
+            if idx_e.numel() == 0:
+                continue
+            conf_e = logits[idx_e, ex]
+            # Keep the most confident assignments on the overloaded expert.
+            drop_order = conf_e.argsort(descending=False)
+            overflow_idx = idx_e[drop_order[:excess]]
+            for bi in overflow_idx.tolist():
+                moved = False
+                for cand in ranked[bi].tolist():
+                    if cand == ex:
+                        continue
+                    if int(counts_work[cand].item()) < capacity:
+                        assigned[bi] = cand
+                        counts_work[ex] -= 1
+                        counts_work[cand] += 1
+                        rerouted[bi] = True
+                        moved = True
+                        break
+                if not moved:
+                    assigned[bi] = -1
+                    counts_work[ex] -= 1
+                    rerouted[bi] = True
+                    fallback[bi] = True
+
+        valid = assigned >= 0
+        if valid.any():
+            counts_post = torch.bincount(assigned[valid], minlength=e).to(dtype=torch.long)
+        else:
+            counts_post = torch.zeros(e, device=logits.device, dtype=torch.long)
+        return assigned, rerouted, fallback, counts_pre, counts_post
 
     @staticmethod
     def _sample_entropy(probs: Tensor) -> float:
@@ -322,16 +357,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         p = p.clamp_min(1e-10)
         return float((-(p * p.log()).sum()).item())
 
-    def _bank_load_balance(self, probs: Tensor, assigned: Tensor) -> Tensor:
+    def _bank_load_balance(self, probs: Tensor, raw_top1: Tensor) -> Tensor:
         if probs.numel() == 0:
             return probs.new_zeros(())
         e = probs.size(1)
-        valid = assigned >= 0
-        if not valid.any():
-            fi = probs.new_zeros((e,))
-        else:
-            onehot = F.one_hot(assigned[valid], num_classes=e).to(dtype=probs.dtype)
-            fi = onehot.mean(dim=0).detach()
+        onehot = F.one_hot(raw_top1, num_classes=e).to(dtype=probs.dtype)
+        fi = onehot.mean(dim=0).detach()
         pi = probs.mean(dim=0)
         return e * (fi * pi).sum()
 
@@ -388,29 +419,46 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         probs_sp = F.softmax(logits_sp, dim=-1)
         probs_sc = F.softmax(logits_sc, dim=-1)
 
+        raw_top1_sp = logits_sp.argmax(dim=-1)
+        raw_top1_sc = logits_sc.argmax(dim=-1)
+        raw_top1_sp_content = logits_sp_content.argmax(dim=-1)
+        raw_top1_sc_content = logits_sc_content.argmax(dim=-1)
+
+        top2_sp_l, _ = torch.topk(logits_sp, k=min(2, self.num_specialists), dim=-1)
+        top2_sc_l, _ = torch.topk(logits_sc, k=min(2, self.num_specialists), dim=-1)
+        top2_sp_p, _ = torch.topk(probs_sp, k=min(2, self.num_specialists), dim=-1)
+        top2_sc_p, _ = torch.topk(probs_sc, k=min(2, self.num_specialists), dim=-1)
+
+        margin_sp_logit = top2_sp_l[:, 0] - (top2_sp_l[:, 1] if top2_sp_l.size(1) > 1 else 0.0)
+        margin_sc_logit = top2_sc_l[:, 0] - (top2_sc_l[:, 1] if top2_sc_l.size(1) > 1 else 0.0)
+        margin_sp_prob = top2_sp_p[:, 0] - (top2_sp_p[:, 1] if top2_sp_p.size(1) > 1 else 0.0)
+        margin_sc_prob = top2_sc_p[:, 0] - (top2_sc_p[:, 1] if top2_sc_p.size(1) > 1 else 0.0)
+
         capacity = max(1, int(math.ceil(self.capacity_factor * b / float(self.num_specialists))))
 
-        assign_sp, fallback_sp, counts_sp = self._capacity_assign_top1(logits_sp, capacity)
-        assign_sc, fallback_sc, counts_sc = self._capacity_assign_top1(logits_sc, capacity)
+        assign_sp, rerouted_sp, fallback_sp, counts_sp_pre, counts_sp = self._capacity_assign_top1(logits_sp, capacity)
+        assign_sc, rerouted_sc, fallback_sc, counts_sc_pre, counts_sc = self._capacity_assign_top1(logits_sc, capacity)
 
         res_sp = self._bank_residual(x_flat, assign_sp, batch_idx, self.spatial_specialists)
         res_sc = self._bank_residual(x_flat, assign_sc, batch_idx, self.spectral_specialists)
 
         out = h_shared + res_sp + res_sc
 
-        lb_sp = self._bank_load_balance(probs_sp, assign_sp)
-        lb_sc = self._bank_load_balance(probs_sc, assign_sc)
+        lb_sp = self._bank_load_balance(probs_sp, raw_top1_sp)
+        lb_sc = self._bank_load_balance(probs_sc, raw_top1_sc)
         lb = lb_sp + lb_sc
 
-        overflow = fallback_sp.float().mean() + fallback_sc.float().mean()
+        reroute_frac = rerouted_sp.float().mean() + rerouted_sc.float().mean()
+        fallback_frac = fallback_sp.float().mean() + fallback_sc.float().mean()
+        overflow_penalty = reroute_frac + fallback_frac
         domain_reg = bias_sp.pow(2).mean() + bias_sc.pow(2).mean()
 
         self._last_lb_loss = lb
-        self._last_overflow_penalty = overflow
+        self._last_overflow_penalty = overflow_penalty
         self._last_domain_bias_reg = domain_reg
         self._last_aux_loss = (
             self.load_balance_coef * lb
-            + overflow
+            + overflow_penalty
             + self.domain_bias_reg_coef * domain_reg
         )
 
@@ -430,19 +478,35 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),
             "aux_load_balance": float(lb.detach().item()),
-            "aux_overflow": float(overflow.detach().item()),
+            "aux_overflow": float(overflow_penalty.detach().item()),
             "aux_domain_bias_reg": float(domain_reg.detach().item()),
             "aux_total": float(self._last_aux_loss.detach().item()),
+            "domain_bias_abs_spatial": float(bias_sp.abs().mean().item()),
+            "domain_bias_abs_spectral": float(bias_sc.abs().mean().item()),
+            "domain_bias_shift_rate_spatial": float((raw_top1_sp != raw_top1_sp_content).float().mean().item()),
+            "domain_bias_shift_rate_spectral": float((raw_top1_sc != raw_top1_sc_content).float().mean().item()),
             "spatial": {
+                "pre_top1_histogram": counts_sp_pre.detach().cpu().tolist(),
+                "pre_max_expert_fraction": float((counts_sp_pre.float().max() / max(float(b), 1.0)).item()),
+                "pre_entropy": pre_ent_sp,
+                "pre_margin_logit": float(margin_sp_logit.mean().item()),
+                "pre_margin_prob": float(margin_sp_prob.mean().item()),
                 "assigned_count_per_expert": counts_sp.detach().cpu().tolist(),
                 "overflow_count": int(fallback_sp.sum().item()),
+                "reroute_rate": float(rerouted_sp.float().mean().item()),
                 "shared_only_fraction": float(fallback_sp.float().mean().item()),
                 "routing_entropy_pre_capacity": pre_ent_sp,
                 "routing_entropy_post_assignment": post_ent_sp,
             },
             "spectral": {
+                "pre_top1_histogram": counts_sc_pre.detach().cpu().tolist(),
+                "pre_max_expert_fraction": float((counts_sc_pre.float().max() / max(float(b), 1.0)).item()),
+                "pre_entropy": pre_ent_sc,
+                "pre_margin_logit": float(margin_sc_logit.mean().item()),
+                "pre_margin_prob": float(margin_sc_prob.mean().item()),
                 "assigned_count_per_expert": counts_sc.detach().cpu().tolist(),
                 "overflow_count": int(fallback_sc.sum().item()),
+                "reroute_rate": float(rerouted_sc.float().mean().item()),
                 "shared_only_fraction": float(fallback_sc.float().mean().item()),
                 "routing_entropy_pre_capacity": pre_ent_sc,
                 "routing_entropy_post_assignment": post_ent_sc,
@@ -455,8 +519,20 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self._routing_export_cache = {
             "logits_spatial": logits_sp.detach().cpu(),
             "logits_spectral": logits_sc.detach().cpu(),
+            "probs_spatial": probs_sp.detach().cpu(),
+            "probs_spectral": probs_sc.detach().cpu(),
+            "raw_top1_spatial": raw_top1_sp.detach().cpu(),
+            "raw_top1_spectral": raw_top1_sc.detach().cpu(),
+            "pre_entropy_spatial": (-(probs_sp * probs_sp.clamp_min(1e-10).log()).sum(dim=-1)).detach().cpu(),
+            "pre_entropy_spectral": (-(probs_sc * probs_sc.clamp_min(1e-10).log()).sum(dim=-1)).detach().cpu(),
+            "pre_margin_logit_spatial": margin_sp_logit.detach().cpu(),
+            "pre_margin_logit_spectral": margin_sc_logit.detach().cpu(),
+            "pre_margin_prob_spatial": margin_sp_prob.detach().cpu(),
+            "pre_margin_prob_spectral": margin_sc_prob.detach().cpu(),
             "assigned_spatial": assign_sp.detach().cpu(),
             "assigned_spectral": assign_sc.detach().cpu(),
+            "rerouted_spatial": rerouted_sp.detach().cpu(),
+            "rerouted_spectral": rerouted_sc.detach().cpu(),
             "fallback_spatial": fallback_sp.detach().cpu(),
             "fallback_spectral": fallback_sc.detach().cpu(),
             "cohort_id": (
@@ -551,20 +627,36 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
         (
             f"  [MoE L{layer_idx}] kind=typed_capacity_domain  capacity={diag.get('capacity')}  "
             f"experts={diag.get('num_experts')}  domain_bias={diag.get('domain_bias_enabled')}  "
-            f"domain_bias_norm={diag.get('domain_bias_norm', 0.0):.6f}"
+            f"domain_bias_norm={diag.get('domain_bias_norm', 0.0):.6f}  "
+            f"|bias|_sp={diag.get('domain_bias_abs_spatial', 0.0):.6f}  "
+            f"|bias|_sc={diag.get('domain_bias_abs_spectral', 0.0):.6f}"
         ),
         (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "
             f"overflow={diag.get('aux_overflow', 0.0):.6f}  domain_reg={diag.get('aux_domain_bias_reg', 0.0):.6f}"
         ),
         (
-            f"    [spatial] assigned={sp.get('assigned_count_per_expert')}  overflow={sp.get('overflow_count')}  "
+            f"    domain_shift_rate: spatial={diag.get('domain_bias_shift_rate_spatial', 0.0):.4f}  "
+            f"spectral={diag.get('domain_bias_shift_rate_spectral', 0.0):.4f}"
+        ),
+        (
+            f"    [spatial] pre_hist={sp.get('pre_top1_histogram')}  pre_max_frac={sp.get('pre_max_expert_fraction', 0.0):.4f}  "
+            f"pre_H={sp.get('pre_entropy', 0.0):.4f}  pre_margin(logit/prob)=({sp.get('pre_margin_logit', 0.0):.4f}/{sp.get('pre_margin_prob', 0.0):.4f})"
+        ),
+        (
+            f"      assigned={sp.get('assigned_count_per_expert')}  reroute_rate={sp.get('reroute_rate', 0.0):.4f}  "
+            f"overflow={sp.get('overflow_count')}  "
             f"shared_only_frac={sp.get('shared_only_fraction', 0.0):.4f}  "
             f"H_pre={sp.get('routing_entropy_pre_capacity', 0.0):.4f}  "
             f"H_post={sp.get('routing_entropy_post_assignment', 0.0):.4f}"
         ),
         (
-            f"    [spectral] assigned={sc.get('assigned_count_per_expert')}  overflow={sc.get('overflow_count')}  "
+            f"    [spectral] pre_hist={sc.get('pre_top1_histogram')}  pre_max_frac={sc.get('pre_max_expert_fraction', 0.0):.4f}  "
+            f"pre_H={sc.get('pre_entropy', 0.0):.4f}  pre_margin(logit/prob)=({sc.get('pre_margin_logit', 0.0):.4f}/{sc.get('pre_margin_prob', 0.0):.4f})"
+        ),
+        (
+            f"      assigned={sc.get('assigned_count_per_expert')}  reroute_rate={sc.get('reroute_rate', 0.0):.4f}  "
+            f"overflow={sc.get('overflow_count')}  "
             f"shared_only_frac={sc.get('shared_only_fraction', 0.0):.4f}  "
             f"H_pre={sc.get('routing_entropy_pre_capacity', 0.0):.4f}  "
             f"H_post={sc.get('routing_entropy_post_assignment', 0.0):.4f}"
