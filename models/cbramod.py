@@ -58,6 +58,9 @@ class CBraMod(nn.Module):
         adapter_scale: float = 0.2,
         use_eeg_channel_context: bool = False,
         channel_context_file: str = "",
+        use_subject_summary: bool = False,
+        subject_summary_handling: str = "project",
+        metadata_debug: bool = True,
     ):
         super().__init__()
 
@@ -65,14 +68,26 @@ class CBraMod(nn.Module):
         self.moe_use_psd_router_features = bool(moe_use_psd_router_features)
         self.moe_route_mode = moe_route_mode
         self.use_subject_adapters = bool(use_subject_adapters)
+        self.metadata_debug = bool(metadata_debug)
+        self._metadata_runtime_logged = False
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
-        channel_ctx_data = load_channel_context_file(channel_context_file, in_dim) if channel_context_file else {}
+        channel_ctx_data = {}
+        if channel_context_file:
+            try:
+                channel_ctx_data = load_channel_context_file(channel_context_file)
+            except FileNotFoundError:
+                print(
+                    f"[CBraMod] channel_context_file not found: {channel_context_file}. "
+                    "Continue without explicit channel context file.",
+                    flush=True,
+                )
         self.channel_context_encoder = EEGChannelContextEncoder(
             d_model=d_model,
             num_channels=in_dim,
             use_channel_context=use_eeg_channel_context,
             channel_context_data=channel_ctx_data,
+            metadata_debug=metadata_debug,
         )
 
         adapter_num_layers = min(max(1, adapter_num_layers), n_layer)
@@ -120,6 +135,10 @@ class CBraMod(nn.Module):
                         rank=adapter_rank,
                         cond_dim=adapter_cond_dim,
                         adapter_scale=adapter_scale,
+                        use_subject_summary=use_subject_summary,
+                        subject_summary_handling=subject_summary_handling,
+                        metadata_debug=metadata_debug,
+                        log_usage=(idx == adapter_start),
                     )
                 layers_list.append(
                     TransformerEncoderLayer(
@@ -185,6 +204,10 @@ class CBraMod(nn.Module):
                                 rank=adapter_rank,
                                 cond_dim=adapter_cond_dim,
                                 adapter_scale=adapter_scale,
+                                use_subject_summary=use_subject_summary,
+                                subject_summary_handling=subject_summary_handling,
+                                metadata_debug=metadata_debug,
+                                log_usage=(idx == adapter_start),
                             )
                             if idx >= adapter_start
                             else None
@@ -222,6 +245,16 @@ class CBraMod(nn.Module):
         tok_psd = None
         tok_meta = None
         tok_adapter = set_adapter_batch_meta(batch_meta if isinstance(batch_meta, dict) else None)
+        if self.metadata_debug and not self._metadata_runtime_logged:
+            present = sorted(list(batch_meta.keys())) if isinstance(batch_meta, dict) else []
+            print(
+                "[metadata-runtime] "
+                f"batch_meta_present={present} "
+                f"channel_context={self.channel_context_encoder.use_channel_context} "
+                f"subject_adapters={self.use_subject_adapters}",
+                flush=True,
+            )
+            self._metadata_runtime_logged = True
         if self.use_moe and self.moe_use_psd_router_features:
             tok_psd = set_moe_psd_router_features(compact_psd_bandpowers(x))
         if self.use_moe and self.moe_route_mode == "typed_capacity_domain":
@@ -355,6 +388,9 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'adapter_scale': getattr(param, 'adapter_scale', 0.2),
         'use_eeg_channel_context': getattr(param, 'eeg_channel_context', False),
         'channel_context_file': getattr(param, 'channel_context_file', ''),
+        'use_subject_summary': getattr(param, 'use_subject_summary', False),
+        'subject_summary_handling': getattr(param, 'subject_summary_handling', 'project'),
+        'metadata_debug': getattr(param, 'metadata_debug', True),
     }
 
 
@@ -391,6 +427,11 @@ def load_foundation_into_backbone(backbone: nn.Module, param, ckpt_state: Dict[s
     attnres = getattr(param, 'attnres_variant', 'none')
     backbone_sd = backbone.state_dict()
 
+    loadable = {
+        k: v for k, v in ckpt_state.items()
+        if k in backbone_sd and backbone_sd[k].shape == v.shape
+    }
+
     if use_moe:
         n = backbone.encoder.num_layers
         moe_n = min(getattr(param, 'moe_num_layers', 2), n)
@@ -408,13 +449,20 @@ def load_foundation_into_backbone(backbone: nn.Module, param, ckpt_state: Dict[s
             )
 
     if attnres == 'none' and not use_moe:
-        backbone.load_state_dict(ckpt_state, strict=True)
-        return set(backbone_sd.keys())
+        strict_compatible = (len(loadable) == len(backbone_sd) == len(ckpt_state))
+        if strict_compatible:
+            backbone.load_state_dict(ckpt_state, strict=True)
+            return set(backbone_sd.keys())
 
-    loadable = {
-        k: v for k, v in ckpt_state.items()
-        if k in backbone_sd and backbone_sd[k].shape == v.shape
-    }
+        backbone.load_state_dict(loadable, strict=False)
+        print(
+            "[CBraMod] Foundation checkpoint is not strict-compatible with current backbone; "
+            "loaded overlapping tensors only. This is expected when new modules "
+            "(e.g., EEG channel context/adapters) were added after pretraining.",
+            flush=True,
+        )
+        return set(loadable.keys())
+
     backbone.load_state_dict(loadable, strict=False)
     pretrained = set(loadable.keys())
     if use_moe:

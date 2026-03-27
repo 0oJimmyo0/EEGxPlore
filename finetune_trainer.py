@@ -91,6 +91,44 @@ def _extract_batch_meta(batch):
     return None
 
 
+_META_UNKNOWN_KEYS = (
+    "subject_id",
+    "cohort_id",
+    "sample_rate_group_id",
+    "age_bucket_id",
+    "segment_bucket_id",
+)
+
+
+def _init_unknown_counter() -> Dict[str, Dict[str, int]]:
+    return {k: {"unknown": 0, "total": 0} for k in _META_UNKNOWN_KEYS}
+
+
+def _update_unknown_counter(counter: Dict[str, Dict[str, int]], batch_meta: Optional[Dict[str, torch.Tensor]]) -> None:
+    if not isinstance(batch_meta, dict):
+        return
+    for k in _META_UNKNOWN_KEYS:
+        v = batch_meta.get(k)
+        if not torch.is_tensor(v):
+            continue
+        vv = v.detach()
+        if vv.numel() == 0:
+            continue
+        total = int(vv.numel())
+        unknown = int((vv == 0).sum().item())
+        counter[k]["total"] += total
+        counter[k]["unknown"] += unknown
+
+
+def _unknown_ratio_dict(counter: Dict[str, Dict[str, int]]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for k, d in counter.items():
+        tot = int(d.get("total", 0))
+        unk = int(d.get("unknown", 0))
+        out[k] = float(unk / tot) if tot > 0 else 0.0
+    return out
+
+
 class ReplayBuffer:
     """Small replay memory storing past samples and optional snapshot logits."""
 
@@ -168,6 +206,8 @@ class Trainer(object):
 
         backbone_params = []
         other_params = []
+        n_backbone_trainable = 0
+        n_other_trainable = 0
         for name, param in self.model.named_parameters():
             if getattr(self.params, "adapter_only_update", False):
                 allow = ("subject_adapter" in name) or ("channel_context_encoder" in name) or ("classifier" in name)
@@ -179,9 +219,11 @@ class Trainer(object):
                     param.requires_grad = True
                 if param.requires_grad:
                     backbone_params.append(param)
+                    n_backbone_trainable += int(param.numel())
             else:
                 if param.requires_grad:
                     other_params.append(param)
+                    n_other_trainable += int(param.numel())
 
         self.data_length = len(self.data_loader['train'])
         if self.params.optimizer == 'AdamW':
@@ -210,6 +252,22 @@ class Trainer(object):
             self.optimizer, T_max=self.params.epochs * self.data_length, eta_min=1e-6
         )
         self.replay_buffer = ReplayBuffer(getattr(self.params, "continual_memory_size", 0))
+
+        print(
+            "[optim] "
+            f"adapter_only_update={getattr(self.params, 'adapter_only_update', False)} "
+            f"trainable_backbone_params={n_backbone_trainable} "
+            f"trainable_other_params={n_other_trainable}",
+            flush=True,
+        )
+        if len(self.optimizer.param_groups) >= 2:
+            print(
+                "[optim] "
+                f"lr_backbone={self.optimizer.param_groups[0].get('lr', 0.0):.6g} "
+                f"lr_other={self.optimizer.param_groups[1].get('lr', 0.0):.6g} "
+                f"weight_decay={self.params.weight_decay}",
+                flush=True,
+            )
 
         print(self.model)
 
@@ -359,6 +417,10 @@ class Trainer(object):
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
 
+                num_classes = int(getattr(self.params, "num_of_classes", 0))
+                train_pred_hist = torch.zeros(max(1, num_classes), dtype=torch.long)
+                train_unknown_counter = _init_unknown_counter()
+
                 self.model.train()
                 start_time = timer()
                 losses = []
@@ -370,6 +432,12 @@ class Trainer(object):
                         y = y.cuda()
                         batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
                         pred = _forward_with_optional_meta(self.model, x, batch_meta)
+                        with torch.no_grad():
+                            pred_cls = torch.argmax(pred.detach(), dim=-1).reshape(-1).to(dtype=torch.long)
+                            if pred_cls.numel() > 0:
+                                binc = torch.bincount(pred_cls.cpu(), minlength=train_pred_hist.numel())
+                                train_pred_hist += binc[:train_pred_hist.numel()]
+                            _update_unknown_counter(train_unknown_counter, batch_meta)
                         if self.params.downstream_dataset == 'ISRUC':
                             loss = self.criterion(pred.transpose(1, 2), y)
                         else:
@@ -409,6 +477,20 @@ class Trainer(object):
 
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}", md)
+                tr_hist = train_pred_hist.tolist()
+                tr_total = max(1, int(sum(tr_hist)))
+                tr_ratio = [round(float(v) / float(tr_total), 4) for v in tr_hist]
+                tr_unknown_ratio = {
+                    k: round(v, 4) for k, v in _unknown_ratio_dict(train_unknown_counter).items()
+                }
+                print(
+                    f"[diag][train] ep={epoch + 1} pred_hist={tr_hist} pred_ratio={tr_ratio}",
+                    flush=True,
+                )
+                print(
+                    f"[diag][train] ep={epoch + 1} meta_unknown_ratio={tr_unknown_ratio}",
+                    flush=True,
+                )
 
                 lr_cur = self.optimizer.param_groups[0]["lr"]
 
@@ -448,6 +530,17 @@ class Trainer(object):
                         if len(gate_vals) > 0:
                             print("[Gate values] " + " | ".join(gate_vals))
                     print(cm)
+                    val_hist = np.asarray(cm).sum(axis=0).astype(int).tolist()
+                    val_total = max(1, int(sum(val_hist)))
+                    val_ratio = [round(float(v) / float(val_total), 4) for v in val_hist]
+                    print(
+                        f"[diag][val] ep={epoch + 1} pred_hist={val_hist} pred_ratio={val_ratio}",
+                        flush=True,
+                    )
+                    val_diag = getattr(self.val_eval, "last_multiclass_diag", None)
+                    if isinstance(val_diag, dict) and "meta_unknown_ratio" in val_diag:
+                        vu = {k: round(float(v), 4) for k, v in val_diag["meta_unknown_ratio"].items()}
+                        print(f"[diag][val] ep={epoch + 1} meta_unknown_ratio={vu}", flush=True)
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
                     if kappa > kappa_best:

@@ -146,6 +146,24 @@ def main():
         help='Optional .json/.pt/.pth mapping subject id to compact summary vectors.',
     )
     parser.add_argument(
+        '--use_subject_summary',
+        action='store_true',
+        help='Enable subject_summary conditioning in subject/domain adapters.',
+    )
+    parser.add_argument(
+        '--subject_summary_handling',
+        type=str,
+        default='project',
+        choices=['project', 'error'],
+        help='How to handle subject_summary dim mismatch vs adapter_cond_dim.',
+    )
+    parser.add_argument(
+        '--metadata_debug',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Log one-time metadata produced/consumed summaries at runtime.',
+    )
+    parser.add_argument(
         '--continual_mode',
         type=str,
         default='off',
@@ -293,7 +311,24 @@ def main():
         raise ValueError("Use either adapter_mode or --moe, not both. Adapter path is the preferred mode.")
     if params.moe:
         print("[warning] --moe is deprecated; prefer --adapter_mode subject_domain.", flush=True)
+    if params.use_subject_summary and not params.subject_adapter:
+        raise ValueError("--use_subject_summary requires adapter_mode subject_domain.")
+    if params.use_subject_summary and not params.subject_summary_file:
+        raise ValueError("--use_subject_summary requires --subject_summary_file.")
+    if params.adapter_only_update and not params.subject_adapter:
+        raise ValueError("--adapter_only_update requires adapter_mode subject_domain.")
     print(params)
+    print(
+        "[ablation-config] "
+        f"attnres_variant={params.attnres_variant} "
+        f"eeg_channel_context={params.eeg_channel_context} "
+        f"subject_adapters={params.subject_adapter} "
+        f"use_subject_summary={params.use_subject_summary} "
+        f"continual_mode={params.continual_mode} "
+        f"adapter_only_update={params.adapter_only_update} "
+        f"moe={params.moe}",
+        flush=True,
+    )
 
     setup_seed(params.seed)
     torch.cuda.set_device(params.cuda)

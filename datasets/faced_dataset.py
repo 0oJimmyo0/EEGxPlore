@@ -17,11 +17,13 @@ class CustomDataset(Dataset):
             return_keys: bool = False,
             return_metadata: bool = False,
             meta_maps=None,
+            use_subject_summary: bool = False,
     ):
         super(CustomDataset, self).__init__()
         self.return_keys = return_keys
         self.return_metadata = return_metadata
         self.meta_maps = meta_maps or {}
+        self.use_subject_summary = bool(use_subject_summary)
         self.db = lmdb.open(data_dir, readonly=True, lock=False, readahead=True, meminit=False)
         with self.db.begin(write=False) as txn:
             self.keys = pickle.loads(txn.get('__keys__'.encode()))[mode]
@@ -59,14 +61,6 @@ class CustomDataset(Dataset):
             if self.return_metadata:
                 metas = [x[ptr] for x in batch]
                 bsz = len(metas)
-                subj_summary = [m.get('subject_summary') for m in metas]
-                valid_summary = [s for s in subj_summary if s is not None]
-                summary_tensor = None
-                if len(valid_summary) == bsz:
-                    try:
-                        summary_tensor = torch.as_tensor(np.array(subj_summary), dtype=torch.float32)
-                    except Exception:
-                        summary_tensor = None
                 batch_meta = {
                     'subject_id': torch.tensor([m.get('subject_id', 0) for m in metas], dtype=torch.long),
                     'dataset_id': torch.tensor([m.get('dataset_id', 0) for m in metas], dtype=torch.long),
@@ -76,7 +70,28 @@ class CustomDataset(Dataset):
                     'segment_bucket_id': torch.tensor([m['segment_bucket_id'] for m in metas], dtype=torch.long),
                     'channel_count': torch.full((bsz,), int(x_data.shape[1]), dtype=torch.float32),
                 }
-                if summary_tensor is not None:
+                if self.use_subject_summary:
+                    summary_rows = []
+                    for i, m in enumerate(metas):
+                        s = m.get('subject_summary')
+                        if s is None:
+                            raise ValueError(
+                                "use_subject_summary=True but subject_summary is missing for "
+                                f"sample index {i} in this batch. Provide a complete "
+                                "--subject_summary_file or disable --use_subject_summary."
+                            )
+                        arr = np.asarray(s, dtype=np.float32).reshape(-1)
+                        if arr.size == 0:
+                            raise ValueError("subject_summary vector is empty; expected non-empty 1D vector.")
+                        summary_rows.append(arr)
+                    dim0 = int(summary_rows[0].shape[0])
+                    for i, arr in enumerate(summary_rows):
+                        if int(arr.shape[0]) != dim0:
+                            raise ValueError(
+                                "subject_summary vectors must have a consistent size within batch; "
+                                f"got {arr.shape[0]} at index {i}, expected {dim0}."
+                            )
+                    summary_tensor = torch.as_tensor(np.stack(summary_rows, axis=0), dtype=torch.float32)
                     batch_meta['subject_summary'] = summary_tensor
             if keys is not None and batch_meta is not None:
                 return to_tensor(x_data), to_tensor(y_label).long(), keys, batch_meta
@@ -93,10 +108,12 @@ class LoadDataset(object):
 
     def get_data_loader(self):
         rk = getattr(self.params, "return_sample_keys", False)
+        use_subject_summary = bool(getattr(self.params, 'use_subject_summary', False))
         return_metadata = bool(
             getattr(self.params, 'subject_adapter', False)
             or getattr(self.params, 'eeg_channel_context', False)
             or getattr(self.params, 'continual_mode', 'off') != 'off'
+            or use_subject_summary
             or (
                 getattr(self.params, 'moe', False)
                 and getattr(self.params, 'moe_route_mode', '') == 'typed_capacity_domain'
@@ -106,7 +123,25 @@ class LoadDataset(object):
             self.datasets_dir,
             getattr(self.params, 'faced_meta_csv', ''),
             getattr(self.params, 'subject_summary_file', ''),
+            use_subject_summary=use_subject_summary,
         ) if return_metadata else {}
+        if return_metadata:
+            produced_fields = [
+                "subject_id",
+                "dataset_id",
+                "cohort_id",
+                "sample_rate_group_id",
+                "age_bucket_id",
+                "segment_bucket_id",
+                "channel_count",
+            ]
+            if use_subject_summary:
+                produced_fields.append("subject_summary")
+            print(
+                "[FACED meta] produced_fields="
+                f"{produced_fields} use_subject_summary={use_subject_summary}",
+                flush=True,
+            )
 
         train_set = CustomDataset(
             self.datasets_dir,
@@ -114,6 +149,7 @@ class LoadDataset(object):
             return_keys=rk,
             return_metadata=return_metadata,
             meta_maps=meta_maps,
+            use_subject_summary=use_subject_summary,
         )
         val_set = CustomDataset(
             self.datasets_dir,
@@ -121,6 +157,7 @@ class LoadDataset(object):
             return_keys=rk,
             return_metadata=return_metadata,
             meta_maps=meta_maps,
+            use_subject_summary=use_subject_summary,
         )
         test_set = CustomDataset(
             self.datasets_dir,
@@ -128,6 +165,7 @@ class LoadDataset(object):
             return_keys=rk,
             return_metadata=return_metadata,
             meta_maps=meta_maps,
+            use_subject_summary=use_subject_summary,
         )
         print(len(train_set), len(val_set), len(test_set))
         print(len(train_set)+len(val_set)+len(test_set))

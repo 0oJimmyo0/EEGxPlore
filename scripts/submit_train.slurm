@@ -29,7 +29,7 @@
 # ------------------------------
 # RUN IDENTITY
 # ------------------------------
-RUN_TAG="${RUN_TAG:-adapter_base}"
+RUN_TAG="${RUN_TAG:-CBra + Adapter}"
 
 # ------------------------------
 # DATA + PATHS
@@ -39,20 +39,23 @@ dataset_dir=/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/FACED
 model_dir=/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/${downstream_dataset}_adapter_${RUN_TAG}
 mkdir -p "$model_dir"
 
-FACED_META_CSV=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv
+FACED_META_DIR=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta
+FACED_META_CSV="${FACED_META_CSV:-$FACED_META_DIR/Recording_info.csv}"
 
 # Optional EEG channel-context metadata file (.json/.pt/.pth)
 # Must contain any subset of: channel_ids, coords, montage_mask, region_ids
-CHANNEL_CONTEXT_FILE="${CHANNEL_CONTEXT_FILE:-}"
+CHANNEL_CONTEXT_FILE="${CHANNEL_CONTEXT_FILE:-$FACED_META_DIR/channel_context.json}"
 
 # Optional subject summary map (.json/.pt/.pth): {"sub000": [...], ...}
 SUBJECT_SUMMARY_FILE="${SUBJECT_SUMMARY_FILE:-}"
+USE_SUBJECT_SUMMARY="${USE_SUBJECT_SUMMARY:-0}"   # 0|1
+SUBJECT_SUMMARY_HANDLING="${SUBJECT_SUMMARY_HANDLING:-project}"  # project|error
 
 # ------------------------------
 # TRAIN HYPERPARAMS
 # ------------------------------
-lr="${LR:-5e-4}"
-weight_decay="${WEIGHT_DECAY:-5e-2}"
+lr="${LR:-1e-4}"
+weight_decay="${WEIGHT_DECAY:-1e-2}"
 clip_value="${CLIP_VALUE:-1.0}"
 dropout="${DROPOUT:-0.3}"
 label_smoothing="${LABEL_SMOOTHING:-0.05}"
@@ -64,14 +67,16 @@ cuda_id="${CUDA_ID:-0}"
 # ------------------------------
 # ADAPTER + EEG CONTEXT KNOBS
 # ------------------------------
+ATTNRES_VARIANT="${ATTNRES_VARIANT:-none}"  # none|pre_attn|full|...
+ATTNRES_START_LAYER="${ATTNRES_START_LAYER:-0}"
 ADAPTER_MODE="${ADAPTER_MODE:-subject_domain}"   # subject_domain | none
-ADAPTER_NUM_LAYERS="${ADAPTER_NUM_LAYERS:-2}"
-ADAPTER_RANK="${ADAPTER_RANK:-16}"
+ADAPTER_NUM_LAYERS="${ADAPTER_NUM_LAYERS:-4}"
+ADAPTER_RANK="${ADAPTER_RANK:-32}"
 ADAPTER_COND_DIM="${ADAPTER_COND_DIM:-32}"
-ADAPTER_SCALE="${ADAPTER_SCALE:-0.2}"
+ADAPTER_SCALE="${ADAPTER_SCALE:-0.01}"
 
 # 1 => enable channel/electrode context injection
-EEG_CONTEXT="${EEG_CONTEXT:-1}"
+EEG_CONTEXT="${EEG_CONTEXT:-0}"
 
 # ------------------------------
 # CONTINUAL LEARNING KNOBS
@@ -85,7 +90,7 @@ CONTINUAL_DISTILL_WEIGHT="${CONTINUAL_DISTILL_WEIGHT:-0.2}"
 CONTINUAL_DISTILL_TEMP="${CONTINUAL_DISTILL_TEMP:-2.0}"
 
 # 1 => freeze backbone except adapter/context/classifier (for incremental subject update)
-ADAPTER_ONLY_UPDATE="${ADAPTER_ONLY_UPDATE:-0}"
+ADAPTER_ONLY_UPDATE="${ADAPTER_ONLY_UPDATE:-1}"
 
 # ------------------------------
 # LEGACY MoE SWITCH (optional)
@@ -103,6 +108,7 @@ MOE_USE_PSD="${MOE_USE_PSD:-0}"
 
 # tqdm in Slurm logs can generate very large files; keep this 0 on cluster
 FORCE_TQDM="${FORCE_TQDM:-0}"
+METADATA_DEBUG="${METADATA_DEBUG:-1}"  # 0|1
 
 # --- modules ---
 module load GCCcore/12.2.0
@@ -113,17 +119,43 @@ conda activate cbramod
 # Optional flags assembly
 EXTRA_FLAGS=()
 
-if [[ "$EEG_CONTEXT" == "1" ]]; then
-  EXTRA_FLAGS+=(--eeg_channel_context)
+if [[ ! -f "$FACED_META_CSV" ]]; then
+  echo "[slurm] FACED_META_CSV not found: $FACED_META_CSV" >&2
+  echo "[slurm] Set FACED_META_CSV or FACED_META_DIR to a valid FACED metadata path." >&2
+  exit 2
 fi
-if [[ -n "$CHANNEL_CONTEXT_FILE" ]]; then
-  EXTRA_FLAGS+=(--channel_context_file "$CHANNEL_CONTEXT_FILE")
+
+if [[ "$EEG_CONTEXT" == "1" ]]; then
+  # Accept missing optional context file: keep run alive and disable EEG context instead of crashing.
+  if [[ -z "$CHANNEL_CONTEXT_FILE" ]] || [[ "$CHANNEL_CONTEXT_FILE" == "/path/to/channel_context.json" ]]; then
+    echo "[slurm] EEG_CONTEXT=1 but CHANNEL_CONTEXT_FILE is unset/placeholder; disabling EEG context." >&2
+    EEG_CONTEXT=0
+  elif [[ ! -f "$CHANNEL_CONTEXT_FILE" ]]; then
+    echo "[slurm] EEG_CONTEXT=1 but CHANNEL_CONTEXT_FILE not found: $CHANNEL_CONTEXT_FILE" >&2
+    echo "[slurm] Disabling EEG context for this run." >&2
+    EEG_CONTEXT=0
+  else
+    EXTRA_FLAGS+=(--eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE")
+  fi
 fi
 if [[ -n "$SUBJECT_SUMMARY_FILE" ]]; then
   EXTRA_FLAGS+=(--subject_summary_file "$SUBJECT_SUMMARY_FILE")
 fi
+if [[ "$USE_SUBJECT_SUMMARY" == "1" ]]; then
+  if [[ -z "$SUBJECT_SUMMARY_FILE" ]]; then
+    echo "[slurm] USE_SUBJECT_SUMMARY=1 requires SUBJECT_SUMMARY_FILE to be set." >&2
+    exit 2
+  fi
+  EXTRA_FLAGS+=(--use_subject_summary)
+fi
 if [[ "$ADAPTER_ONLY_UPDATE" == "1" ]]; then
   EXTRA_FLAGS+=(--adapter_only_update)
+fi
+EXTRA_FLAGS+=(--subject_summary_handling "$SUBJECT_SUMMARY_HANDLING")
+if [[ "$METADATA_DEBUG" == "1" ]]; then
+  EXTRA_FLAGS+=(--metadata_debug)
+else
+  EXTRA_FLAGS+=(--no-metadata_debug)
 fi
 if [[ "$FORCE_TQDM" == "1" ]]; then
   EXTRA_FLAGS+=(--tqdm)
@@ -148,6 +180,9 @@ if [[ "$USE_LEGACY_MOE" == "1" ]]; then
   fi
 fi
 
+# Always pass FACED metadata csv so subject/domain id maps are built consistently.
+EXTRA_FLAGS+=(--faced_meta_csv "$FACED_META_CSV")
+
 python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py \
   --seed "$seed" \
   --cuda "$cuda_id" \
@@ -165,8 +200,8 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py
   --model_dir "$model_dir" \
   --label_smoothing "$label_smoothing" \
   --num_workers 4 \
-  --attnres_variant pre_attn \
-  --attnres_start_layer 0 \
+  --attnres_variant "$ATTNRES_VARIANT" \
+  --attnres_start_layer "$ATTNRES_START_LAYER" \
   --use_pretrained_weights \
   --adapter_mode "$ADAPTER_MODE" \
   --adapter_num_layers "$ADAPTER_NUM_LAYERS" \

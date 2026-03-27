@@ -24,7 +24,10 @@ class Model(nn.Module):
         print(f"[FACED] attnres_start_layer = {param.attnres_start_layer}")
         print(f"[FACED] adapter_mode = {getattr(param, 'adapter_mode', 'none')}")
         print(f"[FACED] eeg_channel_context = {getattr(param, 'eeg_channel_context', False)}")
+        print(f"[FACED] use_subject_summary = {getattr(param, 'use_subject_summary', False)}")
+        print(f"[FACED] subject_summary_handling = {getattr(param, 'subject_summary_handling', 'project')}")
         print(f"[FACED] continual_mode = {getattr(param, 'continual_mode', 'off')}")
+        print(f"[FACED] adapter_only_update = {getattr(param, 'adapter_only_update', False)}")
         if getattr(param, 'moe', False):
             print(
                 f"[FACED] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "
@@ -49,8 +52,10 @@ class Model(nn.Module):
             loaded_bb = load_foundation_into_backbone(self.backbone, param, ckpt)
             self.pretrained_param_names = {f'backbone.{k}' for k in loaded_bb}
 
-            if param.attnres_variant == 'none' and not getattr(param, 'moe', False):
-                print("[FACED] Baseline mode: strict foundation load")
+            if param.attnres_variant == 'none' and not getattr(param, 'moe', False) and not getattr(param, 'subject_adapter', False):
+                print("[FACED] Baseline mode: foundation load")
+            elif getattr(param, 'subject_adapter', False):
+                print("[FACED] Adapter mode: foundation overlap load + trainable adapter path")
             elif getattr(param, 'moe', False):
                 print(f"[FACED] MoE mode: partial load + dense FFN warm-start into experts")
             else:

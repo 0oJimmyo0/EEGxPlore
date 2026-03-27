@@ -8,6 +8,7 @@ import warnings
 from torch import Tensor
 from torch.nn import functional as F
 from models.attn_res import FullAttnRes
+from models.adapters import get_adapter_batch_meta
 
 
 class TransformerEncoder(nn.Module):
@@ -77,7 +78,8 @@ class TransformerEncoderLayer(nn.Module):
                  bias: bool = True, device=None, dtype=None, use_attnres: bool = False,
                  attnres_variant: str = 'none', attnres_gated: bool = False,
                  attnres_gate_init: float = 0.0, attnres_start_layer: int = 0,
-                 moe_ffn: Optional[nn.Module] = None) -> None:
+                 moe_ffn: Optional[nn.Module] = None,
+                 subject_adapter: Optional[nn.Module] = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
         self.self_attn_s = nn.MultiheadAttention(d_model//2, nhead // 2, dropout=dropout,
@@ -88,6 +90,7 @@ class TransformerEncoderLayer(nn.Module):
                                                  **factory_kwargs)
 
         self.moe_ffn = moe_ffn
+        self.subject_adapter = subject_adapter
         # Feedforward: dense linear1/linear2, or MoE replaces both.
         if moe_ffn is None:
             self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
@@ -144,7 +147,7 @@ class TransformerEncoderLayer(nn.Module):
     def _forward_baseline(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
         x = src
         x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
-        x = x + self._ff_block(self.norm2(x), router_context=None)
+        x = x + self._ff_block(self.norm2(x), router_context=None, adapter_context=None)
         return x
 
     def _forward_attnres(self, sources, src_mask=None, src_key_padding_mask=None, is_causal=False):
@@ -226,7 +229,8 @@ class TransformerEncoderLayer(nn.Module):
                     "the MoE layer is not above the last layer with pre-attn (see CBraMod typed MoE guard)."
                 )
             router_ctx = {"baseline": baseline_in, "attnres": attnres_in}
-        x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
+        adapter_ctx = {"layer_idx": self.layer_idx}
+        x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx, adapter_context=adapter_ctx)
 
         # for final-only, collect only block outputs
         if self.attnres_variant == 'final':
@@ -258,10 +262,18 @@ class TransformerEncoderLayer(nn.Module):
         return self.dropout1(x)
 
     # feed forward block
-    def _ff_block(self, x: Tensor, router_context: Optional[Dict[str, Tensor]] = None) -> Tensor:
+    def _ff_block(
+        self,
+        x: Tensor,
+        router_context: Optional[Dict[str, Tensor]] = None,
+        adapter_context: Optional[Dict[str, Any]] = None,
+    ) -> Tensor:
         if self.moe_ffn is not None:
             return self.dropout2(self.moe_ffn(x, router_context=router_context))
         x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        if self.subject_adapter is not None:
+            batch_meta = get_adapter_batch_meta()
+            x = x + self.subject_adapter(x, batch_meta=batch_meta)
         return self.dropout2(x)
 
 

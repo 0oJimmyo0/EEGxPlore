@@ -144,10 +144,15 @@ def build_faced_domain_maps(meta_csv_path: str) -> Dict[str, Any]:
     }
 
 
-def build_faced_meta_maps(data_dir: str, meta_csv_path: str, subject_summary_file: str = "") -> Dict[str, Any]:
+def build_faced_meta_maps(
+    data_dir: str,
+    meta_csv_path: str,
+    subject_summary_file: str = "",
+    use_subject_summary: bool = False,
+) -> Dict[str, Any]:
     domain = build_faced_domain_maps(meta_csv_path)
     domain["subject_ids"] = build_subject_id_map_from_lmdb(data_dir)
-    domain["subject_summaries"] = load_subject_summary_map(subject_summary_file)
+    domain["subject_summaries"] = load_subject_summary_map(subject_summary_file) if use_subject_summary else {}
     domain["dataset_id"] = 1  # FACED
     return domain
 

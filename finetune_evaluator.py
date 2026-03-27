@@ -28,12 +28,15 @@ class Evaluator:
     def __init__(self, params, data_loader):
         self.params = params
         self.data_loader = data_loader
+        self.last_multiclass_diag = None
 
     def get_metrics_for_multiclass(self, model, epoch_for_log: Optional[int] = None):
         model.eval()
 
         truths = []
         preds = []
+        unknown_keys = ["subject_id", "cohort_id", "sample_rate_group_id", "age_bucket_id", "segment_bucket_id"]
+        unknown_counter = {k: {"unknown": 0, "total": 0} for k in unknown_keys}
         for batch_idx, batch in enumerate(tqdm_auto(self.data_loader, self.params, mininterval=1)):
             if batch_idx == 0 and epoch_for_log is not None:
                 print(f"entered first val batch for epoch {epoch_for_log}", flush=True)
@@ -45,6 +48,14 @@ class Evaluator:
             batch_meta = {k: v.cuda(non_blocking=True) for k, v in meta.items() if torch.is_tensor(v)} if isinstance(meta, dict) else None
             pred = _forward_with_optional_meta(model, x, batch_meta)
             pred_y = torch.max(pred, dim=-1)[1]
+
+            if isinstance(batch_meta, dict):
+                for k in unknown_keys:
+                    v = batch_meta.get(k)
+                    if not torch.is_tensor(v) or v.numel() == 0:
+                        continue
+                    unknown_counter[k]["total"] += int(v.numel())
+                    unknown_counter[k]["unknown"] += int((v == 0).sum().item())
 
             truths += y.cpu().squeeze().numpy().tolist()
             preds += pred_y.cpu().squeeze().numpy().tolist()
@@ -59,6 +70,15 @@ class Evaluator:
         f1 = f1_score(truths, preds, average='weighted')
         kappa = cohen_kappa_score(truths, preds)
         cm = confusion_matrix(truths, preds)
+        meta_unknown_ratio = {}
+        for k, d in unknown_counter.items():
+            tot = int(d["total"])
+            unk = int(d["unknown"])
+            meta_unknown_ratio[k] = float(unk / tot) if tot > 0 else 0.0
+        self.last_multiclass_diag = {
+            "meta_unknown_ratio": meta_unknown_ratio,
+            "n": int(len(preds)),
+        }
         return acc, kappa, f1, cm
 
     def get_metrics_for_binaryclass(self, model, epoch_for_log: Optional[int] = None):
