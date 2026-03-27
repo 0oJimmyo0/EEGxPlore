@@ -93,9 +93,101 @@ def main():
 )
 
     parser.add_argument(
+        '--adapter_mode',
+        type=str,
+        default='subject_domain',
+        choices=['none', 'subject_domain'],
+        help='Subject/domain adaptation mode. subject_domain enables lightweight conditioned adapters.',
+    )
+    parser.add_argument(
+        '--adapter_num_layers',
+        type=int,
+        default=2,
+        help='Number of top encoder layers with adapters.',
+    )
+    parser.add_argument(
+        '--adapter_rank',
+        type=int,
+        default=16,
+        help='Low-rank adapter bottleneck rank.',
+    )
+    parser.add_argument(
+        '--adapter_cond_dim',
+        type=int,
+        default=32,
+        help='Condition embedding dim for subject/domain adapters.',
+    )
+    parser.add_argument(
+        '--adapter_scale',
+        type=float,
+        default=0.2,
+        help='Residual scale for adapter outputs.',
+    )
+    parser.add_argument(
+        '--adapter_only_update',
+        action='store_true',
+        help='Freeze backbone except adapter/context modules; useful for incremental subject updates.',
+    )
+    parser.add_argument(
+        '--eeg_channel_context',
+        action='store_true',
+        help='Enable EEG channel/electrode context encoding in early backbone blocks.',
+    )
+    parser.add_argument(
+        '--channel_context_file',
+        type=str,
+        default='',
+        help='Optional .json/.pt/.pth with channel_ids/coords/montage_mask/region_ids.',
+    )
+    parser.add_argument(
+        '--subject_summary_file',
+        type=str,
+        default='',
+        help='Optional .json/.pt/.pth mapping subject id to compact summary vectors.',
+    )
+    parser.add_argument(
+        '--continual_mode',
+        type=str,
+        default='off',
+        choices=['off', 'replay', 'replay_distill'],
+        help='Continual-learning mode: off, replay memory, or replay + distillation regularization.',
+    )
+    parser.add_argument(
+        '--continual_memory_size',
+        type=int,
+        default=512,
+        help='Replay memory budget in number of samples.',
+    )
+    parser.add_argument(
+        '--continual_replay_batch_size',
+        type=int,
+        default=32,
+        help='Replay samples per optimization step.',
+    )
+    parser.add_argument(
+        '--continual_replay_weight',
+        type=float,
+        default=0.5,
+        help='Weight for replay supervised loss.',
+    )
+    parser.add_argument(
+        '--continual_distill_weight',
+        type=float,
+        default=0.2,
+        help='Weight for replay distillation loss (replay_distill mode).',
+    )
+    parser.add_argument(
+        '--continual_distill_temp',
+        type=float,
+        default=2.0,
+        help='Temperature for multiclass replay distillation.',
+    )
+
+    # Deprecated/legacy MoE path retained for backward compatibility.
+    parser.add_argument(
         '--moe',
         action='store_true',
-        help='Enable typed routed MoE in the top encoder layers.',
+        help='[Deprecated] Enable typed routed MoE in top encoder layers.',
     )
     parser.add_argument(
         '--moe_num_layers',
@@ -196,6 +288,11 @@ def main():
     )
 
     params = parser.parse_args()
+    params.subject_adapter = (params.adapter_mode != 'none')
+    if params.moe and params.subject_adapter:
+        raise ValueError("Use either adapter_mode or --moe, not both. Adapter path is the preferred mode.")
+    if params.moe:
+        print("[warning] --moe is deprecated; prefer --adapter_mode subject_domain.", flush=True)
     print(params)
 
     setup_seed(params.seed)
@@ -203,7 +300,6 @@ def main():
     print('The downstream dataset is {}'.format(params.downstream_dataset))
     if params.downstream_dataset == 'FACED':
         params.return_sample_keys = bool(getattr(params, 'routing_export_dir', None))
-        params.return_domain_ids = bool(getattr(params, 'moe', False) and params.moe_route_mode == 'typed_capacity_domain')
         load_dataset = faced_dataset.LoadDataset(params)
         data_loader = load_dataset.get_data_loader()
         model = model_for_faced.Model(params)

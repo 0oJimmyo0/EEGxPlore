@@ -1,7 +1,9 @@
 import gc
 import os
+import random
 import shutil
 import traceback
+from collections import deque
 from timeit import default_timer as timer
 from typing import Any, Dict, Optional
 
@@ -81,6 +83,71 @@ def _forward_with_optional_meta(model, x, batch_meta):
         return model(x)
 
 
+def _extract_batch_meta(batch):
+    if len(batch) >= 3 and isinstance(batch[2], dict):
+        return batch[2]
+    if len(batch) >= 4 and isinstance(batch[3], dict):
+        return batch[3]
+    return None
+
+
+class ReplayBuffer:
+    """Small replay memory storing past samples and optional snapshot logits."""
+
+    def __init__(self, max_samples: int):
+        self.max_samples = max(0, int(max_samples))
+        self.entries = deque()
+        self.num_samples = 0
+
+    def __len__(self):
+        return self.num_samples
+
+    def add(self, x, y, batch_meta=None, logits=None):
+        if self.max_samples <= 0:
+            return
+        x_cpu = x.detach().cpu()
+        y_cpu = y.detach().cpu()
+        meta_cpu = None
+        if isinstance(batch_meta, dict):
+            meta_cpu = {k: v.detach().cpu() for k, v in batch_meta.items() if torch.is_tensor(v)}
+        logits_cpu = logits.detach().cpu() if torch.is_tensor(logits) else None
+        n = int(x_cpu.shape[0])
+        if n <= 0:
+            return
+        self.entries.append({
+            "x": x_cpu,
+            "y": y_cpu,
+            "meta": meta_cpu,
+            "logits": logits_cpu,
+            "n": n,
+        })
+        self.num_samples += n
+        while self.num_samples > self.max_samples and self.entries:
+            popped = self.entries.popleft()
+            self.num_samples -= int(popped.get("n", 0))
+
+    def sample(self, batch_size: int):
+        if not self.entries or batch_size <= 0:
+            return None
+        ent = random.choice(list(self.entries))
+        x, y, meta, logits = ent["x"], ent["y"], ent["meta"], ent["logits"]
+        n = int(x.shape[0])
+        if n <= batch_size:
+            idx = torch.arange(n)
+        else:
+            idx = torch.randperm(n)[:batch_size]
+        out_meta = None
+        if isinstance(meta, dict):
+            out_meta = {k: v.index_select(0, idx) for k, v in meta.items()}
+        out_logits = logits.index_select(0, idx) if torch.is_tensor(logits) else None
+        return (
+            x.index_select(0, idx),
+            y.index_select(0, idx),
+            out_meta,
+            out_logits,
+        )
+
+
 class Trainer(object):
     def __init__(self, params, data_loader, model):
         self.params = params
@@ -102,15 +169,19 @@ class Trainer(object):
         backbone_params = []
         other_params = []
         for name, param in self.model.named_parameters():
+            if getattr(self.params, "adapter_only_update", False):
+                allow = ("subject_adapter" in name) or ("channel_context_encoder" in name) or ("classifier" in name)
+                param.requires_grad = bool(allow)
             if "backbone" in name:
-                backbone_params.append(param)
-
-                if params.frozen:
+                if params.frozen and not getattr(self.params, "adapter_only_update", False):
                     param.requires_grad = False
-                else:
+                elif not getattr(self.params, "adapter_only_update", False):
                     param.requires_grad = True
+                if param.requires_grad:
+                    backbone_params.append(param)
             else:
-                other_params.append(param)
+                if param.requires_grad:
+                    other_params.append(param)
 
         self.data_length = len(self.data_loader['train'])
         if self.params.optimizer == 'AdamW':
@@ -138,6 +209,7 @@ class Trainer(object):
         self.optimizer_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=self.params.epochs * self.data_length, eta_min=1e-6
         )
+        self.replay_buffer = ReplayBuffer(getattr(self.params, "continual_memory_size", 0))
 
         print(self.model)
 
@@ -165,7 +237,7 @@ class Trainer(object):
                 self.model.train()
             return
         x = batch[0].cuda()
-        batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
+        batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
         label_tok = None
         if len(batch) > 1:
             label_tok = set_moe_diagnostic_labels(batch[1].cuda())
@@ -214,6 +286,57 @@ class Trainer(object):
         if torch.cuda.is_available():
             print(torch.cuda.memory_summary(), flush=True)
 
+    def _continual_on(self) -> bool:
+        return getattr(self.params, "continual_mode", "off") != "off"
+
+    def _continual_add_current_batch(self, x, y, batch_meta, pred):
+        if not self._continual_on():
+            return
+        use_distill = getattr(self.params, "continual_mode", "off") == "replay_distill"
+        self.replay_buffer.add(x, y, batch_meta=batch_meta, logits=(pred if use_distill else None))
+
+    def _distill_loss(self, cur_logits, tgt_logits, task_type: str):
+        if not (torch.is_tensor(cur_logits) and torch.is_tensor(tgt_logits)):
+            return torch.zeros((), device=next(self.model.parameters()).device)
+        if task_type == "multiclass":
+            t = float(getattr(self.params, "continual_distill_temp", 2.0))
+            t = max(1e-6, t)
+            p = torch.log_softmax(cur_logits / t, dim=-1)
+            q = torch.softmax(tgt_logits / t, dim=-1)
+            return torch.nn.functional.kl_div(p, q, reduction="batchmean") * (t * t)
+        return torch.nn.functional.mse_loss(cur_logits, tgt_logits)
+
+    def _continual_replay_penalty(self, task_type: str):
+        if not self._continual_on() or len(self.replay_buffer) <= 0:
+            return torch.zeros((), device="cuda"), {}
+        rb = int(getattr(self.params, "continual_replay_batch_size", 0))
+        replay = self.replay_buffer.sample(rb)
+        if replay is None:
+            return torch.zeros((), device="cuda"), {}
+
+        rx, ry, rmeta, rlogits = replay
+        rx = rx.cuda(non_blocking=True)
+        ry = ry.cuda(non_blocking=True)
+        rmeta = _move_meta_to_cuda(rmeta)
+        rpred = _forward_with_optional_meta(self.model, rx, rmeta)
+
+        rep_w = float(getattr(self.params, "continual_replay_weight", 0.5))
+        dist_w = float(getattr(self.params, "continual_distill_weight", 0.2))
+        out = torch.zeros((), device=rx.device)
+        stats = {}
+        if rep_w > 0:
+            if task_type == "multiclass" and self.params.downstream_dataset == "ISRUC":
+                rep_loss = self.criterion(rpred.transpose(1, 2), ry)
+            else:
+                rep_loss = self.criterion(rpred, ry)
+            out = out + rep_w * rep_loss
+            stats["replay"] = float(rep_loss.detach().item())
+        if getattr(self.params, "continual_mode", "off") == "replay_distill" and dist_w > 0 and torch.is_tensor(rlogits):
+            d = self._distill_loss(rpred, rlogits.cuda(non_blocking=True), task_type=task_type)
+            out = out + dist_w * d
+            stats["distill"] = float(d.detach().item())
+        return out, stats
+
     def train_for_multiclass(self):
         """Same optimizer/schedule for baseline (--attnres_variant none) and AttnRes variants.
 
@@ -245,13 +368,15 @@ class Trainer(object):
                         self.optimizer.zero_grad(set_to_none=True)
                         x = x.cuda()
                         y = y.cuda()
-                        batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
+                        batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
                         pred = _forward_with_optional_meta(self.model, x, batch_meta)
                         if self.params.downstream_dataset == 'ISRUC':
                             loss = self.criterion(pred.transpose(1, 2), y)
                         else:
                             loss = self.criterion(pred, y)
                         loss = self._add_moe_auxiliary_loss(loss)
+                        continual_penalty, continual_stats = self._continual_replay_penalty("multiclass")
+                        loss = loss + continual_penalty
 
                         if not torch.isfinite(loss).all():
                             lv = float(loss.detach().item()) if loss.numel() == 1 else "non_scalar"
@@ -266,9 +391,12 @@ class Trainer(object):
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                         self.optimizer.step()
                         self.optimizer_scheduler.step()
+                        self._continual_add_current_batch(x, y, batch_meta, pred)
                         train_steps += 1
                         if train_steps % 50 == 0:
                             _mem_report(f"train_step ep={epoch + 1} batch={batch_idx} step={train_steps}", md)
+                        if train_steps % 100 == 0 and continual_stats:
+                            print(f"[continual] step={train_steps} {continual_stats}", flush=True)
                     except RuntimeError as e:
                         err = str(e).lower()
                         if "out of memory" in err:
@@ -468,11 +596,13 @@ class Trainer(object):
                     self.optimizer.zero_grad(set_to_none=True)
                     x = x.cuda()
                     y = y.cuda()
-                    batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
+                    batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
                     pred = _forward_with_optional_meta(self.model, x, batch_meta)
 
                     loss = self.criterion(pred, y)
                     loss = self._add_moe_auxiliary_loss(loss)
+                    continual_penalty, continual_stats = self._continual_replay_penalty("binary")
+                    loss = loss + continual_penalty
                     if not torch.isfinite(loss).all():
                         print(f"[train] non-finite loss ep={epoch + 1} batch={batch_idx}")
                         raise RuntimeError("non-finite training loss")
@@ -483,9 +613,12 @@ class Trainer(object):
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                     self.optimizer.step()
                     self.optimizer_scheduler.step()
+                    self._continual_add_current_batch(x, y, batch_meta, pred)
                     train_steps += 1
                     if train_steps % 50 == 0:
                         _mem_report(f"train_step_binary ep={epoch + 1} batch={batch_idx}", md)
+                    if train_steps % 100 == 0 and continual_stats:
+                        print(f"[continual] step={train_steps} {continual_stats}", flush=True)
 
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}_binary", md)
@@ -598,10 +731,12 @@ class Trainer(object):
                     self.optimizer.zero_grad(set_to_none=True)
                     x = x.cuda()
                     y = y.cuda()
-                    batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
+                    batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
                     pred = _forward_with_optional_meta(self.model, x, batch_meta)
                     loss = self.criterion(pred, y)
                     loss = self._add_moe_auxiliary_loss(loss)
+                    continual_penalty, continual_stats = self._continual_replay_penalty("regression")
+                    loss = loss + continual_penalty
                     if not torch.isfinite(loss).all():
                         print(f"[train] non-finite loss ep={epoch + 1} batch={batch_idx}")
                         raise RuntimeError("non-finite training loss")
@@ -612,9 +747,12 @@ class Trainer(object):
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                     self.optimizer.step()
                     self.optimizer_scheduler.step()
+                    self._continual_add_current_batch(x, y, batch_meta, pred)
                     train_steps += 1
                     if train_steps % 50 == 0:
                         _mem_report(f"train_step_regr ep={epoch + 1} batch={batch_idx}", md)
+                    if train_steps % 100 == 0 and continual_stats:
+                        print(f"[continual] step={train_steps} {continual_stats}", flush=True)
 
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}_regr", md)

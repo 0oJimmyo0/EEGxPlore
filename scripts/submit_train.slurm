@@ -1,103 +1,153 @@
 #!/bin/bash
-#SBATCH --job-name=FACED_TUNE
-#SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_hier_%j.out
-#SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_hier_%j.err
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH --job-name=FACED_ADAPTER
+#SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_adapter_%j.out
+#SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_adapter_%j.err
+#SBATCH --partition=gpu_devel
+#SBATCH --gres=gpu:a40:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=0-04:00:00
 
 # =============================================================================
-# COMPARISON KNOBS — change these to compare runs (keep everything else equal)
+# CBraMod adapter-first finetuning script (new version)
+#
+# How to use:
+# 1) Edit the KNOBS section below.
+# 2) Submit: sbatch scripts/submit_train.slurm
+# 3) Monitor:
+#    - queue:   squeue -u $USER
+#    - logs:    tail -f logs/out/faced_adapter_<JOBID>.out
+#    - errors:  tail -f logs/err/faced_adapter_<JOBID>.err
+#
+# What to watch in logs for performance:
+# - per-epoch validation line: "Epoch ... acc ... kappa ... f1"
+# - final test line:           "Test Evaluation: acc: ..., kappa: ..., f1: ..."
+# - best checkpoint path is printed as "model save in ..." and also includes metrics in filename.
 # =============================================================================
-# 1) USE_PSD: 0 = typed MoE, NO PSD on spectral router (main baseline per doc/next_step.md)
-#             1 = add --moe_use_psd_router_features (spectral router gets 5-band PSD)
-# 2) RUN_TAG: short label folded into model_dir so checkpoints never overwrite between A/B
-# 3) ROUTING_EXPORT_DIR: leave empty to skip CSV export; or set to a path ON SCRATCH.
-#    Use ${SLURM_JOB_ID} UNESCAPED so sbatch expands it on the compute node (not \$...).
-#    CSVs are written ONLY after training finishes (test + checkpoint save).
-# 4) ROUTING_SPLITS: test only, or val,test
-# 5) ROUTING_RUN_NAME: stored in per-sample CSV (default: SLURM_JOB_ID when set; else empty)
-# 6) TQDM: default --no-tqdm on cluster (tqdm → huge .out files / quota); use FORCE_TQDM=1 to debug
-# =============================================================================
-USE_PSD=1
-RUN_TAG=psd
-ROUTING_EXPORT_DIR="/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/routing_record_dir/run_${RUN_TAG}_${SLURM_JOB_ID}"
-# Personal scratch (saves group quota on shared): uncomment and comment line above
-# ROUTING_EXPORT_DIR="/gpfs/radev/scratch/xu_hua/mj756/routing_exports/run_${RUN_TAG}_${SLURM_JOB_ID}"
-ROUTING_SPLITS=test
-# Override if not under Slurm (e.g. interactive): ROUTING_RUN_NAME=my_manual_run
-ROUTING_RUN_NAME="${SLURM_JOB_ID:-}"
-FORCE_TQDM=0
 
-# --- modules: compiler + CUDA that match your build ---
-module load GCCcore/12.2.0
-module load CUDA/12.6.3
+# ------------------------------
+# RUN IDENTITY
+# ------------------------------
+RUN_TAG="${RUN_TAG:-adapter_base}"
 
-module load miniconda/24.3.0
-conda activate cbramod
-
-# --- choose dataset ---
+# ------------------------------
+# DATA + PATHS
+# ------------------------------
 downstream_dataset=FACED
 dataset_dir=/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/FACED
-
-# Checkpoints: separate subdir per comparison (USE_PSD + RUN_TAG)
-model_dir=/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/${downstream_dataset}_typed_moe_${RUN_TAG}
+model_dir=/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/${downstream_dataset}_adapter_${RUN_TAG}
 mkdir -p "$model_dir"
 
 FACED_META_CSV=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv
 
-# -------------------------
-# training hyperparameters (FACED MoE sweet spot from logs)
-# -------------------------
-lr=5e-4
-weight_decay=5e-2
-clip_value=1.0
-dropout=0.3
-label_smoothing=0.05
-epochs=30
-batch_size=32
-seed=3407
-cuda_id=0
+# Optional EEG channel-context metadata file (.json/.pt/.pth)
+# Must contain any subset of: channel_ids, coords, montage_mask, region_ids
+CHANNEL_CONTEXT_FILE="${CHANNEL_CONTEXT_FILE:-}"
 
-# Optional flags from USE_PSD / ROUTING_EXPORT_DIR / TQDM
-PSD_FLAGS=()
-if [[ "$USE_PSD" == "1" ]]; then
-  PSD_FLAGS=(--moe_use_psd_router_features)
+# Optional subject summary map (.json/.pt/.pth): {"sub000": [...], ...}
+SUBJECT_SUMMARY_FILE="${SUBJECT_SUMMARY_FILE:-}"
+
+# ------------------------------
+# TRAIN HYPERPARAMS
+# ------------------------------
+lr="${LR:-5e-4}"
+weight_decay="${WEIGHT_DECAY:-5e-2}"
+clip_value="${CLIP_VALUE:-1.0}"
+dropout="${DROPOUT:-0.3}"
+label_smoothing="${LABEL_SMOOTHING:-0.05}"
+epochs="${EPOCHS:-30}"
+batch_size="${BATCH_SIZE:-32}"
+seed="${SEED:-3407}"
+cuda_id="${CUDA_ID:-0}"
+
+# ------------------------------
+# ADAPTER + EEG CONTEXT KNOBS
+# ------------------------------
+ADAPTER_MODE="${ADAPTER_MODE:-subject_domain}"   # subject_domain | none
+ADAPTER_NUM_LAYERS="${ADAPTER_NUM_LAYERS:-2}"
+ADAPTER_RANK="${ADAPTER_RANK:-16}"
+ADAPTER_COND_DIM="${ADAPTER_COND_DIM:-32}"
+ADAPTER_SCALE="${ADAPTER_SCALE:-0.2}"
+
+# 1 => enable channel/electrode context injection
+EEG_CONTEXT="${EEG_CONTEXT:-1}"
+
+# ------------------------------
+# CONTINUAL LEARNING KNOBS
+# ------------------------------
+# off | replay | replay_distill
+CONTINUAL_MODE="${CONTINUAL_MODE:-off}"
+CONTINUAL_MEMORY_SIZE="${CONTINUAL_MEMORY_SIZE:-512}"
+CONTINUAL_REPLAY_BATCH_SIZE="${CONTINUAL_REPLAY_BATCH_SIZE:-32}"
+CONTINUAL_REPLAY_WEIGHT="${CONTINUAL_REPLAY_WEIGHT:-0.5}"
+CONTINUAL_DISTILL_WEIGHT="${CONTINUAL_DISTILL_WEIGHT:-0.2}"
+CONTINUAL_DISTILL_TEMP="${CONTINUAL_DISTILL_TEMP:-2.0}"
+
+# 1 => freeze backbone except adapter/context/classifier (for incremental subject update)
+ADAPTER_ONLY_UPDATE="${ADAPTER_ONLY_UPDATE:-0}"
+
+# ------------------------------
+# LEGACY MoE SWITCH (optional)
+# ------------------------------
+# Keep 0 for the new version. Set to 1 only if you want old routing baseline comparisons.
+USE_LEGACY_MOE="${USE_LEGACY_MOE:-0}"
+MOE_NUM_LAYERS="${MOE_NUM_LAYERS:-1}"
+MOE_NUM_EXPERTS="${MOE_NUM_EXPERTS:-4}"
+MOE_CAPACITY_FACTOR="${MOE_CAPACITY_FACTOR:-1.0}"
+MOE_DOMAIN_BIAS="${MOE_DOMAIN_BIAS:-1}"
+MOE_DOMAIN_EMB_DIM="${MOE_DOMAIN_EMB_DIM:-16}"
+MOE_LOAD_BALANCE="${MOE_LOAD_BALANCE:-0.005}"
+MOE_DOMAIN_BIAS_REG="${MOE_DOMAIN_BIAS_REG:-0.0005}"
+MOE_USE_PSD="${MOE_USE_PSD:-0}"
+
+# tqdm in Slurm logs can generate very large files; keep this 0 on cluster
+FORCE_TQDM="${FORCE_TQDM:-0}"
+
+# --- modules ---
+module load GCCcore/12.2.0
+module load CUDA/12.6.3
+module load miniconda/24.3.0
+conda activate cbramod
+
+# Optional flags assembly
+EXTRA_FLAGS=()
+
+if [[ "$EEG_CONTEXT" == "1" ]]; then
+  EXTRA_FLAGS+=(--eeg_channel_context)
 fi
-
-ROUTING_FLAGS=()
-if [[ -n "$ROUTING_EXPORT_DIR" ]]; then
-  mkdir -p "$ROUTING_EXPORT_DIR"
-  ROUTING_FLAGS=(
-    --routing_export_dir "$ROUTING_EXPORT_DIR"
-    --routing_export_splits "$ROUTING_SPLITS"
-    --faced_meta_csv "$FACED_META_CSV"
-  )
-  if [[ -n "$ROUTING_RUN_NAME" ]]; then
-    ROUTING_FLAGS+=(--routing_run_name "$ROUTING_RUN_NAME")
-  fi
-  echo "[slurm] routing export dir: $ROUTING_EXPORT_DIR" >&2
-  echo "[slurm] routing_run_name: ${ROUTING_RUN_NAME:-<empty>}" >&2
+if [[ -n "$CHANNEL_CONTEXT_FILE" ]]; then
+  EXTRA_FLAGS+=(--channel_context_file "$CHANNEL_CONTEXT_FILE")
 fi
-
-TQDM_FLAGS=(--no-tqdm)
+if [[ -n "$SUBJECT_SUMMARY_FILE" ]]; then
+  EXTRA_FLAGS+=(--subject_summary_file "$SUBJECT_SUMMARY_FILE")
+fi
+if [[ "$ADAPTER_ONLY_UPDATE" == "1" ]]; then
+  EXTRA_FLAGS+=(--adapter_only_update)
+fi
 if [[ "$FORCE_TQDM" == "1" ]]; then
-  TQDM_FLAGS=(--tqdm)
+  EXTRA_FLAGS+=(--tqdm)
+else
+  EXTRA_FLAGS+=(--no-tqdm)
 fi
 
-# -------------------------
-# This job: typed dual-bank MoE (shared dense + spatial + spectral specialists)
-#   --moe_shared_specialist   pretrained dense always on; specialists start with zero output
-#   --moe_diagnostics         after each val epoch, log expert usage / entropy (one val batch)
-#
-# Other comparisons (comment this block, adjust vars above):
-#   Replacement MoE (no shared path): omit --moe_shared_specialist; use a different model_dir suffix
-#   Optional: --moe_specialist_rand_linear1  (Kaiming linear1 on specialists)
-#   Optional: --moe_top_k 2
-# -------------------------
+# Legacy MoE compatibility path
+if [[ "$USE_LEGACY_MOE" == "1" ]]; then
+  EXTRA_FLAGS+=(--moe --moe_route_mode typed_capacity_domain --moe_diagnostics)
+  EXTRA_FLAGS+=(--moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS")
+  EXTRA_FLAGS+=(--moe_capacity_factor "$MOE_CAPACITY_FACTOR")
+  EXTRA_FLAGS+=(--moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM")
+  EXTRA_FLAGS+=(--moe_load_balance "$MOE_LOAD_BALANCE")
+  EXTRA_FLAGS+=(--moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG")
+  EXTRA_FLAGS+=(--faced_meta_csv "$FACED_META_CSV")
+  if [[ "$MOE_DOMAIN_BIAS" == "1" ]]; then
+    EXTRA_FLAGS+=(--moe_domain_bias)
+  fi
+  if [[ "$MOE_USE_PSD" == "1" ]]; then
+    EXTRA_FLAGS+=(--moe_use_psd_router_features)
+  fi
+fi
+
 python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py \
   --seed "$seed" \
   --cuda "$cuda_id" \
@@ -118,61 +168,38 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py
   --attnres_variant pre_attn \
   --attnres_start_layer 0 \
   --use_pretrained_weights \
-  --moe \
-  --moe_shared_specialist \
-  --moe_diagnostics \
-  --moe_specialist_rand_linear1 \
-  --moe_num_layers 1 \
-  --moe_num_experts 4 \
-  --moe_top_k 2 \
-  --moe_router_mode sample_attnres \
-  --moe_router_arch mlp \
-  --moe_router_mlp_hidden 128 \
-  --moe_expert_type typed \
-  "${PSD_FLAGS[@]}" \
-  "${ROUTING_FLAGS[@]}" \
-  "${TQDM_FLAGS[@]}"
+  --adapter_mode "$ADAPTER_MODE" \
+  --adapter_num_layers "$ADAPTER_NUM_LAYERS" \
+  --adapter_rank "$ADAPTER_RANK" \
+  --adapter_cond_dim "$ADAPTER_COND_DIM" \
+  --adapter_scale "$ADAPTER_SCALE" \
+  --continual_mode "$CONTINUAL_MODE" \
+  --continual_memory_size "$CONTINUAL_MEMORY_SIZE" \
+  --continual_replay_batch_size "$CONTINUAL_REPLAY_BATCH_SIZE" \
+  --continual_replay_weight "$CONTINUAL_REPLAY_WEIGHT" \
+  --continual_distill_weight "$CONTINUAL_DISTILL_WEIGHT" \
+  --continual_distill_temp "$CONTINUAL_DISTILL_TEMP" \
+  "${EXTRA_FLAGS[@]}"
 
-# -------------------------
-# Quick A/B cheat sheet (edit COMPARISON KNOBS at top)
-# -------------------------
-# | Goal                         | USE_PSD | RUN_TAG  | Extra                          |
-# |-------------------------------|---------|----------|--------------------------------|
-# | Baseline: typed, no PSD       | 0       | no_psd   | (default)                      |
-# | Compare: typed + PSD router | 1       | psd      | same hyperparams               |
-# | Routing CSV + metadata join | any     | any      | set ROUTING_EXPORT_DIR scratch |
-# | Tag rows with job id         | any     | any      | ROUTING_RUN_NAME (default JOBID)|
-# | Interactive tqdm            | any     | any      | FORCE_TQDM=1                   |
-#
 # =============================================================================
-# NEXT STEPS — post-hoc analysis (run on login or devel node; not inside this job)
+# Suggested sweeps for impact analysis (change one group at a time)
+# -----------------------------------------------------------------------------
+# A) Adapter capacity:
+#    ADAPTER_RANK=8,16,32 ; ADAPTER_NUM_LAYERS=1,2,4 ; ADAPTER_COND_DIM=16,32,64
+#
+# B) EEG metadata injection:
+#    EEG_CONTEXT=0 vs 1
+#    with/without CHANNEL_CONTEXT_FILE
+#
+# C) Continual-learning stability:
+#    CONTINUAL_MODE=off vs replay vs replay_distill
+#    CONTINUAL_MEMORY_SIZE=128,512,1024
+#    CONTINUAL_REPLAY_WEIGHT=0.25,0.5,1.0
+#    CONTINUAL_DISTILL_WEIGHT=0.1,0.2,0.5
+#
+# D) Incremental update mode:
+#    ADAPTER_ONLY_UPDATE=0 vs 1
+#
+# Quick metric extraction from a finished .out file:
+#   grep -E "Epoch .*acc:|Test Evaluation:" logs/out/faced_adapter_<JOBID>.out
 # =============================================================================
-# Project root:
-#   CBRA=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod
-#
-# 1) Rebuild grouped CSVs from one existing per-sample export (adds routing_summary_by_group, etc.):
-#   cd "$CBRA"
-#   python3 scripts/analyze_facced_routing.py \
-#     --csv /gpfs/radev/scratch/xu_hua/shared/models/checkpoints/routing_record_dir/run_no_psd_1405305/faced_routing_test_ebest_ep21_epoch21_acc_0.56441_kappa_0.50606_f1_0.56680_per_sample.csv \
-#     --outdir /gpfs/radev/scratch/xu_hua/mj756/routing_exports/analysis_no_psd_1405305 \
-#     --prefix faced_rerun_1405305
-#
-# 2) Paired no-PSD vs PSD compare (FIRST csv = no-PSD, SECOND = PSD) → four compare_*.csv files:
-#   cd "$CBRA"
-#   python3 scripts/analyze_facced_routing.py \
-#     --compare \
-#     /gpfs/radev/scratch/xu_hua/shared/models/checkpoints/routing_record_dir/run_no_psd_1405305/faced_routing_test_ebest_ep21_epoch21_acc_0.56441_kappa_0.50606_f1_0.56680_per_sample.csv \
-#     /gpfs/radev/scratch/xu_hua/shared/models/checkpoints/routing_record_dir/run_psd_1405304/faced_routing_test_ebest_epNN_epochNN_acc_*_per_sample.csv \
-#     --outdir /gpfs/radev/scratch/xu_hua/mj756/routing_exports/compare_no_psd_vs_psd
-#   (Replace the PSD path with your real filename: ls run_psd_*/faced_routing_test_*_per_sample.csv)
-#
-# 3) Submit training (after editing USE_PSD / RUN_TAG at top):
-#   cd /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod
-#   sbatch scripts/submit_train.slurm
-#
-# Optional experiments (older notes):
-# Replacement MoE only: omit --moe_shared_specialist; point model_dir to ..._moe_opt
-# MoE + pre_attn, warmer gate, top-2 (~0.58 test in older logs):
-#   --attnres_gated --attnres_gate_init -1.0 --attnres_start_layer 6 --moe_top_k 2 --moe_load_balance 0.05 --moe_router_noise 0.01
-# Disable aux: --moe_load_balance 0 --moe_router_noise 0
-# sample_hidden router: --moe_router_mode sample_hidden

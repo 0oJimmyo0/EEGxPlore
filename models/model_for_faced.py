@@ -22,6 +22,9 @@ class Model(nn.Module):
         print(f"[FACED] attnres_gated = {param.attnres_gated}")
         print(f"[FACED] attnres_gate_init = {param.attnres_gate_init}")
         print(f"[FACED] attnres_start_layer = {param.attnres_start_layer}")
+        print(f"[FACED] adapter_mode = {getattr(param, 'adapter_mode', 'none')}")
+        print(f"[FACED] eeg_channel_context = {getattr(param, 'eeg_channel_context', False)}")
+        print(f"[FACED] continual_mode = {getattr(param, 'continual_mode', 'off')}")
         if getattr(param, 'moe', False):
             print(
                 f"[FACED] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "

@@ -16,6 +16,14 @@ def _forward_with_optional_meta(model, x, batch_meta):
         return model(x)
 
 
+def _extract_batch_meta(batch):
+    if len(batch) >= 3 and isinstance(batch[2], dict):
+        return batch[2]
+    if len(batch) >= 4 and isinstance(batch[3], dict):
+        return batch[3]
+    return None
+
+
 class Evaluator:
     def __init__(self, params, data_loader):
         self.params = params
@@ -33,9 +41,8 @@ class Evaluator:
             x = x.cuda()
             y = y.cuda()
 
-            batch_meta = None
-            if len(batch) >= 4 and isinstance(batch[3], dict):
-                batch_meta = {k: v.cuda(non_blocking=True) for k, v in batch[3].items() if torch.is_tensor(v)}
+            meta = _extract_batch_meta(batch)
+            batch_meta = {k: v.cuda(non_blocking=True) for k, v in meta.items() if torch.is_tensor(v)} if isinstance(meta, dict) else None
             pred = _forward_with_optional_meta(model, x, batch_meta)
             pred_y = torch.max(pred, dim=-1)[1]
 
@@ -66,9 +73,8 @@ class Evaluator:
             x, y = batch[0], batch[1]
             x = x.cuda()
             y = y.cuda()
-            batch_meta = None
-            if len(batch) >= 4 and isinstance(batch[3], dict):
-                batch_meta = {k: v.cuda(non_blocking=True) for k, v in batch[3].items() if torch.is_tensor(v)}
+            meta = _extract_batch_meta(batch)
+            batch_meta = {k: v.cuda(non_blocking=True) for k, v in meta.items() if torch.is_tensor(v)} if isinstance(meta, dict) else None
             pred = _forward_with_optional_meta(model, x, batch_meta)
             score_y = torch.sigmoid(pred)
             pred_y = torch.gt(score_y, 0.5).long()
@@ -101,9 +107,8 @@ class Evaluator:
             x, y = batch[0], batch[1]
             x = x.cuda()
             y = y.cuda()
-            batch_meta = None
-            if len(batch) >= 4 and isinstance(batch[3], dict):
-                batch_meta = {k: v.cuda(non_blocking=True) for k, v in batch[3].items() if torch.is_tensor(v)}
+            meta = _extract_batch_meta(batch)
+            batch_meta = {k: v.cuda(non_blocking=True) for k, v in meta.items() if torch.is_tensor(v)} if isinstance(meta, dict) else None
             pred = _forward_with_optional_meta(model, x, batch_meta)
             truths += y.cpu().squeeze().numpy().tolist()
             preds += pred.cpu().squeeze().numpy().tolist()

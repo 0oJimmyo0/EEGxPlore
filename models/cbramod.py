@@ -5,6 +5,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.criss_cross_transformer import TransformerEncoderLayer, TransformerEncoder
+from models.adapters import (
+    EEGChannelContextEncoder,
+    SubjectDomainAdapter,
+    load_channel_context_file,
+    reset_adapter_batch_meta,
+    set_adapter_batch_meta,
+)
 from models.moe import (
     TypedCapacityDomainMoEFFN,
     compact_psd_bandpowers,
@@ -44,13 +51,32 @@ class CBraMod(nn.Module):
         moe_use_psd_router_features: bool = False,
         moe_load_balance: float = 0.0,
         moe_domain_bias_reg: float = 0.0,
+        use_subject_adapters: bool = False,
+        adapter_num_layers: int = 2,
+        adapter_rank: int = 16,
+        adapter_cond_dim: int = 32,
+        adapter_scale: float = 0.2,
+        use_eeg_channel_context: bool = False,
+        channel_context_file: str = "",
     ):
         super().__init__()
 
         self.use_moe = use_moe
         self.moe_use_psd_router_features = bool(moe_use_psd_router_features)
         self.moe_route_mode = moe_route_mode
+        self.use_subject_adapters = bool(use_subject_adapters)
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
+
+        channel_ctx_data = load_channel_context_file(channel_context_file, in_dim) if channel_context_file else {}
+        self.channel_context_encoder = EEGChannelContextEncoder(
+            d_model=d_model,
+            num_channels=in_dim,
+            use_channel_context=use_eeg_channel_context,
+            channel_context_data=channel_ctx_data,
+        )
+
+        adapter_num_layers = min(max(1, adapter_num_layers), n_layer)
+        adapter_start = n_layer - adapter_num_layers
 
         if use_moe:
             moe_num_layers = min(max(1, moe_num_layers), n_layer)
@@ -70,6 +96,7 @@ class CBraMod(nn.Module):
             layers_list = []
             for idx in range(n_layer):
                 moe_mod = None
+                adapter_mod = None
                 if idx >= moe_start:
                     moe_mod = TypedCapacityDomainMoEFFN(
                         d_model=d_model,
@@ -87,6 +114,13 @@ class CBraMod(nn.Module):
                         load_balance_coef=moe_load_balance,
                         domain_bias_reg_coef=moe_domain_bias_reg,
                     )
+                if self.use_subject_adapters and idx >= adapter_start and moe_mod is None:
+                    adapter_mod = SubjectDomainAdapter(
+                        d_model=d_model,
+                        rank=adapter_rank,
+                        cond_dim=adapter_cond_dim,
+                        adapter_scale=adapter_scale,
+                    )
                 layers_list.append(
                     TransformerEncoderLayer(
                         d_model=d_model,
@@ -101,6 +135,7 @@ class CBraMod(nn.Module):
                         attnres_gate_init=attnres_gate_init,
                         attnres_start_layer=attnres_start_layer,
                         moe_ffn=moe_mod,
+                        subject_adapter=adapter_mod,
                     )
                 )
             encoder_layers = nn.ModuleList(layers_list)
@@ -126,16 +161,54 @@ class CBraMod(nn.Module):
                 attnres_gated=attnres_gated,
                 attnres_gate_init=attnres_gate_init,
                 attnres_start_layer=attnres_start_layer,
+                subject_adapter=None,
             )
 
-            self.encoder = TransformerEncoder(
-                encoder_layer,
-                num_layers=n_layer,
-                enable_nested_tensor=False,
-                attnres_variant=attnres_variant,
-                d_model=d_model,
-                attnres_start_layer=attnres_start_layer,
-            )
+            if self.use_subject_adapters:
+                layers = []
+                for idx in range(n_layer):
+                    layer = TransformerEncoderLayer(
+                        d_model=d_model,
+                        nhead=nhead,
+                        dim_feedforward=dim_feedforward,
+                        dropout=dropout,
+                        batch_first=True,
+                        norm_first=True,
+                        activation=F.gelu,
+                        attnres_variant=attnres_variant,
+                        attnres_gated=attnres_gated,
+                        attnres_gate_init=attnres_gate_init,
+                        attnres_start_layer=attnres_start_layer,
+                        subject_adapter=(
+                            SubjectDomainAdapter(
+                                d_model=d_model,
+                                rank=adapter_rank,
+                                cond_dim=adapter_cond_dim,
+                                adapter_scale=adapter_scale,
+                            )
+                            if idx >= adapter_start
+                            else None
+                        ),
+                    )
+                    layers.append(layer)
+                self.encoder = TransformerEncoder(
+                    None,
+                    n_layer,
+                    enable_nested_tensor=False,
+                    attnres_variant=attnres_variant,
+                    d_model=d_model,
+                    attnres_start_layer=attnres_start_layer,
+                    layers=nn.ModuleList(layers),
+                )
+            else:
+                self.encoder = TransformerEncoder(
+                    encoder_layer,
+                    num_layers=n_layer,
+                    enable_nested_tensor=False,
+                    attnres_variant=attnres_variant,
+                    d_model=d_model,
+                    attnres_start_layer=attnres_start_layer,
+                )
 
         self.proj_out = nn.Sequential(nn.Linear(d_model, out_dim))
         self.apply(_weights_init)
@@ -148,12 +221,14 @@ class CBraMod(nn.Module):
     def forward(self, x, mask=None, batch_meta=None):
         tok_psd = None
         tok_meta = None
+        tok_adapter = set_adapter_batch_meta(batch_meta if isinstance(batch_meta, dict) else None)
         if self.use_moe and self.moe_use_psd_router_features:
             tok_psd = set_moe_psd_router_features(compact_psd_bandpowers(x))
         if self.use_moe and self.moe_route_mode == "typed_capacity_domain":
             tok_meta = set_moe_faced_metadata(batch_meta)
         try:
             patch_emb = self.patch_embedding(x, mask)
+            patch_emb = self.channel_context_encoder(patch_emb, batch_meta=batch_meta)
             feats = self.encoder(patch_emb)
             out = self.proj_out(feats)
             return out
@@ -162,6 +237,7 @@ class CBraMod(nn.Module):
                 reset_moe_psd_router_features(tok_psd)
             if tok_meta is not None:
                 reset_moe_faced_metadata(tok_meta)
+            reset_adapter_batch_meta(tok_adapter)
 
     def moe_auxiliary_loss(self) -> torch.Tensor:
         """Combined MoE auxiliary loss from all active MoE layers."""
@@ -269,6 +345,16 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_use_psd_router_features': getattr(param, 'moe_use_psd_router_features', False),
         'moe_load_balance': getattr(param, 'moe_load_balance', 0.0),
         'moe_domain_bias_reg': getattr(param, 'moe_domain_bias_reg', 0.0),
+        'use_subject_adapters': (
+            getattr(param, 'subject_adapter', False)
+            or getattr(param, 'adapter_mode', 'none') != 'none'
+        ),
+        'adapter_num_layers': getattr(param, 'adapter_num_layers', 2),
+        'adapter_rank': getattr(param, 'adapter_rank', 16),
+        'adapter_cond_dim': getattr(param, 'adapter_cond_dim', 32),
+        'adapter_scale': getattr(param, 'adapter_scale', 0.2),
+        'use_eeg_channel_context': getattr(param, 'eeg_channel_context', False),
+        'channel_context_file': getattr(param, 'channel_context_file', ''),
     }
 
 

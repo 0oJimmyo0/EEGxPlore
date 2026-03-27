@@ -1,11 +1,15 @@
-"""FACED metadata helpers for domain-aware MoE routing."""
+"""FACED metadata helpers for domain/adaptation-aware training."""
 
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
-from typing import Any, Dict
+import pickle
+from typing import Any, Dict, Iterable
+
+import lmdb
 
 UNKNOWN_ID = 0
 
@@ -78,6 +82,57 @@ def _value_id_map(values) -> Dict[str, int]:
     return {v: i + 1 for i, v in enumerate(vocab)}
 
 
+def _subject_id_map_from_sub_ids(sub_ids: Iterable[str]) -> Dict[str, int]:
+    vocab = sorted({str(v).strip().lower() for v in sub_ids if str(v).strip()})
+    return {v: i + 1 for i, v in enumerate(vocab)}
+
+
+def build_subject_id_map_from_lmdb(data_dir: str) -> Dict[str, int]:
+    if not data_dir or not os.path.isdir(data_dir):
+        return {}
+    db = lmdb.open(data_dir, readonly=True, lock=False, readahead=True, meminit=False)
+    try:
+        with db.begin(write=False) as txn:
+            blob = txn.get("__keys__".encode())
+            if blob is None:
+                return {}
+            by_split = pickle.loads(blob)
+    except Exception:
+        return {}
+    finally:
+        db.close()
+
+    subs = []
+    for split_keys in by_split.values():
+        for key in split_keys:
+            kstr = key.decode() if isinstance(key, bytes) else str(key)
+            subs.append(parse_faced_lmdb_key(kstr).get("sub_id", ""))
+    return _subject_id_map_from_sub_ids(subs)
+
+
+def load_subject_summary_map(path: str) -> Dict[str, Any]:
+    """Optional JSON/PT map: sub_id -> compact numeric summary vector."""
+    if not path or not os.path.isfile(path):
+        return {}
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".json":
+        with open(path, "r", encoding="utf-8") as f:
+            blob = json.load(f)
+    elif ext in {".pt", ".pth"}:
+        import torch
+        blob = torch.load(path, map_location="cpu")
+    else:
+        raise ValueError("subject_summary_file must be .json/.pt/.pth")
+    if not isinstance(blob, dict):
+        raise ValueError("subject_summary_file must contain a dict mapping sub_id -> vector")
+    out: Dict[str, Any] = {}
+    for k, v in blob.items():
+        kk = str(k).strip().lower()
+        if kk:
+            out[kk] = v
+    return out
+
+
 def build_faced_domain_maps(meta_csv_path: str) -> Dict[str, Any]:
     rec_map = load_recording_info_csv(meta_csv_path)
     return {
@@ -87,6 +142,14 @@ def build_faced_domain_maps(meta_csv_path: str) -> Dict[str, Any]:
         "age_bucket_ids": _value_id_map(v.get("age_bucket", "") for v in rec_map.values()),
         "segment_bucket_ids": {f"seg_{i}": i + 1 for i in range(8)},
     }
+
+
+def build_faced_meta_maps(data_dir: str, meta_csv_path: str, subject_summary_file: str = "") -> Dict[str, Any]:
+    domain = build_faced_domain_maps(meta_csv_path)
+    domain["subject_ids"] = build_subject_id_map_from_lmdb(data_dir)
+    domain["subject_summaries"] = load_subject_summary_map(subject_summary_file)
+    domain["dataset_id"] = 1  # FACED
+    return domain
 
 
 def lmdb_key_to_domain_ids(key: str, domain_maps: Dict[str, Any]) -> Dict[str, int]:
@@ -109,6 +172,21 @@ def lmdb_key_to_domain_ids(key: str, domain_maps: Dict[str, Any]) -> Dict[str, i
         "sample_rate_group_id": int(sample_rate_group_id),
         "age_bucket_id": int(age_bucket_id),
         "segment_bucket_id": int(segment_bucket_id),
+    }
+
+
+def lmdb_key_to_subject_meta(key: str, meta_maps: Dict[str, Any]) -> Dict[str, Any]:
+    parsed = parse_faced_lmdb_key(key)
+    sid = parsed.get("sub_id", "")
+    domain_ids = lmdb_key_to_domain_ids(key, meta_maps)
+    subject_id = int(meta_maps.get("subject_ids", {}).get(sid, UNKNOWN_ID))
+    dataset_id = int(meta_maps.get("dataset_id", 1))
+    summary = meta_maps.get("subject_summaries", {}).get(sid)
+    return {
+        "subject_id": subject_id,
+        "dataset_id": dataset_id,
+        "subject_summary": summary,
+        **domain_ids,
     }
 
 
