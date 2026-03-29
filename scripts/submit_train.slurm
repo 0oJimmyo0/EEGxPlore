@@ -2,8 +2,8 @@
 #SBATCH --job-name=FACED_ADAPTER
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_adapter_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_adapter_%j.err
-#SBATCH --partition=gpu_devel
-#SBATCH --gres=gpu:a40:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -29,7 +29,8 @@
 # ------------------------------
 # RUN IDENTITY
 # ------------------------------
-RUN_TAG="${RUN_TAG:-CBra + Adapter}"
+STAGE="${STAGE:-A4}"  # A0|A1|A2|A2b|A3|A4|A5|custom
+RUN_TAG="${RUN_TAG:-${STAGE}}"
 
 # ------------------------------
 # DATA + PATHS
@@ -42,13 +43,14 @@ mkdir -p "$model_dir"
 FACED_META_DIR=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta
 FACED_META_CSV="${FACED_META_CSV:-$FACED_META_DIR/Recording_info.csv}"
 
-# Optional EEG channel-context metadata file (.json/.pt/.pth)
-# Must contain any subset of: channel_ids, coords, montage_mask, region_ids
-CHANNEL_CONTEXT_FILE="${CHANNEL_CONTEXT_FILE:-$FACED_META_DIR/channel_context.json}"
+# Optional EEG channel-context metadata file (.json/.pt/.pth/.xlsx)
+# Must contain any subset of: channel_ids, coords, montage_mask, region_ids.
+# For FACED, Electrode_Location.xlsx is supported directly.
+CHANNEL_CONTEXT_FILE="${CHANNEL_CONTEXT_FILE:-$FACED_META_DIR/Electrode_Location.xlsx}"
 
 # Optional subject summary map (.json/.pt/.pth): {"sub000": [...], ...}
 SUBJECT_SUMMARY_FILE="${SUBJECT_SUMMARY_FILE:-}"
-USE_SUBJECT_SUMMARY="${USE_SUBJECT_SUMMARY:-0}"   # 0|1
+USE_SUBJECT_SUMMARY="${USE_SUBJECT_SUMMARY:-}"   # 0|1, stage preset applies when unset
 SUBJECT_SUMMARY_HANDLING="${SUBJECT_SUMMARY_HANDLING:-project}"  # project|error
 
 # ------------------------------
@@ -67,16 +69,82 @@ cuda_id="${CUDA_ID:-0}"
 # ------------------------------
 # ADAPTER + EEG CONTEXT KNOBS
 # ------------------------------
-ATTNRES_VARIANT="${ATTNRES_VARIANT:-none}"  # none|pre_attn|full|...
+# Stage presets (can be overridden by explicit env vars)
+ATTNRES_VARIANT_PRESET="none"
+EEG_CONTEXT_PRESET="0"
+ADAPTER_MODE_PRESET="none"
+USE_SUBJECT_SUMMARY_PRESET="0"
+
+case "$STAGE" in
+  A0)
+    ATTNRES_VARIANT_PRESET="none"
+    EEG_CONTEXT_PRESET="0"
+    ADAPTER_MODE_PRESET="none"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ;;
+  A1)
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="0"
+    ADAPTER_MODE_PRESET="none"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ;;
+  A2)
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="1"
+    ADAPTER_MODE_PRESET="none"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ;;
+  A2b)
+    # Special diagnostic bundle; per-run knobs are configured later.
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="1"
+    ADAPTER_MODE_PRESET="none"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ;;
+  A3)
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="0"
+    ADAPTER_MODE_PRESET="subject_domain"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ;;
+  A4)
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="1"
+    ADAPTER_MODE_PRESET="subject_domain"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ;;
+  A5)
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="1"
+    ADAPTER_MODE_PRESET="subject_domain"
+    USE_SUBJECT_SUMMARY_PRESET="1"
+    ;;
+  custom)
+    ;;
+  *)
+    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A4|A5|custom." >&2
+    exit 2
+    ;;
+esac
+
+ATTNRES_VARIANT="${ATTNRES_VARIANT:-$ATTNRES_VARIANT_PRESET}"  # none|pre_attn|full|...
 ATTNRES_START_LAYER="${ATTNRES_START_LAYER:-0}"
-ADAPTER_MODE="${ADAPTER_MODE:-subject_domain}"   # subject_domain | none
+ADAPTER_MODE="${ADAPTER_MODE:-$ADAPTER_MODE_PRESET}"   # subject_domain | none
 ADAPTER_NUM_LAYERS="${ADAPTER_NUM_LAYERS:-4}"
 ADAPTER_RANK="${ADAPTER_RANK:-32}"
 ADAPTER_COND_DIM="${ADAPTER_COND_DIM:-32}"
 ADAPTER_SCALE="${ADAPTER_SCALE:-0.01}"
+ADAPTER_USE_AGE_BUCKET="${ADAPTER_USE_AGE_BUCKET:-1}"          # 0|1
+ADAPTER_USE_SEGMENT_BUCKET="${ADAPTER_USE_SEGMENT_BUCKET:-0}"  # 0|1 (keep 0 to avoid leakage-style shortcut)
+ADAPTER_USE_SUBJECT_ID="${ADAPTER_USE_SUBJECT_ID:-1}"          # 0|1
+SUBJECT_OVERLAP_POLICY="${SUBJECT_OVERLAP_POLICY:-disable}"    # error|disable|allow
+CHANNEL_ID_ALIGN_MODE="${CHANNEL_ID_ALIGN_MODE:-auto}"         # auto|strict|off
 
 # 1 => enable channel/electrode context injection
-EEG_CONTEXT="${EEG_CONTEXT:-0}"
+EEG_CONTEXT="${EEG_CONTEXT:-$EEG_CONTEXT_PRESET}"
+
+# Apply stage preset for subject summary unless explicitly set by user
+USE_SUBJECT_SUMMARY="${USE_SUBJECT_SUMMARY:-$USE_SUBJECT_SUMMARY_PRESET}"
 
 # ------------------------------
 # CONTINUAL LEARNING KNOBS
@@ -90,7 +158,7 @@ CONTINUAL_DISTILL_WEIGHT="${CONTINUAL_DISTILL_WEIGHT:-0.2}"
 CONTINUAL_DISTILL_TEMP="${CONTINUAL_DISTILL_TEMP:-2.0}"
 
 # 1 => freeze backbone except adapter/context/classifier (for incremental subject update)
-ADAPTER_ONLY_UPDATE="${ADAPTER_ONLY_UPDATE:-1}"
+ADAPTER_ONLY_UPDATE="${ADAPTER_ONLY_UPDATE:-0}"
 
 # ------------------------------
 # LEGACY MoE SWITCH (optional)
@@ -119,21 +187,22 @@ conda activate cbramod
 # Optional flags assembly
 EXTRA_FLAGS=()
 
+echo "[slurm] stage=$STAGE run_tag=$RUN_TAG" >&2
+echo "[slurm] config attnres=$ATTNRES_VARIANT eeg_context=$EEG_CONTEXT adapter_mode=$ADAPTER_MODE use_subject_summary=$USE_SUBJECT_SUMMARY" >&2
+
 if [[ ! -f "$FACED_META_CSV" ]]; then
   echo "[slurm] FACED_META_CSV not found: $FACED_META_CSV" >&2
   echo "[slurm] Set FACED_META_CSV or FACED_META_DIR to a valid FACED metadata path." >&2
   exit 2
 fi
 
-if [[ "$EEG_CONTEXT" == "1" ]]; then
-  # Accept missing optional context file: keep run alive and disable EEG context instead of crashing.
-  if [[ -z "$CHANNEL_CONTEXT_FILE" ]] || [[ "$CHANNEL_CONTEXT_FILE" == "/path/to/channel_context.json" ]]; then
-    echo "[slurm] EEG_CONTEXT=1 but CHANNEL_CONTEXT_FILE is unset/placeholder; disabling EEG context." >&2
-    EEG_CONTEXT=0
+if [[ "$STAGE" != "A2b" && "$EEG_CONTEXT" == "1" ]]; then
+  if [[ -z "$CHANNEL_CONTEXT_FILE" ]] || [[ "$CHANNEL_CONTEXT_FILE" == "/path/to/channel_context.json" ]] || [[ "$CHANNEL_CONTEXT_FILE" == "/path/to/Electrode_Location.xlsx" ]]; then
+    echo "[slurm] EEG_CONTEXT=1 requires a real CHANNEL_CONTEXT_FILE path (not empty/placeholder)." >&2
+    exit 2
   elif [[ ! -f "$CHANNEL_CONTEXT_FILE" ]]; then
     echo "[slurm] EEG_CONTEXT=1 but CHANNEL_CONTEXT_FILE not found: $CHANNEL_CONTEXT_FILE" >&2
-    echo "[slurm] Disabling EEG context for this run." >&2
-    EEG_CONTEXT=0
+    exit 2
   else
     EXTRA_FLAGS+=(--eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE")
   fi
@@ -151,6 +220,23 @@ fi
 if [[ "$ADAPTER_ONLY_UPDATE" == "1" ]]; then
   EXTRA_FLAGS+=(--adapter_only_update)
 fi
+if [[ "$ADAPTER_USE_AGE_BUCKET" == "1" ]]; then
+  EXTRA_FLAGS+=(--adapter_use_age_bucket)
+else
+  EXTRA_FLAGS+=(--no-adapter_use_age_bucket)
+fi
+if [[ "$ADAPTER_USE_SEGMENT_BUCKET" == "1" ]]; then
+  EXTRA_FLAGS+=(--adapter_use_segment_bucket)
+else
+  EXTRA_FLAGS+=(--no-adapter_use_segment_bucket)
+fi
+if [[ "$ADAPTER_USE_SUBJECT_ID" == "1" ]]; then
+  EXTRA_FLAGS+=(--adapter_use_subject_id)
+else
+  EXTRA_FLAGS+=(--no-adapter_use_subject_id)
+fi
+EXTRA_FLAGS+=(--subject_overlap_policy "$SUBJECT_OVERLAP_POLICY")
+EXTRA_FLAGS+=(--channel_id_align_mode "$CHANNEL_ID_ALIGN_MODE")
 EXTRA_FLAGS+=(--subject_summary_handling "$SUBJECT_SUMMARY_HANDLING")
 if [[ "$METADATA_DEBUG" == "1" ]]; then
   EXTRA_FLAGS+=(--metadata_debug)
@@ -183,38 +269,156 @@ fi
 # Always pass FACED metadata csv so subject/domain id maps are built consistently.
 EXTRA_FLAGS+=(--faced_meta_csv "$FACED_META_CSV")
 
-python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py \
-  --seed "$seed" \
-  --cuda "$cuda_id" \
-  --epochs "$epochs" \
-  --batch_size "$batch_size" \
-  --lr "$lr" \
-  --weight_decay "$weight_decay" \
-  --optimizer AdamW \
-  --clip_value "$clip_value" \
-  --dropout "$dropout" \
-  --classifier all_patch_reps \
-  --downstream_dataset "$downstream_dataset" \
-  --datasets_dir "$dataset_dir" \
-  --num_of_classes 9 \
-  --model_dir "$model_dir" \
-  --label_smoothing "$label_smoothing" \
-  --num_workers 4 \
-  --attnres_variant "$ATTNRES_VARIANT" \
-  --attnres_start_layer "$ATTNRES_START_LAYER" \
-  --use_pretrained_weights \
-  --adapter_mode "$ADAPTER_MODE" \
-  --adapter_num_layers "$ADAPTER_NUM_LAYERS" \
-  --adapter_rank "$ADAPTER_RANK" \
-  --adapter_cond_dim "$ADAPTER_COND_DIM" \
-  --adapter_scale "$ADAPTER_SCALE" \
-  --continual_mode "$CONTINUAL_MODE" \
-  --continual_memory_size "$CONTINUAL_MEMORY_SIZE" \
-  --continual_replay_batch_size "$CONTINUAL_REPLAY_BATCH_SIZE" \
-  --continual_replay_weight "$CONTINUAL_REPLAY_WEIGHT" \
-  --continual_distill_weight "$CONTINUAL_DISTILL_WEIGHT" \
-  --continual_distill_temp "$CONTINUAL_DISTILL_TEMP" \
-  "${EXTRA_FLAGS[@]}"
+run_finetune() {
+  local local_model_dir="$1"
+  shift
+  python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/finetune_main.py \
+    --seed "$seed" \
+    --cuda "$cuda_id" \
+    --epochs "$epochs" \
+    --batch_size "$batch_size" \
+    --lr "$lr" \
+    --weight_decay "$weight_decay" \
+    --optimizer AdamW \
+    --clip_value "$clip_value" \
+    --dropout "$dropout" \
+    --classifier all_patch_reps \
+    --downstream_dataset "$downstream_dataset" \
+    --datasets_dir "$dataset_dir" \
+    --num_of_classes 9 \
+    --model_dir "$local_model_dir" \
+    --label_smoothing "$label_smoothing" \
+    --num_workers 4 \
+    --attnres_variant "$ATTNRES_VARIANT" \
+    --attnres_start_layer "$ATTNRES_START_LAYER" \
+    --use_pretrained_weights \
+    --adapter_mode "$ADAPTER_MODE" \
+    --adapter_num_layers "$ADAPTER_NUM_LAYERS" \
+    --adapter_rank "$ADAPTER_RANK" \
+    --adapter_cond_dim "$ADAPTER_COND_DIM" \
+    --adapter_scale "$ADAPTER_SCALE" \
+    --continual_mode "$CONTINUAL_MODE" \
+    --continual_memory_size "$CONTINUAL_MEMORY_SIZE" \
+    --continual_replay_batch_size "$CONTINUAL_REPLAY_BATCH_SIZE" \
+    --continual_replay_weight "$CONTINUAL_REPLAY_WEIGHT" \
+    --continual_distill_weight "$CONTINUAL_DISTILL_WEIGHT" \
+    --continual_distill_temp "$CONTINUAL_DISTILL_TEMP" \
+    "$@"
+}
+
+summarize_log() {
+  local label="$1"
+  local log_path="$2"
+
+  local best_vals
+  best_vals=$(grep -E "^Epoch [0-9]+ :" "$log_path" | \
+    awk -F'[,: ]+' 'BEGIN{bestAcc=-1;bestK=-1} {ep=$2; acc=$7; k=$9; if(acc>bestAcc){bestAcc=acc;bestAccEp=ep} if(k>bestK){bestK=k;bestKEp=ep} lastAcc=acc; lastK=k; lastEp=ep} END{printf("%.5f %.5f %d %.5f %.5f",bestAcc,bestK,lastEp,lastAcc,lastK)}')
+  if [[ -z "$best_vals" ]]; then
+    echo "[A2b][summary] $label parse_error=1 log=$log_path" >&2
+    return 1
+  fi
+
+  local best_acc best_kappa last_ep last_acc last_kappa
+  read -r best_acc best_kappa last_ep last_acc last_kappa <<< "$best_vals"
+
+  local static_fields="unknown"
+  static_fields=$(grep -E "\[channel-context\]" "$log_path" | sed -n '1p' | sed -n 's/.*used_static_fields=\([^ ]*\).*/\1/p')
+  if [[ -z "$static_fields" ]]; then
+    static_fields="-"
+  fi
+
+  echo "$label $best_acc $best_kappa $last_ep $last_acc $last_kappa $static_fields"
+}
+
+if [[ "$STAGE" == "A2b" ]]; then
+  if [[ -z "$CHANNEL_CONTEXT_FILE" ]] || [[ "$CHANNEL_CONTEXT_FILE" == "/path/to/channel_context.json" ]] || [[ "$CHANNEL_CONTEXT_FILE" == "/path/to/Electrode_Location.xlsx" ]]; then
+    echo "[slurm] A2b requires CHANNEL_CONTEXT_FILE to be set to a real file path." >&2
+    exit 2
+  fi
+  if [[ ! -f "$CHANNEL_CONTEXT_FILE" ]]; then
+    echo "[slurm] A2b CHANNEL_CONTEXT_FILE not found: $CHANNEL_CONTEXT_FILE" >&2
+    exit 2
+  fi
+
+  A2B_RAW_CONTEXT_FILE="${A2B_RAW_CONTEXT_FILE:-$CHANNEL_CONTEXT_FILE}"
+  A2B_RICH_CONTEXT_FILE="${A2B_RICH_CONTEXT_FILE:-$A2B_RAW_CONTEXT_FILE}"
+  if [[ ! -f "$A2B_RAW_CONTEXT_FILE" ]]; then
+    echo "[slurm] A2b raw context file not found: $A2B_RAW_CONTEXT_FILE" >&2
+    exit 2
+  fi
+  if [[ ! -f "$A2B_RICH_CONTEXT_FILE" ]]; then
+    echo "[slurm] A2b rich context file not found: $A2B_RICH_CONTEXT_FILE" >&2
+    exit 2
+  fi
+
+  A2B_LOG_DIR="${A2B_LOG_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/a2b_${SLURM_JOB_ID}}"
+  mkdir -p "$A2B_LOG_DIR"
+
+  declare -a A2B_ROWS=()
+  declare -A A2B_BEST_ACC=()
+  declare -A A2B_BEST_KAPPA=()
+
+  run_and_collect() {
+    local label="$1"
+    local eeg_flag="$2"
+    local align_mode="$3"
+    local context_file="$4"
+    local run_model_dir="$model_dir/$label"
+    local run_log="$A2B_LOG_DIR/${label}.log"
+
+    mkdir -p "$run_model_dir"
+
+    local -a run_flags=("${EXTRA_FLAGS[@]}")
+    if [[ "$eeg_flag" == "1" ]]; then
+      run_flags+=(--eeg_channel_context --channel_context_file "$context_file" --channel_id_align_mode "$align_mode")
+    else
+      run_flags+=(--channel_id_align_mode "$align_mode")
+    fi
+
+    echo "[A2b] start label=$label eeg_context=$eeg_flag channel_id_align_mode=$align_mode context_file=${context_file:-none} model_dir=$run_model_dir" >&2
+    run_finetune "$run_model_dir" "${run_flags[@]}" 2>&1 | tee "$run_log"
+
+    local row
+    row=$(summarize_log "$label" "$run_log") || exit 3
+    A2B_ROWS+=("$row")
+
+    local _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static
+    read -r _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static <<< "$row"
+    A2B_BEST_ACC["$_label"]="$_best_acc"
+    A2B_BEST_KAPPA["$_label"]="$_best_kappa"
+  }
+
+  # Three diagnostics back-to-back:
+  # 1) A1_ref: no channel context (overhead/control baseline)
+  # 2) A2_raw_auto: channel context with raw file + auto alignment
+  # 3) A2_rich_strict: channel context with richer file + strict alignment
+  run_and_collect "A1_ref" "0" "auto" ""
+  run_and_collect "A2_raw_auto" "1" "auto" "$A2B_RAW_CONTEXT_FILE"
+  run_and_collect "A2_rich_strict" "1" "strict" "$A2B_RICH_CONTEXT_FILE"
+
+  calc_delta() {
+    awk -v a="$1" -v b="$2" 'BEGIN {printf("%.5f", a - b)}'
+  }
+
+  echo "[A2b][summary] log_dir=$A2B_LOG_DIR"
+  echo "[A2b][summary] label best_acc best_kappa last_ep last_acc last_kappa used_static_fields"
+  for row in "${A2B_ROWS[@]}"; do
+    echo "[A2b][summary] $row"
+  done
+
+  ref_acc="${A2B_BEST_ACC[A1_ref]}"
+  ref_kappa="${A2B_BEST_KAPPA[A1_ref]}"
+  auto_acc="${A2B_BEST_ACC[A2_raw_auto]}"
+  auto_kappa="${A2B_BEST_KAPPA[A2_raw_auto]}"
+  strict_acc="${A2B_BEST_ACC[A2_rich_strict]}"
+  strict_kappa="${A2B_BEST_KAPPA[A2_rich_strict]}"
+
+  echo "[A2b][delta] vs=A1_ref target=A2_raw_auto d_best_acc=$(calc_delta "$auto_acc" "$ref_acc") d_best_kappa=$(calc_delta "$auto_kappa" "$ref_kappa")"
+  echo "[A2b][delta] vs=A1_ref target=A2_rich_strict d_best_acc=$(calc_delta "$strict_acc" "$ref_acc") d_best_kappa=$(calc_delta "$strict_kappa" "$ref_kappa")"
+  echo "[A2b][delta] vs=A2_raw_auto target=A2_rich_strict d_best_acc=$(calc_delta "$strict_acc" "$auto_acc") d_best_kappa=$(calc_delta "$strict_kappa" "$auto_kappa")"
+else
+  run_finetune "$model_dir" "${EXTRA_FLAGS[@]}"
+fi
 
 # =============================================================================
 # Suggested sweeps for impact analysis (change one group at a time)

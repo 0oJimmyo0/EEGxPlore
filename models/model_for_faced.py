@@ -7,9 +7,10 @@ from .cbramod import CBraMod, backbone_finetune_kwargs, load_foundation_into_bac
 class Model(nn.Module):
     def __init__(self, param):
         super().__init__()
+        faced_channels = 32
 
         self.backbone = CBraMod(
-            in_dim=200,
+            in_dim=faced_channels,
             out_dim=200,
             d_model=200,
             dim_feedforward=800,

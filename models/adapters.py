@@ -3,7 +3,10 @@ from __future__ import annotations
 import contextvars
 import json
 import os
-from typing import Any, Dict, List, Optional
+import re
+import xml.etree.ElementTree as ET
+from zipfile import ZipFile
+from typing import Any, Dict, Iterable, List, Optional
 
 import torch
 import torch.nn as nn
@@ -33,8 +36,135 @@ def _to_tensor(x, dtype=torch.float32):
     return torch.tensor(x, dtype=dtype)
 
 
-def load_channel_context_file(path: str, expected_channels: Optional[int] = None) -> Dict[str, torch.Tensor]:
-    """Loads optional EEG channel context data from .pt/.pth/.json.
+_XLSX_NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_XLSX_NS_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_XLSX_NS = {"a": _XLSX_NS_MAIN, "r": _XLSX_NS_REL}
+
+
+def _xlsx_col_to_index(cell_ref: str) -> int:
+    letters = []
+    for ch in cell_ref:
+        if ch.isalpha():
+            letters.append(ch.upper())
+        else:
+            break
+    if not letters:
+        return -1
+    idx = 0
+    for ch in letters:
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
+def _xlsx_cell_text(cell: ET.Element, shared_strings: List[str]) -> str:
+    cell_type = cell.attrib.get("t")
+    if cell_type == "inlineStr":
+        return "".join(t.text or "" for t in cell.findall(".//a:t", _XLSX_NS))
+
+    v = cell.find("a:v", _XLSX_NS)
+    if v is None:
+        return ""
+    text = v.text or ""
+    if cell_type == "s":
+        try:
+            return shared_strings[int(text)]
+        except (ValueError, IndexError):
+            return text
+    return text
+
+
+def _xlsx_read_shared_strings(zf: ZipFile) -> List[str]:
+    if "xl/sharedStrings.xml" not in zf.namelist():
+        return []
+    root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+    out: List[str] = []
+    for si in root.findall("a:si", _XLSX_NS):
+        out.append("".join(t.text or "" for t in si.findall(".//a:t", _XLSX_NS)))
+    return out
+
+
+def _xlsx_parse_sheet_rows(zf: ZipFile, target: str, shared_strings: List[str]) -> List[List[str]]:
+    if not target.startswith("xl/"):
+        target = f"xl/{target}"
+    root = ET.fromstring(zf.read(target))
+    rows: List[List[str]] = []
+    for row in root.findall("a:sheetData/a:row", _XLSX_NS):
+        sparse: Dict[int, str] = {}
+        for cell in row.findall("a:c", _XLSX_NS):
+            cell_ref = cell.attrib.get("r", "")
+            idx = _xlsx_col_to_index(cell_ref)
+            if idx < 0:
+                continue
+            sparse[idx] = _xlsx_cell_text(cell, shared_strings)
+        if not sparse:
+            continue
+        max_col = max(sparse.keys())
+        rows.append([sparse.get(i, "") for i in range(max_col + 1)])
+    return rows
+
+
+def _parse_positive_int(val: str) -> Optional[int]:
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        num = float(s)
+    except ValueError:
+        return None
+    if not num.is_integer():
+        return None
+    out = int(num)
+    return out if out > 0 else None
+
+
+def _load_channel_context_xlsx(path: str) -> Dict[str, Any]:
+    """Parses FACED Electrode_Location.xlsx style sheets into channel context."""
+    with ZipFile(path, "r") as zf:
+        wb = ET.fromstring(zf.read("xl/workbook.xml"))
+        rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+        rel_map = {rel.attrib["Id"]: rel.attrib["Target"] for rel in rels}
+        shared_strings = _xlsx_read_shared_strings(zf)
+
+        id_to_name: Dict[int, str] = {}
+        sheets = wb.findall("a:sheets/a:sheet", _XLSX_NS)
+        for sheet in sheets:
+            rid = sheet.attrib.get(f"{{{_XLSX_NS_REL}}}id")
+            if not rid or rid not in rel_map:
+                continue
+            rows = _xlsx_parse_sheet_rows(zf, rel_map[rid], shared_strings)
+            for row in rows:
+                # FACED layout is repeated [channel_id, channel_name] pairs across columns.
+                for col in range(0, max(0, len(row) - 1), 2):
+                    channel_id = _parse_positive_int(row[col])
+                    if channel_id is None:
+                        continue
+                    name = re.sub(r"\s+", " ", str(row[col + 1]).strip())
+                    if not name:
+                        continue
+                    if not re.search(r"[A-Za-z]", name):
+                        continue
+                    id_to_name[channel_id] = name
+
+    if not id_to_name:
+        raise ValueError(
+            "Failed to parse channel id/name pairs from .xlsx. "
+            "Expected FACED Electrode_Location layout with [id, name] pairs."
+        )
+
+    ordered_ids = sorted(id_to_name.keys())
+    return {
+        "channel_ids": ordered_ids,
+        "channel_names": [id_to_name[i] for i in ordered_ids],
+    }
+
+
+def load_channel_context_file(
+    path: str,
+    expected_channels: Optional[int] = None,
+    expected_channel_ids: Optional[Iterable[int]] = None,
+    align_mode: str = "auto",
+) -> Dict[str, torch.Tensor]:
+    """Loads optional EEG channel context data from .pt/.pth/.json/.xlsx.
 
     Expected keys (all optional):
       - channel_ids: [C]
@@ -53,8 +183,10 @@ def load_channel_context_file(path: str, expected_channels: Optional[int] = None
     elif ext == ".json":
         with open(path, "r", encoding="utf-8") as f:
             blob = json.load(f)
+    elif ext == ".xlsx":
+        blob = _load_channel_context_xlsx(path)
     else:
-        raise ValueError("channel_context_file must be .pt/.pth/.json")
+        raise ValueError("channel_context_file must be .pt/.pth/.json/.xlsx")
 
     if not isinstance(blob, dict):
         raise ValueError("channel_context_file must contain a dictionary")
@@ -95,6 +227,59 @@ def load_channel_context_file(path: str, expected_channels: Optional[int] = None
         rg = torch.as_tensor(region_ids, dtype=torch.long).view(-1)
         _ensure_len("region_ids", int(rg.numel()))
         out["region_ids"] = rg
+
+    if inferred_channels is not None and expected_channels is not None and int(inferred_channels) != int(expected_channels):
+        raise ValueError(
+            f"channel context inferred channels={inferred_channels} does not match expected={expected_channels}"
+        )
+
+    if align_mode not in {"auto", "strict", "off"}:
+        raise ValueError("align_mode must be one of: auto, strict, off")
+
+    if "channel_ids" in out:
+        ch = out["channel_ids"]
+        if int(torch.unique(ch).numel()) != int(ch.numel()):
+            raise ValueError("channel_ids contains duplicate values")
+        if expected_channel_ids is not None and align_mode != "off":
+            exp = torch.as_tensor(list(expected_channel_ids), dtype=torch.long).view(-1)
+            if exp.numel() != ch.numel():
+                raise ValueError(
+                    "channel_ids length mismatch with expected channels "
+                    f"(expected={int(exp.numel())}, got={int(ch.numel())})"
+                )
+
+            ch_cpu = ch.cpu()
+            if align_mode == "auto" and not torch.equal(ch_cpu, exp):
+                # Common convention: 1..C instead of 0..C-1.
+                one_based = exp + 1
+                if torch.equal(ch_cpu, one_based):
+                    ch_cpu = exp.clone()
+                    out["channel_ids"] = ch_cpu
+
+            if torch.equal(ch_cpu, exp):
+                return out
+
+            if align_mode == "strict":
+                raise ValueError(
+                    "channel_ids in context file do not match expected labels/order "
+                    f"(expected={exp.tolist()}, got={ch_cpu.tolist()})"
+                )
+
+            # Same labels but different order: reorder arrays to expected order.
+            exp_set = set(exp.tolist())
+            ch_set = set(ch_cpu.tolist())
+            if ch_set == exp_set:
+                idx_map = {int(v): i for i, v in enumerate(ch_cpu.tolist())}
+                perm = torch.as_tensor([idx_map[int(v)] for v in exp.tolist()], dtype=torch.long)
+                for key in ("channel_ids", "coords", "montage_mask", "region_ids"):
+                    if key in out:
+                        out[key] = out[key].index_select(0, perm)
+                out["channel_ids"] = exp.clone()
+            else:
+                raise ValueError(
+                    "channel_ids set mismatch with expected labels "
+                    f"(expected_set={sorted(exp_set)}, got_set={sorted(ch_set)})"
+                )
 
     return out
 
@@ -170,8 +355,11 @@ class EEGChannelContextEncoder(nn.Module):
         self.coord_proj = nn.Linear(coord_dim, d_model)
         self.mask_proj = nn.Linear(1, d_model)
         self.count_proj = nn.Linear(1, d_model)
+        self.context_scale = nn.Parameter(torch.tensor(0.0))
 
         # Weak init: metadata should guide, not dominate.
+        nn.init.zeros_(self.channel_emb.weight)
+        nn.init.zeros_(self.region_emb.weight)
         nn.init.zeros_(self.coord_proj.weight)
         nn.init.zeros_(self.coord_proj.bias)
         nn.init.zeros_(self.mask_proj.weight)
@@ -229,11 +417,23 @@ class EEGChannelContextEncoder(nn.Module):
                 f"present_batch_fields={present_fields} "
                 f"used_batch_fields={used_batch_fields} "
                 f"used_static_fields={static_fields} "
+                f"context_scale_init={float(self.context_scale.detach().item()):.4f} "
                 f"effective_dim={x.shape[-1]}",
                 flush=True,
             )
+            if (
+                self._has_file_channel_ids
+                and not self._has_file_coords
+                and not self._has_file_montage_mask
+                and not self._has_file_region_ids
+            ):
+                print(
+                    "[channel-context][warning] only channel_ids are provided; "
+                    "no coords/montage/region metadata found. Context signal may be weak.",
+                    flush=True,
+                )
             self._usage_logged = True
-        return x + bias.unsqueeze(2)
+        return x + (self.context_scale * bias).unsqueeze(2)
 
 
 class SubjectDomainAdapter(nn.Module):
@@ -251,15 +451,23 @@ class SubjectDomainAdapter(nn.Module):
         domain_vocab: int = 256,
         adapter_scale: float = 0.2,
         use_subject_summary: bool = False,
+        subject_summary_dim: int = 0,
         subject_summary_handling: str = "project",
         metadata_debug: bool = True,
         log_usage: bool = True,
+        use_subject_id: bool = True,
+        use_age_bucket: bool = True,
+        use_segment_bucket: bool = False,
     ):
         super().__init__()
         self.rank = int(rank)
         self.cond_dim = int(cond_dim)
         self.adapter_scale = float(adapter_scale)
         self.use_subject_summary = bool(use_subject_summary)
+        self.subject_summary_dim = int(subject_summary_dim)
+        self.use_subject_id = bool(use_subject_id)
+        self.use_age_bucket = bool(use_age_bucket)
+        self.use_segment_bucket = bool(use_segment_bucket)
         if subject_summary_handling not in {"project", "error"}:
             raise ValueError("subject_summary_handling must be one of: project, error")
         self.subject_summary_handling = subject_summary_handling
@@ -279,7 +487,18 @@ class SubjectDomainAdapter(nn.Module):
             nn.GELU(),
             nn.Linear(cond_dim, 2 * self.rank),
         )
-        self.subject_summary_proj = nn.ModuleDict()
+        self.subject_summary_proj = None
+        if self.use_subject_summary:
+            if self.subject_summary_dim <= 0:
+                raise ValueError(
+                    "use_subject_summary=True requires a positive subject_summary_dim at model init."
+                )
+            if self.subject_summary_dim == self.cond_dim:
+                self.subject_summary_proj = nn.Identity()
+            else:
+                self.subject_summary_proj = nn.Linear(self.subject_summary_dim, self.cond_dim, bias=True)
+                nn.init.zeros_(self.subject_summary_proj.weight)
+                nn.init.zeros_(self.subject_summary_proj.bias)
 
         self.norm = nn.LayerNorm(d_model)
         self.down = nn.Linear(d_model, self.rank, bias=False)
@@ -297,30 +516,15 @@ class SubjectDomainAdapter(nn.Module):
             raise ValueError(f"subject_summary must be [B,D] or [D], got shape {tuple(ssum.shape)}")
         ssum = ssum.to(device=device, dtype=dtype)
         in_dim = int(ssum.shape[1])
-        if in_dim == self.cond_dim:
-            return ssum
-        msg = (
-            "subject_summary feature dimension mismatch: "
-            f"got {in_dim}, expected {self.cond_dim}. "
-            "Use --subject_summary_handling project (recommended) "
-            "or --subject_summary_handling error."
-        )
-        if self.subject_summary_handling == "error":
+        if in_dim != self.subject_summary_dim:
+            msg = (
+                "subject_summary feature dimension mismatch: "
+                f"got {in_dim}, expected {self.subject_summary_dim}."
+            )
             raise ValueError(msg)
-
-        key = f"in_{in_dim}"
-        if key not in self.subject_summary_proj:
-            proj = nn.Linear(in_dim, self.cond_dim, bias=True)
-            nn.init.zeros_(proj.weight)
-            nn.init.zeros_(proj.bias)
-            self.subject_summary_proj[key] = proj
-            if self.metadata_debug and self.log_usage:
-                print(
-                    "[adapter-meta] created subject_summary projector "
-                    f"{in_dim}->{self.cond_dim} (zero-init)",
-                    flush=True,
-                )
-        proj = self.subject_summary_proj[key].to(device=device, dtype=dtype)
+        if self.subject_summary_proj is None:
+            raise ValueError("subject_summary projection is not initialized")
+        proj = self.subject_summary_proj.to(device=device, dtype=dtype)
         return proj(ssum)
 
     def _log_usage_once(
@@ -349,12 +553,20 @@ class SubjectDomainAdapter(nn.Module):
 
         used_fields: List[str] = []
         sid = batch_meta.get("subject_id")
-        if not torch.is_tensor(sid):
+        if self.use_subject_id and not torch.is_tensor(sid):
             self._log_usage_once(batch_meta, [], "disabled")
             return None
-
-        sid = sid.to(device=device, dtype=torch.long)
-        used_fields.append("subject_id")
+        if torch.is_tensor(sid):
+            sid = sid.to(device=device, dtype=torch.long)
+            if self.use_subject_id:
+                used_fields.append("subject_id")
+        else:
+            # fall back to zeros so domain-only adapters can still run
+            ref = batch_meta.get("dataset_id")
+            if not torch.is_tensor(ref):
+                self._log_usage_once(batch_meta, [], "disabled")
+                return None
+            sid = torch.zeros_like(ref.to(device=device, dtype=torch.long))
         cohort = batch_meta.get("cohort_id")
         cohort = cohort.to(device=device, dtype=torch.long) if torch.is_tensor(cohort) else torch.zeros_like(sid)
         if torch.is_tensor(batch_meta.get("cohort_id")):
@@ -369,22 +581,20 @@ class SubjectDomainAdapter(nn.Module):
             used_fields.append("sample_rate_group_id")
         age = batch_meta.get("age_bucket_id")
         age = age.to(device=device, dtype=torch.long) if torch.is_tensor(age) else torch.zeros_like(sid)
-        if torch.is_tensor(batch_meta.get("age_bucket_id")):
+        if self.use_age_bucket and torch.is_tensor(batch_meta.get("age_bucket_id")):
             used_fields.append("age_bucket_id")
         seg = batch_meta.get("segment_bucket_id")
         seg = seg.to(device=device, dtype=torch.long) if torch.is_tensor(seg) else torch.zeros_like(sid)
-        if torch.is_tensor(batch_meta.get("segment_bucket_id")):
+        if self.use_segment_bucket and torch.is_tensor(batch_meta.get("segment_bucket_id")):
             used_fields.append("segment_bucket_id")
 
-        cond = self.subject_emb(sid)
-        cond = (
-            cond
-            + self.cohort_emb(cohort)
-            + self.dataset_emb(did)
-            + self.sr_group_emb(srg)
-            + self.age_bucket_emb(age)
-            + self.segment_bucket_emb(seg)
-        )
+        cond = self.cohort_emb(cohort) + self.dataset_emb(did) + self.sr_group_emb(srg)
+        if self.use_subject_id:
+            cond = cond + self.subject_emb(sid)
+        if self.use_age_bucket:
+            cond = cond + self.age_bucket_emb(age)
+        if self.use_segment_bucket:
+            cond = cond + self.segment_bucket_emb(seg)
 
         summary_status = "disabled"
         ssum = batch_meta.get("subject_summary")
@@ -398,7 +608,7 @@ class SubjectDomainAdapter(nn.Module):
                     )
                 cond = cond + 0.1 * ssum_cond
                 used_fields.append("subject_summary")
-                summary_status = f"used({int(ssum.shape[-1])}->{self.cond_dim})"
+                summary_status = f"used({self.subject_summary_dim}->{self.cond_dim})"
             else:
                 summary_status = "enabled_but_missing"
         self._log_usage_once(batch_meta, used_fields, summary_status)

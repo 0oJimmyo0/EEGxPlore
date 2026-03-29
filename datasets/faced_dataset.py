@@ -2,12 +2,10 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from utils.util import to_tensor
-import os
-import random
 import lmdb
 import pickle
 
-from utils.faced_meta import build_faced_meta_maps, lmdb_key_to_subject_meta
+from utils.faced_meta import build_faced_meta_maps, lmdb_key_to_subject_meta, parse_faced_lmdb_key
 
 class CustomDataset(Dataset):
     def __init__(
@@ -125,6 +123,7 @@ class LoadDataset(object):
             getattr(self.params, 'subject_summary_file', ''),
             use_subject_summary=use_subject_summary,
         ) if return_metadata else {}
+        produced_fields = []
         if return_metadata:
             produced_fields = [
                 "subject_id",
@@ -142,6 +141,17 @@ class LoadDataset(object):
                 f"{produced_fields} use_subject_summary={use_subject_summary}",
                 flush=True,
             )
+            summary_dim = 0
+            if use_subject_summary:
+                summaries = meta_maps.get("subject_summaries", {})
+                if summaries:
+                    first = next(iter(summaries.values()))
+                    summary_dim = int(np.asarray(first, dtype=np.float32).reshape(-1).shape[0])
+            setattr(self.params, "metadata_produced_fields", produced_fields)
+            setattr(self.params, "subject_summary_dim", int(summary_dim))
+        else:
+            setattr(self.params, "metadata_produced_fields", [])
+            setattr(self.params, "subject_summary_dim", 0)
 
         train_set = CustomDataset(
             self.datasets_dir,
@@ -167,6 +177,50 @@ class LoadDataset(object):
             meta_maps=meta_maps,
             use_subject_summary=use_subject_summary,
         )
+
+        if return_metadata and getattr(self.params, 'subject_adapter', False):
+            def _subjects(ds):
+                out = set()
+                for k in ds.keys:
+                    kstr = k.decode() if isinstance(k, bytes) else str(k)
+                    sid = str(parse_faced_lmdb_key(kstr).get('sub_id', '')).strip().lower()
+                    if sid:
+                        out.add(sid)
+                return out
+
+            train_sub = _subjects(train_set)
+            val_sub = _subjects(val_set)
+            test_sub = _subjects(test_set)
+            overlap_pairs = {
+                'train_val': sorted(train_sub & val_sub),
+                'train_test': sorted(train_sub & test_sub),
+                'val_test': sorted(val_sub & test_sub),
+            }
+            has_overlap = any(len(v) > 0 for v in overlap_pairs.values())
+            print(
+                "[FACED split-check] "
+                f"subjects(train={len(train_sub)}, val={len(val_sub)}, test={len(test_sub)}) "
+                f"overlap_sizes={{'train_val': {len(overlap_pairs['train_val'])}, "
+                f"'train_test': {len(overlap_pairs['train_test'])}, "
+                f"'val_test': {len(overlap_pairs['val_test'])}}}",
+                flush=True,
+            )
+
+            if has_overlap and bool(getattr(self.params, 'adapter_use_subject_id', True)):
+                pol = str(getattr(self.params, 'subject_overlap_policy', 'disable')).lower()
+                msg = (
+                    "Subject overlap detected across FACED splits while adapter_use_subject_id=True. "
+                    "This can introduce identity shortcut leakage. "
+                    f"policy={pol}."
+                )
+                if pol == 'error':
+                    raise ValueError(msg)
+                if pol == 'disable':
+                    setattr(self.params, 'adapter_use_subject_id', False)
+                    print(f"[FACED split-check] {msg} Auto-setting adapter_use_subject_id=False.", flush=True)
+                else:
+                    print(f"[FACED split-check][warning] {msg} Keeping subject_id enabled.", flush=True)
+
         print(len(train_set), len(val_set), len(test_set))
         print(len(train_set)+len(val_set)+len(test_set))
         data_loader = {

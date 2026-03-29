@@ -419,7 +419,10 @@ class Trainer(object):
 
                 num_classes = int(getattr(self.params, "num_of_classes", 0))
                 train_pred_hist = torch.zeros(max(1, num_classes), dtype=torch.long)
+                train_true_hist = torch.zeros(max(1, num_classes), dtype=torch.long)
                 train_unknown_counter = _init_unknown_counter()
+                train_correct = 0
+                train_seen = 0
 
                 self.model.train()
                 start_time = timer()
@@ -434,9 +437,14 @@ class Trainer(object):
                         pred = _forward_with_optional_meta(self.model, x, batch_meta)
                         with torch.no_grad():
                             pred_cls = torch.argmax(pred.detach(), dim=-1).reshape(-1).to(dtype=torch.long)
+                            true_cls = y.detach().reshape(-1).to(dtype=torch.long)
                             if pred_cls.numel() > 0:
                                 binc = torch.bincount(pred_cls.cpu(), minlength=train_pred_hist.numel())
                                 train_pred_hist += binc[:train_pred_hist.numel()]
+                                tbinc = torch.bincount(true_cls.cpu(), minlength=train_true_hist.numel())
+                                train_true_hist += tbinc[:train_true_hist.numel()]
+                                train_correct += int((pred_cls == true_cls).sum().item())
+                                train_seen += int(true_cls.numel())
                             _update_unknown_counter(train_unknown_counter, batch_meta)
                         if self.params.downstream_dataset == 'ISRUC':
                             loss = self.criterion(pred.transpose(1, 2), y)
@@ -478,13 +486,25 @@ class Trainer(object):
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}", md)
                 tr_hist = train_pred_hist.tolist()
+                tr_true_hist = train_true_hist.tolist()
                 tr_total = max(1, int(sum(tr_hist)))
                 tr_ratio = [round(float(v) / float(tr_total), 4) for v in tr_hist]
+                tr_true_total = max(1, int(sum(tr_true_hist)))
+                tr_true_ratio = [round(float(v) / float(tr_true_total), 4) for v in tr_true_hist]
+                tr_acc = float(train_correct) / float(max(1, train_seen))
                 tr_unknown_ratio = {
                     k: round(v, 4) for k, v in _unknown_ratio_dict(train_unknown_counter).items()
                 }
                 print(
+                    f"[diag][train] ep={epoch + 1} acc={tr_acc:.4f}",
+                    flush=True,
+                )
+                print(
                     f"[diag][train] ep={epoch + 1} pred_hist={tr_hist} pred_ratio={tr_ratio}",
+                    flush=True,
+                )
+                print(
+                    f"[diag][train] ep={epoch + 1} true_hist={tr_true_hist} true_ratio={tr_true_ratio}",
                     flush=True,
                 )
                 print(
@@ -531,10 +551,17 @@ class Trainer(object):
                             print("[Gate values] " + " | ".join(gate_vals))
                     print(cm)
                     val_hist = np.asarray(cm).sum(axis=0).astype(int).tolist()
+                    val_true_hist = np.asarray(cm).sum(axis=1).astype(int).tolist()
                     val_total = max(1, int(sum(val_hist)))
                     val_ratio = [round(float(v) / float(val_total), 4) for v in val_hist]
+                    val_true_total = max(1, int(sum(val_true_hist)))
+                    val_true_ratio = [round(float(v) / float(val_true_total), 4) for v in val_true_hist]
                     print(
                         f"[diag][val] ep={epoch + 1} pred_hist={val_hist} pred_ratio={val_ratio}",
+                        flush=True,
+                    )
+                    print(
+                        f"[diag][val] ep={epoch + 1} true_hist={val_true_hist} true_ratio={val_true_ratio}",
                         flush=True,
                     )
                     val_diag = getattr(self.val_eval, "last_multiclass_diag", None)
@@ -590,6 +617,10 @@ class Trainer(object):
                     flush=True,
                 )
                 print(cm, flush=True)
+                test_pred_hist = np.asarray(cm).sum(axis=0).astype(int).tolist()
+                test_true_hist = np.asarray(cm).sum(axis=1).astype(int).tolist()
+                print(f"[diag][test] pred_hist={test_pred_hist}", flush=True)
+                print(f"[diag][test] true_hist={test_true_hist}", flush=True)
                 print("[post_test] after test confusion matrix", flush=True)
 
                 rd = getattr(self.params, "routing_export_dir", None) or ""

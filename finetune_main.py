@@ -95,7 +95,7 @@ def main():
     parser.add_argument(
         '--adapter_mode',
         type=str,
-        default='subject_domain',
+        default='none',
         choices=['none', 'subject_domain'],
         help='Subject/domain adaptation mode. subject_domain enables lightweight conditioned adapters.',
     )
@@ -137,7 +137,15 @@ def main():
         '--channel_context_file',
         type=str,
         default='',
-        help='Optional .json/.pt/.pth with channel_ids/coords/montage_mask/region_ids.',
+        help='Optional .json/.pt/.pth/.xlsx with channel_ids/coords/montage_mask/region_ids.',
+    )
+    parser.add_argument(
+        '--channel_id_align_mode',
+        type=str,
+        default='auto',
+        choices=['auto', 'strict', 'off'],
+        help='When loading channel_context_file: auto=align common ID conventions/reorder, '
+             'strict=exact expected IDs/order, off=skip ID alignment checks.',
     )
     parser.add_argument(
         '--subject_summary_file',
@@ -162,6 +170,33 @@ def main():
         action=argparse.BooleanOptionalAction,
         default=True,
         help='Log one-time metadata produced/consumed summaries at runtime.',
+    )
+    parser.add_argument(
+        '--adapter_use_age_bucket',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='If adapters are enabled, include age_bucket_id in adapter conditioning.',
+    )
+    parser.add_argument(
+        '--adapter_use_subject_id',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='If adapters are enabled, include subject_id in adapter conditioning.',
+    )
+    parser.add_argument(
+        '--adapter_use_segment_bucket',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='If adapters are enabled, include segment_bucket_id in adapter conditioning. '
+             'Default is off to avoid segment-position shortcut leakage.',
+    )
+    parser.add_argument(
+        '--subject_overlap_policy',
+        type=str,
+        default='disable',
+        choices=['error', 'disable', 'allow'],
+        help='If subject overlap is detected across train/val/test and adapter_use_subject_id=True: '
+             'error=fail, disable=auto-disable subject_id conditioning, allow=keep it enabled.',
     )
     parser.add_argument(
         '--continual_mode',
@@ -317,6 +352,18 @@ def main():
         raise ValueError("--use_subject_summary requires --subject_summary_file.")
     if params.adapter_only_update and not params.subject_adapter:
         raise ValueError("--adapter_only_update requires adapter_mode subject_domain.")
+    if params.adapter_use_segment_bucket:
+        print(
+            "[warning] adapter_use_segment_bucket=True can introduce segment-position shortcut leakage on FACED. "
+            "Use only for controlled ablation.",
+            flush=True,
+        )
+    if params.adapter_use_subject_id and params.subject_overlap_policy == 'allow':
+        print(
+            "[warning] subject_id conditioning is enabled with subject_overlap_policy=allow. "
+            "If splits overlap by subject, identity shortcut risk remains.",
+            flush=True,
+        )
     print(params)
     print(
         "[ablation-config] "
@@ -324,6 +371,11 @@ def main():
         f"eeg_channel_context={params.eeg_channel_context} "
         f"subject_adapters={params.subject_adapter} "
         f"use_subject_summary={params.use_subject_summary} "
+        f"adapter_use_subject_id={params.adapter_use_subject_id} "
+        f"adapter_use_age_bucket={params.adapter_use_age_bucket} "
+        f"adapter_use_segment_bucket={params.adapter_use_segment_bucket} "
+        f"subject_overlap_policy={params.subject_overlap_policy} "
+        f"channel_id_align_mode={params.channel_id_align_mode} "
         f"continual_mode={params.continual_mode} "
         f"adapter_only_update={params.adapter_only_update} "
         f"moe={params.moe}",

@@ -58,8 +58,14 @@ class CBraMod(nn.Module):
         adapter_scale: float = 0.2,
         use_eeg_channel_context: bool = False,
         channel_context_file: str = "",
+        channel_id_align_mode: str = "auto",
         use_subject_summary: bool = False,
+        subject_summary_dim: int = 0,
         subject_summary_handling: str = "project",
+        use_subject_id_metadata: bool = True,
+        use_age_bucket_metadata: bool = True,
+        use_segment_bucket_metadata: bool = False,
+        metadata_produced_fields=None,
         metadata_debug: bool = True,
     ):
         super().__init__()
@@ -70,17 +76,28 @@ class CBraMod(nn.Module):
         self.use_subject_adapters = bool(use_subject_adapters)
         self.metadata_debug = bool(metadata_debug)
         self._metadata_runtime_logged = False
+        self._channel_context_runtime_logged = False
+        self._adapter_use_subject_id = bool(use_subject_id_metadata)
+        self._adapter_use_age_bucket = bool(use_age_bucket_metadata)
+        self._adapter_use_segment_bucket = bool(use_segment_bucket_metadata)
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         channel_ctx_data = {}
-        if channel_context_file:
-            try:
-                channel_ctx_data = load_channel_context_file(channel_context_file)
-            except FileNotFoundError:
-                print(
-                    f"[CBraMod] channel_context_file not found: {channel_context_file}. "
-                    "Continue without explicit channel context file.",
-                    flush=True,
+        if use_eeg_channel_context:
+            if not channel_context_file:
+                raise ValueError(
+                    "--eeg_channel_context requires a valid --channel_context_file (got empty path)."
+                )
+            channel_ctx_data = load_channel_context_file(
+                channel_context_file,
+                expected_channels=in_dim,
+                expected_channel_ids=range(in_dim),
+                align_mode=channel_id_align_mode,
+            )
+            if not channel_ctx_data:
+                raise ValueError(
+                    "--eeg_channel_context is enabled but channel_context_file has no usable fields. "
+                    "Provide at least one of channel_ids/coords/montage_mask/region_ids."
                 )
         self.channel_context_encoder = EEGChannelContextEncoder(
             d_model=d_model,
@@ -89,6 +106,44 @@ class CBraMod(nn.Module):
             channel_context_data=channel_ctx_data,
             metadata_debug=metadata_debug,
         )
+        if self.metadata_debug:
+            status = bool(self.channel_context_encoder.use_channel_context)
+            reason = "enabled_and_valid" if status else "disabled_by_flag"
+            print(
+                "[channel-context-init] "
+                f"channel_context_active={status} reason={reason} expected_channels={in_dim}",
+                flush=True,
+            )
+
+        produced = list(metadata_produced_fields or [])
+        consumed = []
+        if self.use_subject_adapters:
+            consumed.extend(["cohort_id", "dataset_id", "sample_rate_group_id"])
+            if self._adapter_use_subject_id:
+                consumed.append("subject_id")
+            if self._adapter_use_age_bucket:
+                consumed.append("age_bucket_id")
+            if self._adapter_use_segment_bucket:
+                consumed.append("segment_bucket_id")
+            if use_subject_summary:
+                consumed.append("subject_summary")
+        if use_eeg_channel_context:
+            consumed.append("channel_count")
+        consumed = sorted(set(consumed))
+        ignored = sorted(set(produced) - set(consumed)) if produced else []
+        if self.metadata_debug and produced:
+            summary_proj = bool(use_subject_summary and int(subject_summary_dim) > 0 and int(subject_summary_dim) != int(adapter_cond_dim))
+            print(
+                "[metadata-audit] "
+                f"produced={sorted(produced)} consumed={consumed} ignored={ignored} "
+                f"subject_id_active={self._adapter_use_subject_id} "
+                f"age_bucket_active={self._adapter_use_age_bucket} "
+                f"segment_bucket_active={self._adapter_use_segment_bucket} "
+                f"subject_summary_active={bool(use_subject_summary)} "
+                f"subject_summary_projected={summary_proj} "
+                f"subject_summary_final_dim={int(adapter_cond_dim) if use_subject_summary else 0}",
+                flush=True,
+            )
 
         adapter_num_layers = min(max(1, adapter_num_layers), n_layer)
         adapter_start = n_layer - adapter_num_layers
@@ -136,7 +191,11 @@ class CBraMod(nn.Module):
                         cond_dim=adapter_cond_dim,
                         adapter_scale=adapter_scale,
                         use_subject_summary=use_subject_summary,
+                        subject_summary_dim=subject_summary_dim,
                         subject_summary_handling=subject_summary_handling,
+                        use_subject_id=use_subject_id_metadata,
+                        use_age_bucket=use_age_bucket_metadata,
+                        use_segment_bucket=use_segment_bucket_metadata,
                         metadata_debug=metadata_debug,
                         log_usage=(idx == adapter_start),
                     )
@@ -205,7 +264,11 @@ class CBraMod(nn.Module):
                                 cond_dim=adapter_cond_dim,
                                 adapter_scale=adapter_scale,
                                 use_subject_summary=use_subject_summary,
+                                subject_summary_dim=subject_summary_dim,
                                 subject_summary_handling=subject_summary_handling,
+                                use_subject_id=use_subject_id_metadata,
+                                use_age_bucket=use_age_bucket_metadata,
+                                use_segment_bucket=use_segment_bucket_metadata,
                                 metadata_debug=metadata_debug,
                                 log_usage=(idx == adapter_start),
                             )
@@ -261,6 +324,28 @@ class CBraMod(nn.Module):
             tok_meta = set_moe_faced_metadata(batch_meta)
         try:
             patch_emb = self.patch_embedding(x, mask)
+            if self.metadata_debug and not self._channel_context_runtime_logged:
+                if not self.channel_context_encoder.use_channel_context:
+                    active = False
+                    reason = "disabled_by_flag"
+                elif patch_emb.ndim != 4:
+                    active = False
+                    reason = f"invalid_patch_shape_{tuple(patch_emb.shape)}"
+                elif int(patch_emb.shape[1]) != int(self.channel_context_encoder.num_channels):
+                    active = False
+                    reason = (
+                        "channel_count_mismatch "
+                        f"input={int(patch_emb.shape[1])} expected={int(self.channel_context_encoder.num_channels)}"
+                    )
+                else:
+                    active = True
+                    reason = "active"
+                print(
+                    "[channel-context-runtime] "
+                    f"channel_context_active={active} reason={reason}",
+                    flush=True,
+                )
+                self._channel_context_runtime_logged = True
             patch_emb = self.channel_context_encoder(patch_emb, batch_meta=batch_meta)
             feats = self.encoder(patch_emb)
             out = self.proj_out(feats)
@@ -388,8 +473,14 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'adapter_scale': getattr(param, 'adapter_scale', 0.2),
         'use_eeg_channel_context': getattr(param, 'eeg_channel_context', False),
         'channel_context_file': getattr(param, 'channel_context_file', ''),
+        'channel_id_align_mode': getattr(param, 'channel_id_align_mode', 'auto'),
         'use_subject_summary': getattr(param, 'use_subject_summary', False),
+        'subject_summary_dim': int(getattr(param, 'subject_summary_dim', 0)),
         'subject_summary_handling': getattr(param, 'subject_summary_handling', 'project'),
+        'use_subject_id_metadata': getattr(param, 'adapter_use_subject_id', True),
+        'use_age_bucket_metadata': getattr(param, 'adapter_use_age_bucket', True),
+        'use_segment_bucket_metadata': getattr(param, 'adapter_use_segment_bucket', False),
+        'metadata_produced_fields': getattr(param, 'metadata_produced_fields', None),
         'metadata_debug': getattr(param, 'metadata_debug', True),
     }
 
