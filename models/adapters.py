@@ -6,7 +6,7 @@ import os
 import re
 import xml.etree.ElementTree as ET
 from zipfile import ZipFile
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -163,7 +163,8 @@ def load_channel_context_file(
     expected_channels: Optional[int] = None,
     expected_channel_ids: Optional[Iterable[int]] = None,
     align_mode: str = "auto",
-) -> Dict[str, torch.Tensor]:
+    return_diagnostics: bool = False,
+) -> Union[Dict[str, torch.Tensor], Tuple[Dict[str, torch.Tensor], Dict[str, Any]]]:
     """Loads optional EEG channel context data from .pt/.pth/.json/.xlsx.
 
     Expected keys (all optional):
@@ -192,6 +193,21 @@ def load_channel_context_file(
         raise ValueError("channel_context_file must contain a dictionary")
 
     out: Dict[str, torch.Tensor] = {}
+    diag: Dict[str, Any] = {
+        "path": path,
+        "ext": ext,
+        "align_mode": align_mode,
+        "loaded": True,
+        "raw_fields": sorted([str(k) for k in blob.keys()]),
+        "used_fields": [],
+        "expected_channels": int(expected_channels) if expected_channels is not None else None,
+        "observed_channels": None,
+        "remap_applied": False,
+        "remap_reason": "none",
+        "expected_channel_ids": None,
+        "observed_channel_ids": None,
+        "final_channel_ids": None,
+    }
     inferred_channels: Optional[int] = int(expected_channels) if expected_channels is not None else None
 
     def _ensure_len(name: str, n: int):
@@ -207,6 +223,8 @@ def load_channel_context_file(
         ch = torch.as_tensor(channel_ids, dtype=torch.long).view(-1)
         _ensure_len("channel_ids", int(ch.numel()))
         out["channel_ids"] = ch
+        diag["used_fields"].append("channel_ids")
+        diag["observed_channel_ids"] = ch.detach().cpu().tolist()
 
     coords = blob.get("coords")
     if coords is not None:
@@ -215,18 +233,24 @@ def load_channel_context_file(
             raise ValueError("coords must be [C,2] or [C,3]")
         _ensure_len("coords", int(co.shape[0]))
         out["coords"] = co
+        diag["used_fields"].append("coords")
 
     montage_mask = blob.get("montage_mask")
     if montage_mask is not None:
         mm = torch.as_tensor(montage_mask, dtype=torch.float32).view(-1)
         _ensure_len("montage_mask", int(mm.numel()))
         out["montage_mask"] = mm
+        diag["used_fields"].append("montage_mask")
 
     region_ids = blob.get("region_ids")
     if region_ids is not None:
         rg = torch.as_tensor(region_ids, dtype=torch.long).view(-1)
         _ensure_len("region_ids", int(rg.numel()))
         out["region_ids"] = rg
+        diag["used_fields"].append("region_ids")
+
+    if inferred_channels is not None:
+        diag["observed_channels"] = int(inferred_channels)
 
     if inferred_channels is not None and expected_channels is not None and int(inferred_channels) != int(expected_channels):
         raise ValueError(
@@ -242,6 +266,7 @@ def load_channel_context_file(
             raise ValueError("channel_ids contains duplicate values")
         if expected_channel_ids is not None and align_mode != "off":
             exp = torch.as_tensor(list(expected_channel_ids), dtype=torch.long).view(-1)
+            diag["expected_channel_ids"] = exp.detach().cpu().tolist()
             if exp.numel() != ch.numel():
                 raise ValueError(
                     "channel_ids length mismatch with expected channels "
@@ -249,15 +274,19 @@ def load_channel_context_file(
                 )
 
             ch_cpu = ch.cpu()
-            if align_mode == "auto" and not torch.equal(ch_cpu, exp):
-                # Common convention: 1..C instead of 0..C-1.
+            # Normalize common convention: 1..C instead of 0..C-1.
+            # Keep strict semantics on labels/order after this normalization step.
+            if not torch.equal(ch_cpu, exp):
                 one_based = exp + 1
                 if torch.equal(ch_cpu, one_based):
                     ch_cpu = exp.clone()
                     out["channel_ids"] = ch_cpu
+                    diag["remap_applied"] = True
+                    diag["remap_reason"] = "one_based_to_zero_based"
 
             if torch.equal(ch_cpu, exp):
-                return out
+                diag["final_channel_ids"] = ch_cpu.detach().cpu().tolist()
+                return (out, diag) if return_diagnostics else out
 
             if align_mode == "strict":
                 raise ValueError(
@@ -275,13 +304,18 @@ def load_channel_context_file(
                     if key in out:
                         out[key] = out[key].index_select(0, perm)
                 out["channel_ids"] = exp.clone()
+                diag["remap_applied"] = True
+                if diag["remap_reason"] == "none":
+                    diag["remap_reason"] = "reordered_to_expected"
             else:
                 raise ValueError(
                     "channel_ids set mismatch with expected labels "
                     f"(expected_set={sorted(exp_set)}, got_set={sorted(ch_set)})"
                 )
 
-    return out
+        if "channel_ids" in out:
+            diag["final_channel_ids"] = out["channel_ids"].detach().cpu().tolist()
+    return (out, diag) if return_diagnostics else out
 
 
 class EEGChannelContextEncoder(nn.Module):

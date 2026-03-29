@@ -29,7 +29,7 @@
 # ------------------------------
 # RUN IDENTITY
 # ------------------------------
-STAGE="${STAGE:-A4}"  # A0|A1|A2|A2b|A3|A4|A5|custom
+STAGE="${STAGE:-A3}"  # A0|A1|A2|A2b|A3|A4|A5|custom
 RUN_TAG="${RUN_TAG:-${STAGE}}"
 
 # ------------------------------
@@ -129,11 +129,14 @@ esac
 
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-$ATTNRES_VARIANT_PRESET}"  # none|pre_attn|full|...
 ATTNRES_START_LAYER="${ATTNRES_START_LAYER:-0}"
+ATTNRES_GATED="${ATTNRES_GATED:-1}"                           # 0|1
+ATTNRES_GATE_INIT="${ATTNRES_GATE_INIT:-0.0}"
+ATTNRES_SUBJECT_GATES="${ATTNRES_SUBJECT_GATES:-1}"           # 0|1 (requires ATTNRES_GATED=1)
 ADAPTER_MODE="${ADAPTER_MODE:-$ADAPTER_MODE_PRESET}"   # subject_domain | none
 ADAPTER_NUM_LAYERS="${ADAPTER_NUM_LAYERS:-4}"
-ADAPTER_RANK="${ADAPTER_RANK:-32}"
+ADAPTER_RANK="${ADAPTER_RANK:-8}"
 ADAPTER_COND_DIM="${ADAPTER_COND_DIM:-32}"
-ADAPTER_SCALE="${ADAPTER_SCALE:-0.01}"
+ADAPTER_SCALE="${ADAPTER_SCALE:-0.001}"
 ADAPTER_USE_AGE_BUCKET="${ADAPTER_USE_AGE_BUCKET:-1}"          # 0|1
 ADAPTER_USE_SEGMENT_BUCKET="${ADAPTER_USE_SEGMENT_BUCKET:-0}"  # 0|1 (keep 0 to avoid leakage-style shortcut)
 ADAPTER_USE_SUBJECT_ID="${ADAPTER_USE_SUBJECT_ID:-1}"          # 0|1
@@ -188,7 +191,7 @@ conda activate cbramod
 EXTRA_FLAGS=()
 
 echo "[slurm] stage=$STAGE run_tag=$RUN_TAG" >&2
-echo "[slurm] config attnres=$ATTNRES_VARIANT eeg_context=$EEG_CONTEXT adapter_mode=$ADAPTER_MODE use_subject_summary=$USE_SUBJECT_SUMMARY" >&2
+echo "[slurm] config attnres=$ATTNRES_VARIANT attnres_gated=$ATTNRES_GATED attnres_subject_gates=$ATTNRES_SUBJECT_GATES eeg_context=$EEG_CONTEXT adapter_mode=$ADAPTER_MODE use_subject_summary=$USE_SUBJECT_SUMMARY" >&2
 
 if [[ ! -f "$FACED_META_CSV" ]]; then
   echo "[slurm] FACED_META_CSV not found: $FACED_META_CSV" >&2
@@ -247,6 +250,12 @@ if [[ "$FORCE_TQDM" == "1" ]]; then
   EXTRA_FLAGS+=(--tqdm)
 else
   EXTRA_FLAGS+=(--no-tqdm)
+fi
+if [[ "$ATTNRES_GATED" == "1" ]]; then
+  EXTRA_FLAGS+=(--attnres_gated --attnres_gate_init "$ATTNRES_GATE_INIT")
+fi
+if [[ "$ATTNRES_SUBJECT_GATES" == "1" ]]; then
+  EXTRA_FLAGS+=(--attnres_subject_gates)
 fi
 
 # Legacy MoE compatibility path
@@ -327,7 +336,19 @@ summarize_log() {
     static_fields="-"
   fi
 
-  echo "$label $best_acc $best_kappa $last_ep $last_acc $last_kappa $static_fields"
+  local runtime_state="unknown"
+  runtime_state=$(grep -E "\[channel-context-runtime\]" "$log_path" | sed -n '1p' | sed -n 's/.*channel_context_active=\([^ ]*\) reason=\(.*\)$/\1:\2/p')
+  if [[ -z "$runtime_state" ]]; then
+    runtime_state="-"
+  fi
+
+  local context_file="unknown"
+  context_file=$(grep -E "^Namespace\(" "$log_path" | sed -n '1p' | sed -n "s/.*channel_context_file='\([^']*\)'.*/\1/p")
+  if [[ -z "$context_file" ]]; then
+    context_file="-"
+  fi
+
+  echo "$label $best_acc $best_kappa $last_ep $last_acc $last_kappa $static_fields $runtime_state $context_file"
 }
 
 if [[ "$STAGE" == "A2b" ]]; then
@@ -341,7 +362,14 @@ if [[ "$STAGE" == "A2b" ]]; then
   fi
 
   A2B_RAW_CONTEXT_FILE="${A2B_RAW_CONTEXT_FILE:-$CHANNEL_CONTEXT_FILE}"
-  A2B_RICH_CONTEXT_FILE="${A2B_RICH_CONTEXT_FILE:-$A2B_RAW_CONTEXT_FILE}"
+  A2B_RICH_CONTEXT_FILE_DEFAULT="$A2B_RAW_CONTEXT_FILE"
+  if [[ "$A2B_RAW_CONTEXT_FILE" == *.xlsx ]]; then
+    raw_dir="$(dirname "$A2B_RAW_CONTEXT_FILE")"
+    if [[ -f "$raw_dir/channel_context_rich.json" ]]; then
+      A2B_RICH_CONTEXT_FILE_DEFAULT="$raw_dir/channel_context_rich.json"
+    fi
+  fi
+  A2B_RICH_CONTEXT_FILE="${A2B_RICH_CONTEXT_FILE:-$A2B_RICH_CONTEXT_FILE_DEFAULT}"
   if [[ ! -f "$A2B_RAW_CONTEXT_FILE" ]]; then
     echo "[slurm] A2b raw context file not found: $A2B_RAW_CONTEXT_FILE" >&2
     exit 2
@@ -382,8 +410,8 @@ if [[ "$STAGE" == "A2b" ]]; then
     row=$(summarize_log "$label" "$run_log") || exit 3
     A2B_ROWS+=("$row")
 
-    local _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static
-    read -r _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static <<< "$row"
+    local _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static _runtime _ctxfile
+    read -r _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static _runtime _ctxfile <<< "$row"
     A2B_BEST_ACC["$_label"]="$_best_acc"
     A2B_BEST_KAPPA["$_label"]="$_best_kappa"
   }
@@ -401,7 +429,7 @@ if [[ "$STAGE" == "A2b" ]]; then
   }
 
   echo "[A2b][summary] log_dir=$A2B_LOG_DIR"
-  echo "[A2b][summary] label best_acc best_kappa last_ep last_acc last_kappa used_static_fields"
+  echo "[A2b][summary] label best_acc best_kappa last_ep last_acc last_kappa used_static_fields runtime_state context_file"
   for row in "${A2B_ROWS[@]}"; do
     echo "[A2b][summary] $row"
   done

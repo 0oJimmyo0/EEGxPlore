@@ -37,6 +37,7 @@ class CBraMod(nn.Module):
         attnres_gated=False,
         attnres_gate_init=0.0,
         attnres_start_layer=0,
+        attnres_subject_gates: bool = False,
         dropout=0.1,
         use_moe=False,
         moe_num_layers=2,
@@ -83,16 +84,18 @@ class CBraMod(nn.Module):
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         channel_ctx_data = {}
+        channel_ctx_diag = None
         if use_eeg_channel_context:
             if not channel_context_file:
                 raise ValueError(
                     "--eeg_channel_context requires a valid --channel_context_file (got empty path)."
                 )
-            channel_ctx_data = load_channel_context_file(
+            channel_ctx_data, channel_ctx_diag = load_channel_context_file(
                 channel_context_file,
                 expected_channels=in_dim,
                 expected_channel_ids=range(in_dim),
                 align_mode=channel_id_align_mode,
+                return_diagnostics=True,
             )
             if not channel_ctx_data:
                 raise ValueError(
@@ -114,6 +117,30 @@ class CBraMod(nn.Module):
                 f"channel_context_active={status} reason={reason} expected_channels={in_dim}",
                 flush=True,
             )
+            if channel_ctx_diag is not None:
+                exp_ids = channel_ctx_diag.get("expected_channel_ids")
+                obs_ids = channel_ctx_diag.get("observed_channel_ids")
+                final_ids = channel_ctx_diag.get("final_channel_ids")
+                print(
+                    "[channel-context-file] "
+                    f"loaded={channel_ctx_diag.get('loaded', False)} "
+                    f"path={channel_ctx_diag.get('path', '')} "
+                    f"ext={channel_ctx_diag.get('ext', '')} "
+                    f"align_mode={channel_ctx_diag.get('align_mode', '')} "
+                    f"raw_fields={channel_ctx_diag.get('raw_fields', [])} "
+                    f"used_fields={channel_ctx_diag.get('used_fields', [])} "
+                    f"expected_channels={channel_ctx_diag.get('expected_channels', None)} "
+                    f"observed_channels={channel_ctx_diag.get('observed_channels', None)} "
+                    f"remap_applied={channel_ctx_diag.get('remap_applied', False)} "
+                    f"remap_reason={channel_ctx_diag.get('remap_reason', 'none')}",
+                    flush=True,
+                )
+                if exp_ids is not None or obs_ids is not None or final_ids is not None:
+                    print(
+                        "[channel-context-align] "
+                        f"expected_ids={exp_ids} observed_ids={obs_ids} final_ids={final_ids}",
+                        flush=True,
+                    )
 
         produced = list(metadata_produced_fields or [])
         consumed = []
@@ -212,6 +239,7 @@ class CBraMod(nn.Module):
                         attnres_gated=attnres_gated,
                         attnres_gate_init=attnres_gate_init,
                         attnres_start_layer=attnres_start_layer,
+                        attnres_subject_gates=attnres_subject_gates,
                         moe_ffn=moe_mod,
                         subject_adapter=adapter_mod,
                     )
@@ -239,6 +267,7 @@ class CBraMod(nn.Module):
                 attnres_gated=attnres_gated,
                 attnres_gate_init=attnres_gate_init,
                 attnres_start_layer=attnres_start_layer,
+                attnres_subject_gates=attnres_subject_gates,
                 subject_adapter=None,
             )
 
@@ -257,6 +286,7 @@ class CBraMod(nn.Module):
                         attnres_gated=attnres_gated,
                         attnres_gate_init=attnres_gate_init,
                         attnres_start_layer=attnres_start_layer,
+                        attnres_subject_gates=attnres_subject_gates,
                         subject_adapter=(
                             SubjectDomainAdapter(
                                 d_model=d_model,
@@ -450,6 +480,7 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'attnres_gated': getattr(param, 'attnres_gated', False),
         'attnres_gate_init': getattr(param, 'attnres_gate_init', 0.0),
         'attnres_start_layer': getattr(param, 'attnres_start_layer', 0),
+        'attnres_subject_gates': getattr(param, 'attnres_subject_gates', False),
         'use_moe': getattr(param, 'moe', False),
         'moe_num_layers': getattr(param, 'moe_num_layers', 2),
         'moe_num_experts': getattr(param, 'moe_num_experts', 4),

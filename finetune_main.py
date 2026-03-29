@@ -86,6 +86,14 @@ def main():
     )
 
     parser.add_argument(
+        '--attnres_subject_gates',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Use subject/domain adapter conditioning to modulate AttnRes gates per sample. '
+             'Only effective when --attnres_gated is enabled and adapter_mode is subject_domain.',
+    )
+
+    parser.add_argument(
     '--attnres_start_layer',
     type=int,
     default=0,
@@ -364,10 +372,18 @@ def main():
             "If splits overlap by subject, identity shortcut risk remains.",
             flush=True,
         )
+    if params.attnres_subject_gates and not params.attnres_gated:
+        print(
+            "[warning] attnres_subject_gates=True but attnres_gated=False. "
+            "Subject-conditioned gates are disabled unless --attnres_gated is enabled.",
+            flush=True,
+        )
     print(params)
     print(
         "[ablation-config] "
         f"attnres_variant={params.attnres_variant} "
+        f"attnres_gated={params.attnres_gated} "
+        f"attnres_subject_gates={params.attnres_subject_gates} "
         f"eeg_channel_context={params.eeg_channel_context} "
         f"subject_adapters={params.subject_adapter} "
         f"use_subject_summary={params.use_subject_summary} "

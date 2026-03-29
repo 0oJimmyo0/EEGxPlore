@@ -78,6 +78,7 @@ class TransformerEncoderLayer(nn.Module):
                  bias: bool = True, device=None, dtype=None, use_attnres: bool = False,
                  attnres_variant: str = 'none', attnres_gated: bool = False,
                  attnres_gate_init: float = 0.0, attnres_start_layer: int = 0,
+                 attnres_subject_gates: bool = False,
                  moe_ffn: Optional[nn.Module] = None,
                  subject_adapter: Optional[nn.Module] = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -113,16 +114,29 @@ class TransformerEncoderLayer(nn.Module):
         self.layer_idx = -1 
         self.use_pre_attnres = attnres_variant in ['pre_attn', 'full']
         self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
+        self.attnres_subject_gates = bool(attnres_subject_gates)
 
         if self.use_pre_attnres:
             self.pre_attn_res = FullAttnRes(d_model)
             if self.attnres_gated:
                 self.pre_attn_gate = nn.Parameter(torch.tensor(float(attnres_gate_init)))
+                self.pre_attn_gate_cond = None
+                if self.attnres_subject_gates and self.subject_adapter is not None:
+                    cond_dim = int(getattr(self.subject_adapter, 'cond_dim', 32))
+                    self.pre_attn_gate_cond = nn.Linear(cond_dim, 1, bias=True)
+                    nn.init.zeros_(self.pre_attn_gate_cond.weight)
+                    nn.init.zeros_(self.pre_attn_gate_cond.bias)
 
         if self.use_pre_mlpres:
             self.pre_mlp_res = FullAttnRes(d_model)
             if self.attnres_gated:
                 self.pre_mlp_gate = nn.Parameter(torch.tensor(float(attnres_gate_init)))
+                self.pre_mlp_gate_cond = None
+                if self.attnres_subject_gates and self.subject_adapter is not None:
+                    cond_dim = int(getattr(self.subject_adapter, 'cond_dim', 32))
+                    self.pre_mlp_gate_cond = nn.Linear(cond_dim, 1, bias=True)
+                    nn.init.zeros_(self.pre_mlp_gate_cond.weight)
+                    nn.init.zeros_(self.pre_mlp_gate_cond.bias)
 
         # Legacy string support for activation function.
         if isinstance(activation, str):
@@ -137,6 +151,21 @@ class TransformerEncoderLayer(nn.Module):
         else:
             self.activation_relu_or_gelu = 0
         self.activation = activation
+
+    def _subject_gate_delta(self, gate_proj: Optional[nn.Module], x_ref: Tensor) -> Optional[Tensor]:
+        if gate_proj is None or self.subject_adapter is None:
+            return None
+        batch_meta = get_adapter_batch_meta()
+        if not isinstance(batch_meta, dict):
+            return None
+        cond_fn = getattr(self.subject_adapter, '_condition', None)
+        if cond_fn is None:
+            return None
+        cond = cond_fn(batch_meta, x_ref.device, x_ref.dtype)
+        if cond is None:
+            return None
+        delta = gate_proj(cond).view(-1, 1, 1, 1)
+        return 0.1 * torch.tanh(delta)
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -190,7 +219,12 @@ class TransformerEncoderLayer(nn.Module):
             attnres_in = self.pre_attn_res(sources)
 
             if self.attnres_gated:
-                gate = torch.sigmoid(self.pre_attn_gate)
+                base_gate = self.pre_attn_gate.view(1, 1, 1, 1)
+                if self.attnres_subject_gates:
+                    gate_delta = self._subject_gate_delta(getattr(self, 'pre_attn_gate_cond', None), baseline_in)
+                    gate = torch.sigmoid(base_gate + gate_delta) if gate_delta is not None else torch.sigmoid(base_gate)
+                else:
+                    gate = torch.sigmoid(base_gate)
                 attn_in = baseline_in + gate * (attnres_in - baseline_in)
             else:
                 attn_in = attnres_in
@@ -210,7 +244,12 @@ class TransformerEncoderLayer(nn.Module):
         if use_pre_mlp_here:
             mlpres_agg = self.pre_mlp_res(mlp_source_pool)
             if self.attnres_gated:
-                gate_m = torch.sigmoid(self.pre_mlp_gate)
+                base_gate_m = self.pre_mlp_gate.view(1, 1, 1, 1)
+                if self.attnres_subject_gates:
+                    gate_delta_m = self._subject_gate_delta(getattr(self, 'pre_mlp_gate_cond', None), x_attn)
+                    gate_m = torch.sigmoid(base_gate_m + gate_delta_m) if gate_delta_m is not None else torch.sigmoid(base_gate_m)
+                else:
+                    gate_m = torch.sigmoid(base_gate_m)
                 mlp_in = x_attn + gate_m * (mlpres_agg - x_attn)
             else:
                 mlp_in = mlpres_agg
