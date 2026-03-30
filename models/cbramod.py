@@ -93,7 +93,7 @@ class CBraMod(nn.Module):
         self._adapter_use_segment_bucket = bool(use_segment_bucket_metadata)
         self._moe_use_eeg_summary_router_concat_spatial = bool(moe_use_eeg_summary_router_concat_spatial)
         self._moe_use_eeg_summary_router_concat_spectral = bool(moe_use_eeg_summary_router_concat_spectral)
-        self.moe_eeg_summary_dim = 9
+        self.moe_eeg_summary_dim = 0
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         channel_ctx_data = {}
@@ -122,6 +122,9 @@ class CBraMod(nn.Module):
             channel_context_data=channel_ctx_data,
             metadata_debug=metadata_debug,
         )
+        coords_dim = int(self.channel_context_encoder.coords.shape[1])
+        # EEG summary = coords_mean + coords_std + montage_mean + region_nonzero + normalized_channel_count
+        self.moe_eeg_summary_dim = (2 * coords_dim) + 3
         if self.metadata_debug:
             status = bool(self.channel_context_encoder.use_channel_context)
             reason = "enabled_and_valid" if status else "disabled_by_flag"

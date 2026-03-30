@@ -2,8 +2,8 @@
 #SBATCH --job-name=FACED_ADAPTER
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_adapter_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_adapter_%j.err
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --partition=gpu_devel
+#SBATCH --gres=gpu:a40:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G

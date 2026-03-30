@@ -438,6 +438,17 @@ def main():
         raise ValueError("--moe_router_warmup_epochs must be >= 0.")
     if params.moe_router_warmup_lr_scale <= 0:
         raise ValueError("--moe_router_warmup_lr_scale must be > 0.")
+    if (
+        params.moe
+        and params.moe_router_warmup_mode == 'freeze'
+        and params.moe_router_soft_warmup_epochs > 0
+    ):
+        print(
+            "[warning] moe_router_warmup_mode=freeze with moe_router_soft_warmup_epochs>0 can lock"
+            " router probs near initialization during soft warmup. Prefer warmup_mode=low_lr for"
+            " first anti-collapse sweeps.",
+            flush=True,
+        )
     if params.moe_use_subject_summary_router_concat and not params.moe:
         raise ValueError("--moe_use_subject_summary_router_concat requires --moe.")
     if params.moe_use_subject_summary_router_concat and not params.use_subject_summary:
