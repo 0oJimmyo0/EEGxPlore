@@ -31,6 +31,10 @@ _MOE_FACED_METADATA: contextvars.ContextVar[Optional[Dict[str, Tensor]]] = conte
 _MOE_EEG_ROUTER_SUMMARY: contextvars.ContextVar[Optional[Tensor]] = contextvars.ContextVar(
     "moe_eeg_router_summary", default=None
 )
+# Optional current training epoch (1-based) used for warmup scheduling.
+_MOE_TRAIN_EPOCH: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "moe_train_epoch", default=0
+)
 
 
 def set_moe_diagnostic_labels(labels: Optional[Tensor]) -> Any:
@@ -63,6 +67,14 @@ def set_moe_eeg_router_summary(summary: Optional[Tensor]) -> Any:
 
 def reset_moe_eeg_router_summary(token: Any) -> None:
     _MOE_EEG_ROUTER_SUMMARY.reset(token)
+
+
+def set_moe_train_epoch(epoch: int) -> Any:
+    return _MOE_TRAIN_EPOCH.set(int(epoch))
+
+
+def reset_moe_train_epoch(token: Any) -> None:
+    _MOE_TRAIN_EPOCH.reset(token)
 
 
 def compact_psd_bandpowers(x: Tensor, n_bands: int = PSD_ROUTER_DIM) -> Tensor:
@@ -186,6 +198,10 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         use_eeg_summary_router_concat_spectral: bool = False,
         eeg_summary_router_dim: int = 0,
         router_concat_proj_dim: int = 16,
+        linear_router_input_norm: bool = False,
+        router_temperature: float = 1.0,
+        router_entropy_coef: float = 0.0,
+        router_soft_warmup_epochs: int = 0,
         load_balance_coef: float = 0.0,
         domain_bias_reg_coef: float = 0.0,
         device=None,
@@ -225,6 +241,10 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.use_eeg_summary_router_concat_spectral = bool(use_eeg_summary_router_concat_spectral)
         self.eeg_summary_router_dim = int(eeg_summary_router_dim)
         self.router_concat_proj_dim = int(router_concat_proj_dim)
+        self.linear_router_input_norm = bool(linear_router_input_norm)
+        self.router_temperature = float(max(1e-4, router_temperature))
+        self.router_entropy_coef = float(router_entropy_coef)
+        self.router_soft_warmup_epochs = int(max(0, router_soft_warmup_epochs))
         if self.use_subject_summary_router_concat and self.subject_summary_router_dim <= 0:
             raise ValueError("use_subject_summary_router_concat=True requires subject_summary_router_dim > 0")
         if (
@@ -283,6 +303,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.spectral_router = _make_router_head(
             spectral_in, num_specialists, router_arch, self.router_mlp_hidden, factory_kwargs
         )
+        self.spatial_router_input_norm = None
+        self.spectral_router_input_norm = None
+        if self.router_arch == "linear" and self.linear_router_input_norm:
+            self.spatial_router_input_norm = nn.LayerNorm(spatial_in, **factory_kwargs)
+            self.spectral_router_input_norm = nn.LayerNorm(spectral_in, **factory_kwargs)
         self.adapter_cond_proj_spatial = None
         self.adapter_cond_proj_spectral = None
         if self.use_adapter_cond_bias:
@@ -315,6 +340,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self._last_lb_loss = z
         self._last_overflow_penalty = z
         self._last_domain_bias_reg = z
+        self._last_entropy_reg = z
         self._last_aux_loss = z
 
         self.last_diagnostics: Optional[Dict[str, Any]] = None
@@ -517,6 +543,14 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 res[m] = bank[e](x_flat[m])
         return res
 
+    def _bank_residual_soft(self, x_flat: Tensor, sample_probs: Tensor, batch_idx: Tensor, bank: nn.ModuleList) -> Tensor:
+        res = torch.zeros_like(x_flat)
+        for e in range(self.num_specialists):
+            out_e = bank[e](x_flat)
+            w = sample_probs[:, e].index_select(0, batch_idx).unsqueeze(-1)
+            res = res + w * out_e
+        return res
+
     def forward(self, x: Tensor, router_context: Optional[Dict[str, Tensor]] = None) -> Tensor:
         leading = x.shape[:-1]
         d = x.shape[-1]
@@ -564,6 +598,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             pd = psd.detach().float()
             psd_stats = (pd.mean(0).cpu().tolist(), pd.std(0).cpu().tolist())
 
+        if self.spatial_router_input_norm is not None:
+            spatial_in = self.spatial_router_input_norm(spatial_in)
+        if self.spectral_router_input_norm is not None:
+            spectral_in = self.spectral_router_input_norm(spectral_in)
+
         logits_sp_content = self.spatial_router(spatial_in)
         logits_sc_content = self.spectral_router(spectral_in)
 
@@ -571,8 +610,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         bias_sc = self._domain_logit_bias(b, "spectral", x.device)
         cond_bias_sp, cond_bias_sc = self._adapter_cond_logit_bias(router_context, b, x.device)
 
-        logits_sp = logits_sp_content + bias_sp + cond_bias_sp
-        logits_sc = logits_sc_content + bias_sc + cond_bias_sc
+        logits_sp = (logits_sp_content + bias_sp + cond_bias_sp) / self.router_temperature
+        logits_sc = (logits_sc_content + bias_sc + cond_bias_sc) / self.router_temperature
 
         probs_sp = F.softmax(logits_sp, dim=-1)
         probs_sc = F.softmax(logits_sc, dim=-1)
@@ -593,12 +632,32 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         margin_sc_prob = top2_sc_p[:, 0] - (top2_sc_p[:, 1] if top2_sc_p.size(1) > 1 else 0.0)
 
         capacity = max(1, int(math.ceil(self.capacity_factor * b / float(self.num_specialists))))
+        cur_epoch = int(_MOE_TRAIN_EPOCH.get())
+        soft_warmup_active = (
+            self.training
+            and self.router_soft_warmup_epochs > 0
+            and cur_epoch > 0
+            and cur_epoch <= self.router_soft_warmup_epochs
+        )
 
-        assign_sp, rerouted_sp, fallback_sp, counts_sp_pre, counts_sp = self._capacity_assign_top1(logits_sp, capacity)
-        assign_sc, rerouted_sc, fallback_sc, counts_sc_pre, counts_sc = self._capacity_assign_top1(logits_sc, capacity)
-
-        res_sp = self._bank_residual(x_flat, assign_sp, batch_idx, self.spatial_specialists)
-        res_sc = self._bank_residual(x_flat, assign_sc, batch_idx, self.spectral_specialists)
+        if soft_warmup_active:
+            assign_sp = raw_top1_sp
+            assign_sc = raw_top1_sc
+            rerouted_sp = torch.zeros_like(assign_sp, dtype=torch.bool)
+            rerouted_sc = torch.zeros_like(assign_sc, dtype=torch.bool)
+            fallback_sp = torch.zeros_like(assign_sp, dtype=torch.bool)
+            fallback_sc = torch.zeros_like(assign_sc, dtype=torch.bool)
+            counts_sp_pre = torch.bincount(raw_top1_sp, minlength=self.num_specialists).to(dtype=torch.long)
+            counts_sc_pre = torch.bincount(raw_top1_sc, minlength=self.num_specialists).to(dtype=torch.long)
+            counts_sp = counts_sp_pre.clone()
+            counts_sc = counts_sc_pre.clone()
+            res_sp = self._bank_residual_soft(x_flat, probs_sp, batch_idx, self.spatial_specialists)
+            res_sc = self._bank_residual_soft(x_flat, probs_sc, batch_idx, self.spectral_specialists)
+        else:
+            assign_sp, rerouted_sp, fallback_sp, counts_sp_pre, counts_sp = self._capacity_assign_top1(logits_sp, capacity)
+            assign_sc, rerouted_sc, fallback_sc, counts_sc_pre, counts_sc = self._capacity_assign_top1(logits_sc, capacity)
+            res_sp = self._bank_residual(x_flat, assign_sp, batch_idx, self.spatial_specialists)
+            res_sc = self._bank_residual(x_flat, assign_sc, batch_idx, self.spectral_specialists)
 
         out = h_shared + res_sp + res_sc
 
@@ -609,15 +668,22 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         reroute_frac = rerouted_sp.float().mean() + rerouted_sc.float().mean()
         fallback_frac = fallback_sp.float().mean() + fallback_sc.float().mean()
         overflow_penalty = reroute_frac + fallback_frac
+        if soft_warmup_active:
+            overflow_penalty = overflow_penalty * 0.0
         domain_reg = bias_sp.pow(2).mean() + bias_sc.pow(2).mean()
+        entropy_sp = (-(probs_sp * probs_sp.clamp_min(1e-10).log()).sum(dim=-1)).mean()
+        entropy_sc = (-(probs_sc * probs_sc.clamp_min(1e-10).log()).sum(dim=-1)).mean()
+        entropy_reg = -(entropy_sp + entropy_sc)
 
         self._last_lb_loss = lb
         self._last_overflow_penalty = overflow_penalty
         self._last_domain_bias_reg = domain_reg
+        self._last_entropy_reg = entropy_reg
         self._last_aux_loss = (
             self.load_balance_coef * lb
             + overflow_penalty
             + self.domain_bias_reg_coef * domain_reg
+            + self.router_entropy_coef * entropy_reg
         )
 
         pre_ent_sp = self._sample_entropy(probs_sp)
@@ -635,6 +701,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "domain_bias_norm": dom_norm,
             "adapter_cond_bias_enabled": bool(self.use_adapter_cond_bias),
             "adapter_cond_bias_norm": cond_norm,
+            "router_temperature": float(self.router_temperature),
+            "router_soft_warmup_epochs": int(self.router_soft_warmup_epochs),
+            "router_soft_warmup_active": bool(soft_warmup_active),
+            "route_strategy": "soft_warmup" if soft_warmup_active else "hard_capacity",
+            "router_entropy_coef": float(self.router_entropy_coef),
             "subject_summary_router_concat": bool(self.use_subject_summary_router_concat),
             "eeg_summary_router_concat_spatial": bool(self.use_eeg_summary_router_concat_spatial),
             "eeg_summary_router_concat_spectral": bool(self.use_eeg_summary_router_concat_spectral),
@@ -644,6 +715,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "aux_load_balance": float(lb.detach().item()),
             "aux_overflow": float(overflow_penalty.detach().item()),
             "aux_domain_bias_reg": float(domain_reg.detach().item()),
+            "aux_entropy_reg": float(entropy_reg.detach().item()),
             "aux_total": float(self._last_aux_loss.detach().item()),
             "domain_bias_abs_spatial": float(bias_sp.abs().mean().item()),
             "domain_bias_abs_spectral": float(bias_sc.abs().mean().item()),
@@ -796,8 +868,15 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"|bias|_sc={diag.get('domain_bias_abs_spectral', 0.0):.6f}"
         ),
         (
+            f"    route={diag.get('route_strategy', 'hard_capacity')}  "
+            f"temp={diag.get('router_temperature', 1.0):.4f}  "
+            f"soft_warmup_active={diag.get('router_soft_warmup_active', False)}  "
+            f"soft_warmup_epochs={diag.get('router_soft_warmup_epochs', 0)}"
+        ),
+        (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "
-            f"overflow={diag.get('aux_overflow', 0.0):.6f}  domain_reg={diag.get('aux_domain_bias_reg', 0.0):.6f}"
+            f"overflow={diag.get('aux_overflow', 0.0):.6f}  domain_reg={diag.get('aux_domain_bias_reg', 0.0):.6f}  "
+            f"entropy_reg={diag.get('aux_entropy_reg', 0.0):.6f}  entropy_coef={diag.get('router_entropy_coef', 0.0):.6f}"
         ),
         (
             f"    domain_shift_rate: spatial={diag.get('domain_bias_shift_rate_spatial', 0.0):.4f}  "

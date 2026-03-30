@@ -30,6 +30,13 @@ class Model(nn.Module):
         print(f"[FACED] moe_use_subject_summary_router_concat = {getattr(param, 'moe_use_subject_summary_router_concat', False)}")
         print(f"[FACED] moe_use_eeg_summary_router_concat_spatial = {getattr(param, 'moe_use_eeg_summary_router_concat_spatial', False)}")
         print(f"[FACED] moe_use_eeg_summary_router_concat_spectral = {getattr(param, 'moe_use_eeg_summary_router_concat_spectral', False)}")
+        print(f"[FACED] moe_linear_router_input_norm = {getattr(param, 'moe_linear_router_input_norm', False)}")
+        print(f"[FACED] moe_router_temperature = {getattr(param, 'moe_router_temperature', 1.0)}")
+        print(f"[FACED] moe_router_entropy_coef = {getattr(param, 'moe_router_entropy_coef', 0.0)}")
+        print(f"[FACED] moe_router_soft_warmup_epochs = {getattr(param, 'moe_router_soft_warmup_epochs', 0)}")
+        print(f"[FACED] moe_router_warmup_mode = {getattr(param, 'moe_router_warmup_mode', 'off')}")
+        print(f"[FACED] moe_router_warmup_epochs = {getattr(param, 'moe_router_warmup_epochs', 0)}")
+        print(f"[FACED] moe_router_warmup_lr_scale = {getattr(param, 'moe_router_warmup_lr_scale', 0.1)}")
         print(f"[FACED] continual_mode = {getattr(param, 'continual_mode', 'off')}")
         print(f"[FACED] adapter_only_update = {getattr(param, 'adapter_only_update', False)}")
         if getattr(param, 'moe', False):

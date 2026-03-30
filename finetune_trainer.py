@@ -15,6 +15,7 @@ from utils.tqdm_auto import tqdm_auto
 from models.moe import (
     format_moe_diagnostics_lines,
     reset_moe_diagnostic_labels,
+    set_moe_train_epoch,
     set_moe_diagnostic_labels,
 )
 
@@ -129,6 +130,22 @@ def _unknown_ratio_dict(counter: Dict[str, Dict[str, int]]) -> Dict[str, float]:
     return out
 
 
+def _is_router_param_name(name: str) -> bool:
+    if "moe_ffn." not in name:
+        return False
+    router_keys = (
+        "spatial_router",
+        "spectral_router",
+        "router_input_norm",
+        "domain_emb_",
+        "domain_proj_",
+        "adapter_cond_proj_",
+        "subject_summary_router_proj_",
+        "eeg_summary_router_proj_",
+    )
+    return any(k in name for k in router_keys)
+
+
 class ReplayBuffer:
     """Small replay memory storing past samples and optional snapshot logits."""
 
@@ -203,6 +220,12 @@ class Trainer(object):
             self.criterion = MSELoss().cuda()
 
         self.best_model_states = None
+        self._router_params = []
+        self._router_param_names = []
+        self._router_warmup_mode = str(getattr(self.params, "moe_router_warmup_mode", "off"))
+        self._router_warmup_epochs = int(max(0, getattr(self.params, "moe_router_warmup_epochs", 0)))
+        self._router_warmup_lr_scale = float(max(1e-8, getattr(self.params, "moe_router_warmup_lr_scale", 0.1)))
+        self._router_warmup_last_state = None
 
         backbone_params = []
         other_params = []
@@ -224,6 +247,10 @@ class Trainer(object):
                 if param.requires_grad:
                     other_params.append(param)
                     n_other_trainable += int(param.numel())
+
+            if param.requires_grad and _is_router_param_name(name):
+                self._router_params.append(param)
+                self._router_param_names.append(name)
 
         self.data_length = len(self.data_loader['train'])
         if self.params.optimizer == 'AdamW':
@@ -271,6 +298,41 @@ class Trainer(object):
 
         print(self.model)
 
+    def _apply_router_warmup_state(self, epoch_one_based: int) -> None:
+        if not getattr(self.params, 'moe', False) or not self._router_params:
+            return
+        mode = self._router_warmup_mode
+        warm_active = (self._router_warmup_epochs > 0 and epoch_one_based <= self._router_warmup_epochs)
+        if mode == 'freeze':
+            req_grad = not warm_active
+            for p in self._router_params:
+                p.requires_grad = req_grad
+        elif mode == 'off':
+            for p in self._router_params:
+                p.requires_grad = True
+
+        state = (mode, warm_active)
+        if state != self._router_warmup_last_state:
+            print(
+                "[router-warmup] "
+                f"mode={mode} epoch={epoch_one_based} active={warm_active} "
+                f"router_params={len(self._router_params)} grad_scale={self._router_warmup_lr_scale}",
+                flush=True,
+            )
+            self._router_warmup_last_state = state
+
+    def _scale_router_grads_if_needed(self, epoch_one_based: int) -> None:
+        if not getattr(self.params, 'moe', False) or not self._router_params:
+            return
+        if self._router_warmup_mode != 'low_lr':
+            return
+        if self._router_warmup_epochs <= 0 or epoch_one_based > self._router_warmup_epochs:
+            return
+        s = self._router_warmup_lr_scale
+        for p in self._router_params:
+            if p.grad is not None:
+                p.grad.mul_(s)
+
     def _add_moe_auxiliary_loss(self, loss):
         if not getattr(self.params, 'moe', False):
             return loss
@@ -311,13 +373,39 @@ class Trainer(object):
             f"psd_feats={getattr(self.params, 'moe_use_psd_router_features', False)}  "
             f"domain_bias={getattr(self.params, 'moe_domain_bias', False)}"
         )
+        max_frac_vals = []
+        reroute_vals = []
+        margin_vals = []
+        strat_counts: Dict[str, int] = {}
         for i, layer in enumerate(bb.encoder.layers):
             m = getattr(layer, 'moe_ffn', None)
             diag = getattr(m, 'last_diagnostics', None) if m is not None else None
             if diag is None:
                 continue
+            sp = diag.get('spatial', {})
+            sc = diag.get('spectral', {})
+            if sp:
+                max_frac_vals.append(float(sp.get('pre_max_expert_fraction', 0.0)))
+                reroute_vals.append(float(sp.get('reroute_rate', 0.0)))
+                margin_vals.append(float(sp.get('pre_margin_logit', 0.0)))
+            if sc:
+                max_frac_vals.append(float(sc.get('pre_max_expert_fraction', 0.0)))
+                reroute_vals.append(float(sc.get('reroute_rate', 0.0)))
+                margin_vals.append(float(sc.get('pre_margin_logit', 0.0)))
+            rs = str(diag.get('route_strategy', 'hard_capacity'))
+            strat_counts[rs] = strat_counts.get(rs, 0) + 1
             for line in format_moe_diagnostics_lines(i, diag):
                 print(line)
+        if max_frac_vals:
+            print(
+                "[MoE summary] "
+                f"layers={len(max_frac_vals)//2 if len(max_frac_vals) >= 2 else len(max_frac_vals)} "
+                f"avg_pre_max_frac={float(np.mean(max_frac_vals)):.4f} "
+                f"avg_reroute_rate={float(np.mean(reroute_vals)):.4f} "
+                f"avg_pre_margin_logit={float(np.mean(margin_vals)):.4f} "
+                f"route_strategies={strat_counts}",
+                flush=True,
+            )
         if was_training:
             self.model.train()
 
@@ -413,6 +501,9 @@ class Trainer(object):
 
         try:
             for epoch in range(self.params.epochs):
+                if getattr(self.params, 'moe', False):
+                    set_moe_train_epoch(epoch + 1)
+                self._apply_router_warmup_state(epoch + 1)
                 _mem_report(f"epoch_start ep={epoch + 1}/{self.params.epochs}", md)
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
@@ -462,6 +553,7 @@ class Trainer(object):
                             raise RuntimeError("non-finite training loss")
 
                         loss.backward()
+                        self._scale_router_grads_if_needed(epoch + 1)
                         losses.append(float(loss.item()))
                         if self.params.clip_value > 0:
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
@@ -604,6 +696,8 @@ class Trainer(object):
 
             self.model.load_state_dict(self.best_model_states)
             self.model.cuda()
+            if getattr(self.params, 'moe', False):
+                set_moe_train_epoch(self.params.epochs + 1)
             with torch.no_grad():
                 print("***************************Test************************")
                 acc, kappa, f1, cm = self.test_eval.get_metrics_for_multiclass(self.model)
@@ -708,6 +802,9 @@ class Trainer(object):
 
         try:
             for epoch in range(self.params.epochs):
+                if getattr(self.params, 'moe', False):
+                    set_moe_train_epoch(epoch + 1)
+                self._apply_router_warmup_state(epoch + 1)
                 _mem_report(f"epoch_start_binary ep={epoch + 1}/{self.params.epochs}", md)
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
@@ -732,6 +829,7 @@ class Trainer(object):
                         raise RuntimeError("non-finite training loss")
 
                     loss.backward()
+                    self._scale_router_grads_if_needed(epoch + 1)
                     losses.append(float(loss.item()))
                     if self.params.clip_value > 0:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
@@ -804,6 +902,8 @@ class Trainer(object):
             _mem_report("train_binary_done_pre_test", md)
 
             self.model.load_state_dict(self.best_model_states)
+            if getattr(self.params, 'moe', False):
+                set_moe_train_epoch(self.params.epochs + 1)
             with torch.no_grad():
                 print("***************************Test************************")
                 acc, pr_auc, roc_auc, cm = self.test_eval.get_metrics_for_binaryclass(self.model)
@@ -843,6 +943,9 @@ class Trainer(object):
 
         try:
             for epoch in range(self.params.epochs):
+                if getattr(self.params, 'moe', False):
+                    set_moe_train_epoch(epoch + 1)
+                self._apply_router_warmup_state(epoch + 1)
                 _mem_report(f"epoch_start_regr ep={epoch + 1}/{self.params.epochs}", md)
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
@@ -866,6 +969,7 @@ class Trainer(object):
                         raise RuntimeError("non-finite training loss")
 
                     loss.backward()
+                    self._scale_router_grads_if_needed(epoch + 1)
                     losses.append(float(loss.item()))
                     if self.params.clip_value > 0:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
@@ -936,6 +1040,8 @@ class Trainer(object):
             _mem_report("train_regression_done_pre_test", md)
 
             self.model.load_state_dict(self.best_model_states)
+            if getattr(self.params, 'moe', False):
+                set_moe_train_epoch(self.params.epochs + 1)
             with torch.no_grad():
                 print("***************************Test************************")
                 corrcoef, r2, rmse = self.test_eval.get_metrics_for_regression(self.model)

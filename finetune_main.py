@@ -332,6 +332,49 @@ def main():
         default=False,
         help='Concat compact EEG-context summary features into the spectral router input.',
     )
+    parser.add_argument(
+        '--moe_linear_router_input_norm',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Apply LayerNorm on router inputs when router_arch=linear.',
+    )
+    parser.add_argument(
+        '--moe_router_temperature',
+        type=float,
+        default=1.0,
+        help='Temperature for router logits (logits / temperature). >1.0 softens routing.',
+    )
+    parser.add_argument(
+        '--moe_router_entropy_coef',
+        type=float,
+        default=0.0,
+        help='Entropy regularization coefficient for router probs. Positive encourages higher entropy.',
+    )
+    parser.add_argument(
+        '--moe_router_soft_warmup_epochs',
+        type=int,
+        default=0,
+        help='Use soft-routing warmup for first N training epochs (0 disables).',
+    )
+    parser.add_argument(
+        '--moe_router_warmup_mode',
+        type=str,
+        default='off',
+        choices=['off', 'freeze', 'low_lr'],
+        help='Router parameter warmup policy for first N epochs.',
+    )
+    parser.add_argument(
+        '--moe_router_warmup_epochs',
+        type=int,
+        default=0,
+        help='Number of epochs for router freeze/low_lr warmup.',
+    )
+    parser.add_argument(
+        '--moe_router_warmup_lr_scale',
+        type=float,
+        default=0.1,
+        help='Gradient scale for router params during low_lr warmup mode.',
+    )
 
     parser.add_argument(
         '--tqdm',
@@ -387,6 +430,14 @@ def main():
         )
     if params.moe_use_adapter_cond_bias and not (params.moe and params.subject_adapter):
         raise ValueError("--moe_use_adapter_cond_bias requires both --moe and adapter_mode subject_domain.")
+    if params.moe_router_temperature <= 0:
+        raise ValueError("--moe_router_temperature must be > 0.")
+    if params.moe_router_soft_warmup_epochs < 0:
+        raise ValueError("--moe_router_soft_warmup_epochs must be >= 0.")
+    if params.moe_router_warmup_epochs < 0:
+        raise ValueError("--moe_router_warmup_epochs must be >= 0.")
+    if params.moe_router_warmup_lr_scale <= 0:
+        raise ValueError("--moe_router_warmup_lr_scale must be > 0.")
     if params.moe_use_subject_summary_router_concat and not params.moe:
         raise ValueError("--moe_use_subject_summary_router_concat requires --moe.")
     if params.moe_use_subject_summary_router_concat and not params.use_subject_summary:
@@ -448,7 +499,14 @@ def main():
         f"moe_use_adapter_cond_bias={params.moe_use_adapter_cond_bias} "
         f"moe_use_subject_summary_router_concat={params.moe_use_subject_summary_router_concat} "
         f"moe_use_eeg_summary_router_concat_spatial={params.moe_use_eeg_summary_router_concat_spatial} "
-        f"moe_use_eeg_summary_router_concat_spectral={params.moe_use_eeg_summary_router_concat_spectral}",
+        f"moe_use_eeg_summary_router_concat_spectral={params.moe_use_eeg_summary_router_concat_spectral} "
+        f"moe_linear_router_input_norm={params.moe_linear_router_input_norm} "
+        f"moe_router_temperature={params.moe_router_temperature} "
+        f"moe_router_entropy_coef={params.moe_router_entropy_coef} "
+        f"moe_router_soft_warmup_epochs={params.moe_router_soft_warmup_epochs} "
+        f"moe_router_warmup_mode={params.moe_router_warmup_mode} "
+        f"moe_router_warmup_epochs={params.moe_router_warmup_epochs} "
+        f"moe_router_warmup_lr_scale={params.moe_router_warmup_lr_scale}",
         flush=True,
     )
 
