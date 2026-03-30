@@ -152,8 +152,8 @@ class TransformerEncoderLayer(nn.Module):
             self.activation_relu_or_gelu = 0
         self.activation = activation
 
-    def _subject_gate_delta(self, gate_proj: Optional[nn.Module], x_ref: Tensor) -> Optional[Tensor]:
-        if gate_proj is None or self.subject_adapter is None:
+    def _adapter_condition_tensor(self, x_ref: Tensor) -> Optional[Tensor]:
+        if self.subject_adapter is None:
             return None
         batch_meta = get_adapter_batch_meta()
         if not isinstance(batch_meta, dict):
@@ -161,7 +161,12 @@ class TransformerEncoderLayer(nn.Module):
         cond_fn = getattr(self.subject_adapter, '_condition', None)
         if cond_fn is None:
             return None
-        cond = cond_fn(batch_meta, x_ref.device, x_ref.dtype)
+        return cond_fn(batch_meta, x_ref.device, x_ref.dtype)
+
+    def _subject_gate_delta(self, gate_proj: Optional[nn.Module], x_ref: Tensor) -> Optional[Tensor]:
+        if gate_proj is None or self.subject_adapter is None:
+            return None
+        cond = self._adapter_condition_tensor(x_ref)
         if cond is None:
             return None
         delta = gate_proj(cond).view(-1, 1, 1, 1)
@@ -268,6 +273,9 @@ class TransformerEncoderLayer(nn.Module):
                     "the MoE layer is not above the last layer with pre-attn (see CBraMod typed MoE guard)."
                 )
             router_ctx = {"baseline": baseline_in, "attnres": attnres_in}
+            adapter_cond = self._adapter_condition_tensor(mlp_in)
+            if adapter_cond is not None:
+                router_ctx["adapter_cond"] = adapter_cond
         adapter_ctx = {"layer_idx": self.layer_idx}
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx, adapter_context=adapter_ctx)
 
@@ -307,11 +315,12 @@ class TransformerEncoderLayer(nn.Module):
         router_context: Optional[Dict[str, Tensor]] = None,
         adapter_context: Optional[Dict[str, Any]] = None,
     ) -> Tensor:
+        batch_meta = get_adapter_batch_meta() if self.subject_adapter is not None else None
         if self.moe_ffn is not None:
-            return self.dropout2(self.moe_ffn(x, router_context=router_context))
-        x = self.linear2(self.dropout(self.activation(self.linear1(x))))
+            x = self.moe_ffn(x, router_context=router_context)
+        else:
+            x = self.linear2(self.dropout(self.activation(self.linear1(x))))
         if self.subject_adapter is not None:
-            batch_meta = get_adapter_batch_meta()
             x = x + self.subject_adapter(x, batch_meta=batch_meta)
         return self.dropout2(x)
 

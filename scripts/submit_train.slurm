@@ -2,8 +2,8 @@
 #SBATCH --job-name=FACED_ADAPTER
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_adapter_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_adapter_%j.err
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=gpu_devel
+#SBATCH --gres=gpu:a40:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -29,7 +29,7 @@
 # ------------------------------
 # RUN IDENTITY
 # ------------------------------
-STAGE="${STAGE:-A3}"  # A0|A1|A2|A2b|A3|A4|A5|custom
+STAGE="${STAGE:-A3b}"  # A0|A1|A2|A2b|A3|A3b|A4|A5|custom
 RUN_TAG="${RUN_TAG:-${STAGE}}"
 
 # ------------------------------
@@ -107,6 +107,13 @@ case "$STAGE" in
     ADAPTER_MODE_PRESET="subject_domain"
     USE_SUBJECT_SUMMARY_PRESET="0"
     ;;
+  A3b)
+    # Special A3 comparison bundle; per-run knobs are configured later.
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="0"
+    ADAPTER_MODE_PRESET="subject_domain"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ;;
   A4)
     ATTNRES_VARIANT_PRESET="pre_attn"
     EEG_CONTEXT_PRESET="1"
@@ -122,7 +129,7 @@ case "$STAGE" in
   custom)
     ;;
   *)
-    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A4|A5|custom." >&2
+    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A3b|A4|A5|custom." >&2
     exit 2
     ;;
 esac
@@ -168,6 +175,7 @@ ADAPTER_ONLY_UPDATE="${ADAPTER_ONLY_UPDATE:-0}"
 # ------------------------------
 # Keep 0 for the new version. Set to 1 only if you want old routing baseline comparisons.
 USE_LEGACY_MOE="${USE_LEGACY_MOE:-0}"
+HYBRID_MOE_ADAPTER="${HYBRID_MOE_ADAPTER:-1}"  # 1 keeps adapter_mode in MoE runs; 0 forces pure MoE
 MOE_NUM_LAYERS="${MOE_NUM_LAYERS:-1}"
 MOE_NUM_EXPERTS="${MOE_NUM_EXPERTS:-4}"
 MOE_CAPACITY_FACTOR="${MOE_CAPACITY_FACTOR:-1.0}"
@@ -176,6 +184,7 @@ MOE_DOMAIN_EMB_DIM="${MOE_DOMAIN_EMB_DIM:-16}"
 MOE_LOAD_BALANCE="${MOE_LOAD_BALANCE:-0.005}"
 MOE_DOMAIN_BIAS_REG="${MOE_DOMAIN_BIAS_REG:-0.0005}"
 MOE_USE_PSD="${MOE_USE_PSD:-0}"
+MOE_USE_ADAPTER_COND_BIAS="${MOE_USE_ADAPTER_COND_BIAS:-0}"
 
 # tqdm in Slurm logs can generate very large files; keep this 0 on cluster
 FORCE_TQDM="${FORCE_TQDM:-0}"
@@ -192,6 +201,7 @@ EXTRA_FLAGS=()
 
 echo "[slurm] stage=$STAGE run_tag=$RUN_TAG" >&2
 echo "[slurm] config attnres=$ATTNRES_VARIANT attnres_gated=$ATTNRES_GATED attnres_subject_gates=$ATTNRES_SUBJECT_GATES eeg_context=$EEG_CONTEXT adapter_mode=$ADAPTER_MODE use_subject_summary=$USE_SUBJECT_SUMMARY" >&2
+echo "[slurm] moe use_legacy=$USE_LEGACY_MOE hybrid_moe_adapter=$HYBRID_MOE_ADAPTER moe_use_adapter_cond_bias=$MOE_USE_ADAPTER_COND_BIAS" >&2
 
 if [[ ! -f "$FACED_META_CSV" ]]; then
   echo "[slurm] FACED_META_CSV not found: $FACED_META_CSV" >&2
@@ -259,7 +269,11 @@ if [[ "$ATTNRES_SUBJECT_GATES" == "1" ]]; then
 fi
 
 # Legacy MoE compatibility path
-if [[ "$USE_LEGACY_MOE" == "1" ]]; then
+if [[ "$USE_LEGACY_MOE" == "1" && "$STAGE" != "A3b" ]]; then
+  if [[ "$HYBRID_MOE_ADAPTER" != "1" ]]; then
+    ADAPTER_MODE="none"
+    USE_SUBJECT_SUMMARY="0"
+  fi
   EXTRA_FLAGS+=(--moe --moe_route_mode typed_capacity_domain --moe_diagnostics)
   EXTRA_FLAGS+=(--moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS")
   EXTRA_FLAGS+=(--moe_capacity_factor "$MOE_CAPACITY_FACTOR")
@@ -267,6 +281,11 @@ if [[ "$USE_LEGACY_MOE" == "1" ]]; then
   EXTRA_FLAGS+=(--moe_load_balance "$MOE_LOAD_BALANCE")
   EXTRA_FLAGS+=(--moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG")
   EXTRA_FLAGS+=(--faced_meta_csv "$FACED_META_CSV")
+  if [[ "$MOE_USE_ADAPTER_COND_BIAS" == "1" ]]; then
+    EXTRA_FLAGS+=(--moe_use_adapter_cond_bias)
+  else
+    EXTRA_FLAGS+=(--no-moe_use_adapter_cond_bias)
+  fi
   if [[ "$MOE_DOMAIN_BIAS" == "1" ]]; then
     EXTRA_FLAGS+=(--moe_domain_bias)
   fi
@@ -444,6 +463,110 @@ if [[ "$STAGE" == "A2b" ]]; then
   echo "[A2b][delta] vs=A1_ref target=A2_raw_auto d_best_acc=$(calc_delta "$auto_acc" "$ref_acc") d_best_kappa=$(calc_delta "$auto_kappa" "$ref_kappa")"
   echo "[A2b][delta] vs=A1_ref target=A2_rich_strict d_best_acc=$(calc_delta "$strict_acc" "$ref_acc") d_best_kappa=$(calc_delta "$strict_kappa" "$ref_kappa")"
   echo "[A2b][delta] vs=A2_raw_auto target=A2_rich_strict d_best_acc=$(calc_delta "$strict_acc" "$auto_acc") d_best_kappa=$(calc_delta "$strict_kappa" "$auto_kappa")"
+elif [[ "$STAGE" == "A3b" ]]; then
+  A3B_LOG_DIR="${A3B_LOG_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/a3b_${SLURM_JOB_ID}}"
+  mkdir -p "$A3B_LOG_DIR"
+
+  if [[ "$MOE_DOMAIN_BIAS" == "1" ]]; then
+    A3B_MOE_BIAS_FLAGS=(--moe_domain_bias)
+  else
+    A3B_MOE_BIAS_FLAGS=()
+  fi
+  if [[ "$MOE_USE_PSD" == "1" ]]; then
+    A3B_MOE_PSD_FLAGS=(--moe_use_psd_router_features)
+  else
+    A3B_MOE_PSD_FLAGS=()
+  fi
+
+  declare -a A3B_ROWS=()
+  declare -A A3B_BEST_ACC=()
+  declare -A A3B_BEST_KAPPA=()
+
+  run_and_collect_a3b() {
+    local label="$1"
+    shift
+    local run_model_dir="$model_dir/$label"
+    local run_log="$A3B_LOG_DIR/${label}.log"
+    mkdir -p "$run_model_dir"
+
+    local -a run_flags=("${EXTRA_FLAGS[@]}")
+    run_flags+=("$@")
+
+    echo "[A3b] start label=$label model_dir=$run_model_dir" >&2
+    run_finetune "$run_model_dir" "${run_flags[@]}" 2>&1 | tee "$run_log"
+
+    local row
+    row=$(summarize_log "$label" "$run_log") || exit 3
+    A3B_ROWS+=("$row")
+
+    local _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static _runtime _ctxfile
+    read -r _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static _runtime _ctxfile <<< "$row"
+    A3B_BEST_ACC["$_label"]="$_best_acc"
+    A3B_BEST_KAPPA["$_label"]="$_best_kappa"
+  }
+
+  # Four A3 variants in one job:
+  # 1) hybrid + adapter-conditioned router bias
+  # 2) hybrid without adapter-conditioned router bias
+  # 3) pure MoE (no adapters)
+  # 4) adapter/AttnRes only (no MoE)
+  run_and_collect_a3b "A3_hybrid_cond" \
+    --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
+    --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
+    --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
+    --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
+    --moe_load_balance "$MOE_LOAD_BALANCE" \
+    --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
+    "${A3B_MOE_BIAS_FLAGS[@]}" "${A3B_MOE_PSD_FLAGS[@]}" \
+    --moe_use_adapter_cond_bias
+
+  run_and_collect_a3b "A3_hybrid_nocond" \
+    --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
+    --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
+    --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
+    --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
+    --moe_load_balance "$MOE_LOAD_BALANCE" \
+    --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
+    "${A3B_MOE_BIAS_FLAGS[@]}" "${A3B_MOE_PSD_FLAGS[@]}" \
+    --no-moe_use_adapter_cond_bias
+
+  run_and_collect_a3b "A3_pure_moe" \
+    --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
+    --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
+    --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
+    --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
+    --moe_load_balance "$MOE_LOAD_BALANCE" \
+    --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
+    "${A3B_MOE_BIAS_FLAGS[@]}" "${A3B_MOE_PSD_FLAGS[@]}" \
+    --adapter_mode none \
+    --no-moe_use_adapter_cond_bias
+
+  run_and_collect_a3b "A3_adapter_only" \
+    --adapter_mode subject_domain
+
+  calc_delta() {
+    awk -v a="$1" -v b="$2" 'BEGIN {printf("%.5f", a - b)}'
+  }
+
+  echo "[A3b][summary] log_dir=$A3B_LOG_DIR"
+  echo "[A3b][summary] label best_acc best_kappa last_ep last_acc last_kappa used_static_fields runtime_state context_file"
+  for row in "${A3B_ROWS[@]}"; do
+    echo "[A3b][summary] $row"
+  done
+
+  base_acc="${A3B_BEST_ACC[A3_adapter_only]}"
+  base_kappa="${A3B_BEST_KAPPA[A3_adapter_only]}"
+  hc_acc="${A3B_BEST_ACC[A3_hybrid_cond]}"
+  hc_kappa="${A3B_BEST_KAPPA[A3_hybrid_cond]}"
+  hn_acc="${A3B_BEST_ACC[A3_hybrid_nocond]}"
+  hn_kappa="${A3B_BEST_KAPPA[A3_hybrid_nocond]}"
+  pm_acc="${A3B_BEST_ACC[A3_pure_moe]}"
+  pm_kappa="${A3B_BEST_KAPPA[A3_pure_moe]}"
+
+  echo "[A3b][delta] vs=A3_adapter_only target=A3_hybrid_cond d_best_acc=$(calc_delta "$hc_acc" "$base_acc") d_best_kappa=$(calc_delta "$hc_kappa" "$base_kappa")"
+  echo "[A3b][delta] vs=A3_adapter_only target=A3_hybrid_nocond d_best_acc=$(calc_delta "$hn_acc" "$base_acc") d_best_kappa=$(calc_delta "$hn_kappa" "$base_kappa")"
+  echo "[A3b][delta] vs=A3_adapter_only target=A3_pure_moe d_best_acc=$(calc_delta "$pm_acc" "$base_acc") d_best_kappa=$(calc_delta "$pm_kappa" "$base_kappa")"
+  echo "[A3b][delta] vs=A3_hybrid_nocond target=A3_hybrid_cond d_best_acc=$(calc_delta "$hc_acc" "$hn_acc") d_best_kappa=$(calc_delta "$hc_kappa" "$hn_kappa")"
 else
   run_finetune "$model_dir" "${EXTRA_FLAGS[@]}"
 fi

@@ -55,6 +55,8 @@ class Model(nn.Module):
 
             if param.attnres_variant == 'none' and not getattr(param, 'moe', False) and not getattr(param, 'subject_adapter', False):
                 print("[FACED] Baseline mode: foundation load")
+            elif getattr(param, 'subject_adapter', False) and getattr(param, 'moe', False):
+                print("[FACED] Hybrid mode: foundation overlap load + MoE + subject adapter residual")
             elif getattr(param, 'subject_adapter', False):
                 print("[FACED] Adapter mode: foundation overlap load + trainable adapter path")
             elif getattr(param, 'moe', False):

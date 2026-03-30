@@ -166,6 +166,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         router_arch: str = "linear",
         router_mlp_hidden: int = 128,
         use_psd_router_features: bool = False,
+        use_adapter_cond_bias: bool = False,
+        adapter_cond_dim: int = 0,
         load_balance_coef: float = 0.0,
         domain_bias_reg_coef: float = 0.0,
         device=None,
@@ -195,6 +197,10 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.router_arch = router_arch
         self.router_mlp_hidden = int(router_mlp_hidden)
         self.use_psd_router_features = bool(use_psd_router_features)
+        self.use_adapter_cond_bias = bool(use_adapter_cond_bias)
+        self.adapter_cond_dim = int(adapter_cond_dim)
+        if self.use_adapter_cond_bias and self.adapter_cond_dim <= 0:
+            raise ValueError("use_adapter_cond_bias=True requires adapter_cond_dim > 0")
         self.load_balance_coef = float(load_balance_coef)
         self.domain_bias_reg_coef = float(domain_bias_reg_coef)
 
@@ -208,6 +214,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.spectral_router = _make_router_head(
             spectral_in, num_specialists, router_arch, self.router_mlp_hidden, factory_kwargs
         )
+        self.adapter_cond_proj_spatial = None
+        self.adapter_cond_proj_spectral = None
+        if self.use_adapter_cond_bias:
+            self.adapter_cond_proj_spatial = nn.Linear(self.adapter_cond_dim, num_specialists, bias=True, **factory_kwargs)
+            self.adapter_cond_proj_spectral = nn.Linear(self.adapter_cond_dim, num_specialists, bias=True, **factory_kwargs)
 
         self.spatial_specialists = nn.ModuleList(
             ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
@@ -229,6 +240,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
 
         self._zero_specialist_output_weights()
         self._zero_domain_bias_path()
+        self._zero_adapter_cond_path()
 
         z = torch.zeros((), device=device, dtype=torch.float32)
         self._last_lb_loss = z
@@ -258,6 +270,31 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         nn.init.zeros_(self.domain_proj_spatial.bias)
         nn.init.zeros_(self.domain_proj_spectral.weight)
         nn.init.zeros_(self.domain_proj_spectral.bias)
+
+    def _zero_adapter_cond_path(self) -> None:
+        if self.adapter_cond_proj_spatial is not None:
+            nn.init.zeros_(self.adapter_cond_proj_spatial.weight)
+            nn.init.zeros_(self.adapter_cond_proj_spatial.bias)
+        if self.adapter_cond_proj_spectral is not None:
+            nn.init.zeros_(self.adapter_cond_proj_spectral.weight)
+            nn.init.zeros_(self.adapter_cond_proj_spectral.bias)
+
+    def _adapter_cond_logit_bias(self, router_context: Optional[Dict[str, Tensor]], batch_size: int, device: torch.device) -> Tuple[Tensor, Tensor]:
+        z = torch.zeros(batch_size, self.num_specialists, device=device)
+        if not self.use_adapter_cond_bias:
+            return z, z
+        if router_context is None:
+            return z, z
+        cond = router_context.get("adapter_cond")
+        if cond is None:
+            return z, z
+        if cond.dim() != 2 or cond.shape[0] != batch_size or cond.shape[1] != self.adapter_cond_dim:
+            raise ValueError(
+                "router_context['adapter_cond'] must be [B, adapter_cond_dim], got "
+                f"{tuple(cond.shape)} with adapter_cond_dim={self.adapter_cond_dim}"
+            )
+        cond = cond.to(device=device)
+        return self.adapter_cond_proj_spatial(cond), self.adapter_cond_proj_spectral(cond)
 
     def _domain_logit_bias(self, batch_size: int, bank: str, device: torch.device) -> Tensor:
         if not self.domain_bias:
@@ -412,9 +449,10 @@ class TypedCapacityDomainMoEFFN(nn.Module):
 
         bias_sp = self._domain_logit_bias(b, "spatial", x.device)
         bias_sc = self._domain_logit_bias(b, "spectral", x.device)
+        cond_bias_sp, cond_bias_sc = self._adapter_cond_logit_bias(router_context, b, x.device)
 
-        logits_sp = logits_sp_content + bias_sp
-        logits_sc = logits_sc_content + bias_sc
+        logits_sp = logits_sp_content + bias_sp + cond_bias_sp
+        logits_sc = logits_sc_content + bias_sc + cond_bias_sc
 
         probs_sp = F.softmax(logits_sp, dim=-1)
         probs_sc = F.softmax(logits_sc, dim=-1)
@@ -467,6 +505,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         post_ent_sp = self._hist_entropy(counts_sp)
         post_ent_sc = self._hist_entropy(counts_sc)
         dom_norm = float(torch.cat([bias_sp, bias_sc], dim=1).float().norm(dim=-1).mean().item())
+        cond_norm = float(torch.cat([cond_bias_sp, cond_bias_sc], dim=1).float().norm(dim=-1).mean().item())
 
         self.last_diagnostics = {
             "moe_kind": self.moe_kind,
@@ -474,6 +513,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "num_experts": int(self.num_specialists),
             "domain_bias_enabled": bool(self.domain_bias),
             "domain_bias_norm": dom_norm,
+            "adapter_cond_bias_enabled": bool(self.use_adapter_cond_bias),
+            "adapter_cond_bias_norm": cond_norm,
             "mean_shared_output_norm": float(h_shared.float().norm(dim=-1).mean().item()),
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),

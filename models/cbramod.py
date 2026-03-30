@@ -50,6 +50,7 @@ class CBraMod(nn.Module):
         moe_router_arch: str = "linear",
         moe_router_mlp_hidden: int = 128,
         moe_use_psd_router_features: bool = False,
+        moe_use_adapter_cond_bias: bool = False,
         moe_load_balance: float = 0.0,
         moe_domain_bias_reg: float = 0.0,
         use_subject_adapters: bool = False,
@@ -208,10 +209,12 @@ class CBraMod(nn.Module):
                         router_arch=moe_router_arch,
                         router_mlp_hidden=moe_router_mlp_hidden,
                         use_psd_router_features=moe_use_psd_router_features,
+                        use_adapter_cond_bias=moe_use_adapter_cond_bias,
+                        adapter_cond_dim=adapter_cond_dim,
                         load_balance_coef=moe_load_balance,
                         domain_bias_reg_coef=moe_domain_bias_reg,
                     )
-                if self.use_subject_adapters and idx >= adapter_start and moe_mod is None:
+                if self.use_subject_adapters and idx >= adapter_start:
                     adapter_mod = SubjectDomainAdapter(
                         d_model=d_model,
                         rank=adapter_rank,
@@ -492,6 +495,7 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_router_arch': getattr(param, 'moe_router_arch', 'linear'),
         'moe_router_mlp_hidden': getattr(param, 'moe_router_mlp_hidden', 128),
         'moe_use_psd_router_features': getattr(param, 'moe_use_psd_router_features', False),
+        'moe_use_adapter_cond_bias': getattr(param, 'moe_use_adapter_cond_bias', False),
         'moe_load_balance': getattr(param, 'moe_load_balance', 0.0),
         'moe_domain_bias_reg': getattr(param, 'moe_domain_bias_reg', 0.0),
         'use_subject_adapters': (

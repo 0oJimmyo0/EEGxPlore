@@ -308,6 +308,12 @@ def main():
         action='store_true',
         help='Append PSD features to the spectral bank router only.',
     )
+    parser.add_argument(
+        '--moe_use_adapter_cond_bias',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='When MoE and subject adapters are both enabled, use adapter conditioning as a zero-init router bias.',
+    )
 
     parser.add_argument(
         '--tqdm',
@@ -350,10 +356,19 @@ def main():
 
     params = parser.parse_args()
     params.subject_adapter = (params.adapter_mode != 'none')
-    if params.moe and params.subject_adapter:
-        raise ValueError("Use either adapter_mode or --moe, not both. Adapter path is the preferred mode.")
     if params.moe:
-        print("[warning] --moe is deprecated; prefer --adapter_mode subject_domain.", flush=True)
+        print(
+            "[warning] --moe is deprecated; prefer --adapter_mode subject_domain unless running controlled MoE ablations.",
+            flush=True,
+        )
+    if params.moe and params.subject_adapter:
+        print(
+            "[warning] Running hybrid MoE+adapter mode. "
+            "Adapters are now applied after MoE in selected top layers.",
+            flush=True,
+        )
+    if params.moe_use_adapter_cond_bias and not (params.moe and params.subject_adapter):
+        raise ValueError("--moe_use_adapter_cond_bias requires both --moe and adapter_mode subject_domain.")
     if params.use_subject_summary and not params.subject_adapter:
         raise ValueError("--use_subject_summary requires adapter_mode subject_domain.")
     if params.use_subject_summary and not params.subject_summary_file:
@@ -394,7 +409,8 @@ def main():
         f"channel_id_align_mode={params.channel_id_align_mode} "
         f"continual_mode={params.continual_mode} "
         f"adapter_only_update={params.adapter_only_update} "
-        f"moe={params.moe}",
+        f"moe={params.moe} "
+        f"moe_use_adapter_cond_bias={params.moe_use_adapter_cond_bias}",
         flush=True,
     )
 
