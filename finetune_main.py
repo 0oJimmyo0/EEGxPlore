@@ -314,6 +314,24 @@ def main():
         default=False,
         help='When MoE and subject adapters are both enabled, use adapter conditioning as a zero-init router bias.',
     )
+    parser.add_argument(
+        '--moe_use_subject_summary_router_concat',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Concat projected subject_summary features into both spatial/spectral router inputs.',
+    )
+    parser.add_argument(
+        '--moe_use_eeg_summary_router_concat_spatial',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Concat compact EEG-context summary features into the spatial router input.',
+    )
+    parser.add_argument(
+        '--moe_use_eeg_summary_router_concat_spectral',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Concat compact EEG-context summary features into the spectral router input.',
+    )
 
     parser.add_argument(
         '--tqdm',
@@ -369,6 +387,23 @@ def main():
         )
     if params.moe_use_adapter_cond_bias and not (params.moe and params.subject_adapter):
         raise ValueError("--moe_use_adapter_cond_bias requires both --moe and adapter_mode subject_domain.")
+    if params.moe_use_subject_summary_router_concat and not params.moe:
+        raise ValueError("--moe_use_subject_summary_router_concat requires --moe.")
+    if params.moe_use_subject_summary_router_concat and not params.use_subject_summary:
+        raise ValueError(
+            "--moe_use_subject_summary_router_concat requires --use_subject_summary and --subject_summary_file."
+        )
+    if (
+        (params.moe_use_eeg_summary_router_concat_spatial or params.moe_use_eeg_summary_router_concat_spectral)
+        and not params.moe
+    ):
+        raise ValueError("EEG summary router concat flags require --moe.")
+    if (
+        params.moe_use_eeg_summary_router_concat_spatial or params.moe_use_eeg_summary_router_concat_spectral
+    ) and not params.eeg_channel_context:
+        raise ValueError(
+            "EEG summary router concat flags require --eeg_channel_context and a valid --channel_context_file."
+        )
     if params.use_subject_summary and not params.subject_adapter:
         raise ValueError("--use_subject_summary requires adapter_mode subject_domain.")
     if params.use_subject_summary and not params.subject_summary_file:
@@ -410,7 +445,10 @@ def main():
         f"continual_mode={params.continual_mode} "
         f"adapter_only_update={params.adapter_only_update} "
         f"moe={params.moe} "
-        f"moe_use_adapter_cond_bias={params.moe_use_adapter_cond_bias}",
+        f"moe_use_adapter_cond_bias={params.moe_use_adapter_cond_bias} "
+        f"moe_use_subject_summary_router_concat={params.moe_use_subject_summary_router_concat} "
+        f"moe_use_eeg_summary_router_concat_spatial={params.moe_use_eeg_summary_router_concat_spatial} "
+        f"moe_use_eeg_summary_router_concat_spectral={params.moe_use_eeg_summary_router_concat_spectral}",
         flush=True,
     )
 

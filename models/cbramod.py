@@ -15,8 +15,10 @@ from models.adapters import (
 from models.moe import (
     TypedCapacityDomainMoEFFN,
     compact_psd_bandpowers,
+    reset_moe_eeg_router_summary,
     reset_moe_faced_metadata,
     reset_moe_psd_router_features,
+    set_moe_eeg_router_summary,
     set_moe_faced_metadata,
     set_moe_psd_router_features,
     warm_start_moe_from_dense_ckpt,
@@ -51,6 +53,9 @@ class CBraMod(nn.Module):
         moe_router_mlp_hidden: int = 128,
         moe_use_psd_router_features: bool = False,
         moe_use_adapter_cond_bias: bool = False,
+        moe_use_subject_summary_router_concat: bool = False,
+        moe_use_eeg_summary_router_concat_spatial: bool = False,
+        moe_use_eeg_summary_router_concat_spectral: bool = False,
         moe_load_balance: float = 0.0,
         moe_domain_bias_reg: float = 0.0,
         use_subject_adapters: bool = False,
@@ -82,6 +87,9 @@ class CBraMod(nn.Module):
         self._adapter_use_subject_id = bool(use_subject_id_metadata)
         self._adapter_use_age_bucket = bool(use_age_bucket_metadata)
         self._adapter_use_segment_bucket = bool(use_segment_bucket_metadata)
+        self._moe_use_eeg_summary_router_concat_spatial = bool(moe_use_eeg_summary_router_concat_spatial)
+        self._moe_use_eeg_summary_router_concat_spectral = bool(moe_use_eeg_summary_router_concat_spectral)
+        self.moe_eeg_summary_dim = 9
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         channel_ctx_data = {}
@@ -211,6 +219,11 @@ class CBraMod(nn.Module):
                         use_psd_router_features=moe_use_psd_router_features,
                         use_adapter_cond_bias=moe_use_adapter_cond_bias,
                         adapter_cond_dim=adapter_cond_dim,
+                        use_subject_summary_router_concat=moe_use_subject_summary_router_concat,
+                        subject_summary_router_dim=int(subject_summary_dim),
+                        use_eeg_summary_router_concat_spatial=moe_use_eeg_summary_router_concat_spatial,
+                        use_eeg_summary_router_concat_spectral=moe_use_eeg_summary_router_concat_spectral,
+                        eeg_summary_router_dim=self.moe_eeg_summary_dim,
                         load_balance_coef=moe_load_balance,
                         domain_bias_reg_coef=moe_domain_bias_reg,
                     )
@@ -337,9 +350,31 @@ class CBraMod(nn.Module):
                 if isinstance(m, TypedCapacityDomainMoEFFN):
                     m._zero_specialist_output_weights()
 
+    def _build_moe_eeg_router_summary(self, batch_meta, device, dtype, batch_size: int) -> torch.Tensor:
+        chenc = self.channel_context_encoder
+        num_ch = max(int(chenc.num_channels), 1)
+        coords = chenc.coords.to(device=device, dtype=dtype)
+        mm = chenc.montage_mask.to(device=device, dtype=dtype)
+        rg = chenc.region_ids.to(device=device)
+
+        coords_mean = coords.mean(dim=0)
+        coords_std = coords.std(dim=0, unbiased=False)
+        montage_mean = mm.mean().view(1)
+        region_nonzero = (rg > 0).to(dtype=dtype).mean().view(1)
+        static = torch.cat([coords_mean, coords_std, montage_mean, region_nonzero], dim=0)
+        static = static.view(1, -1).expand(batch_size, -1)
+
+        if isinstance(batch_meta, dict) and torch.is_tensor(batch_meta.get("channel_count")):
+            cc = batch_meta["channel_count"].to(device=device, dtype=dtype).view(batch_size, 1)
+        else:
+            cc = torch.full((batch_size, 1), float(num_ch), device=device, dtype=dtype)
+        cc = cc / float(num_ch)
+        return torch.cat([static, cc], dim=-1)
+
     def forward(self, x, mask=None, batch_meta=None):
         tok_psd = None
         tok_meta = None
+        tok_eeg = None
         tok_adapter = set_adapter_batch_meta(batch_meta if isinstance(batch_meta, dict) else None)
         if self.metadata_debug and not self._metadata_runtime_logged:
             present = sorted(list(batch_meta.keys())) if isinstance(batch_meta, dict) else []
@@ -355,6 +390,14 @@ class CBraMod(nn.Module):
             tok_psd = set_moe_psd_router_features(compact_psd_bandpowers(x))
         if self.use_moe and self.moe_route_mode == "typed_capacity_domain":
             tok_meta = set_moe_faced_metadata(batch_meta)
+        if (
+            self.use_moe
+            and (self._moe_use_eeg_summary_router_concat_spatial or self._moe_use_eeg_summary_router_concat_spectral)
+            and self.channel_context_encoder.use_channel_context
+        ):
+            bsz = int(x.shape[0])
+            eeg_summary = self._build_moe_eeg_router_summary(batch_meta, x.device, x.dtype, bsz)
+            tok_eeg = set_moe_eeg_router_summary(eeg_summary)
         try:
             patch_emb = self.patch_embedding(x, mask)
             if self.metadata_debug and not self._channel_context_runtime_logged:
@@ -388,6 +431,8 @@ class CBraMod(nn.Module):
                 reset_moe_psd_router_features(tok_psd)
             if tok_meta is not None:
                 reset_moe_faced_metadata(tok_meta)
+            if tok_eeg is not None:
+                reset_moe_eeg_router_summary(tok_eeg)
             reset_adapter_batch_meta(tok_adapter)
 
     def moe_auxiliary_loss(self) -> torch.Tensor:
@@ -496,6 +541,9 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_router_mlp_hidden': getattr(param, 'moe_router_mlp_hidden', 128),
         'moe_use_psd_router_features': getattr(param, 'moe_use_psd_router_features', False),
         'moe_use_adapter_cond_bias': getattr(param, 'moe_use_adapter_cond_bias', False),
+        'moe_use_subject_summary_router_concat': getattr(param, 'moe_use_subject_summary_router_concat', False),
+        'moe_use_eeg_summary_router_concat_spatial': getattr(param, 'moe_use_eeg_summary_router_concat_spatial', False),
+        'moe_use_eeg_summary_router_concat_spectral': getattr(param, 'moe_use_eeg_summary_router_concat_spectral', False),
         'moe_load_balance': getattr(param, 'moe_load_balance', 0.0),
         'moe_domain_bias_reg': getattr(param, 'moe_domain_bias_reg', 0.0),
         'use_subject_adapters': (

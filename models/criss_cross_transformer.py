@@ -163,6 +163,19 @@ class TransformerEncoderLayer(nn.Module):
             return None
         return cond_fn(batch_meta, x_ref.device, x_ref.dtype)
 
+    def _subject_summary_tensor(self, x_ref: Tensor) -> Optional[Tensor]:
+        batch_meta = get_adapter_batch_meta()
+        if not isinstance(batch_meta, dict):
+            return None
+        ssum = batch_meta.get("subject_summary")
+        if not torch.is_tensor(ssum):
+            return None
+        if ssum.ndim == 1:
+            ssum = ssum.unsqueeze(0)
+        if ssum.ndim != 2:
+            return None
+        return ssum.to(device=x_ref.device, dtype=x_ref.dtype)
+
     def _subject_gate_delta(self, gate_proj: Optional[nn.Module], x_ref: Tensor) -> Optional[Tensor]:
         if gate_proj is None or self.subject_adapter is None:
             return None
@@ -276,6 +289,9 @@ class TransformerEncoderLayer(nn.Module):
             adapter_cond = self._adapter_condition_tensor(mlp_in)
             if adapter_cond is not None:
                 router_ctx["adapter_cond"] = adapter_cond
+            subject_summary = self._subject_summary_tensor(mlp_in)
+            if subject_summary is not None:
+                router_ctx["subject_summary"] = subject_summary
         adapter_ctx = {"layer_idx": self.layer_idx}
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx, adapter_context=adapter_ctx)
 

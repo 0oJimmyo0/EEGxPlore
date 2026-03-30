@@ -2,8 +2,8 @@
 #SBATCH --job-name=FACED_ADAPTER
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_adapter_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_adapter_%j.err
-#SBATCH --partition=gpu_devel
-#SBATCH --gres=gpu:a40:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -29,7 +29,7 @@
 # ------------------------------
 # RUN IDENTITY
 # ------------------------------
-STAGE="${STAGE:-A3b}"  # A0|A1|A2|A2b|A3|A3b|A4|A5|custom
+STAGE="${STAGE:-A3c}"  # A0|A1|A2|A2b|A3|A3b|A3c|A4|A5|custom
 RUN_TAG="${RUN_TAG:-${STAGE}}"
 
 # ------------------------------
@@ -46,10 +46,10 @@ FACED_META_CSV="${FACED_META_CSV:-$FACED_META_DIR/Recording_info.csv}"
 # Optional EEG channel-context metadata file (.json/.pt/.pth/.xlsx)
 # Must contain any subset of: channel_ids, coords, montage_mask, region_ids.
 # For FACED, Electrode_Location.xlsx is supported directly.
-CHANNEL_CONTEXT_FILE="${CHANNEL_CONTEXT_FILE:-$FACED_META_DIR/Electrode_Location.xlsx}"
+CHANNEL_CONTEXT_FILE="${CHANNEL_CONTEXT_FILE:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/channel_context_rich.json}"
 
 # Optional subject summary map (.json/.pt/.pth): {"sub000": [...], ...}
-SUBJECT_SUMMARY_FILE="${SUBJECT_SUMMARY_FILE:-}"
+SUBJECT_SUMMARY_FILE="${SUBJECT_SUMMARY_FILE:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/subject_summary_recording_info.json}"
 USE_SUBJECT_SUMMARY="${USE_SUBJECT_SUMMARY:-}"   # 0|1, stage preset applies when unset
 SUBJECT_SUMMARY_HANDLING="${SUBJECT_SUMMARY_HANDLING:-project}"  # project|error
 
@@ -114,6 +114,13 @@ case "$STAGE" in
     ADAPTER_MODE_PRESET="subject_domain"
     USE_SUBJECT_SUMMARY_PRESET="0"
     ;;
+  A3c)
+    # Router-enrichment ablation bundle; per-run knobs are configured later.
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="0"
+    ADAPTER_MODE_PRESET="subject_domain"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ;;
   A4)
     ATTNRES_VARIANT_PRESET="pre_attn"
     EEG_CONTEXT_PRESET="1"
@@ -129,7 +136,7 @@ case "$STAGE" in
   custom)
     ;;
   *)
-    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A3b|A4|A5|custom." >&2
+    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A3b|A3c|A4|A5|custom." >&2
     exit 2
     ;;
 esac
@@ -185,6 +192,9 @@ MOE_LOAD_BALANCE="${MOE_LOAD_BALANCE:-0.005}"
 MOE_DOMAIN_BIAS_REG="${MOE_DOMAIN_BIAS_REG:-0.0005}"
 MOE_USE_PSD="${MOE_USE_PSD:-0}"
 MOE_USE_ADAPTER_COND_BIAS="${MOE_USE_ADAPTER_COND_BIAS:-0}"
+MOE_USE_SUBJECT_SUMMARY_ROUTER_CONCAT="${MOE_USE_SUBJECT_SUMMARY_ROUTER_CONCAT:-0}"
+MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPATIAL="${MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPATIAL:-0}"
+MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL="${MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL:-0}"
 
 # tqdm in Slurm logs can generate very large files; keep this 0 on cluster
 FORCE_TQDM="${FORCE_TQDM:-0}"
@@ -202,6 +212,10 @@ EXTRA_FLAGS=()
 echo "[slurm] stage=$STAGE run_tag=$RUN_TAG" >&2
 echo "[slurm] config attnres=$ATTNRES_VARIANT attnres_gated=$ATTNRES_GATED attnres_subject_gates=$ATTNRES_SUBJECT_GATES eeg_context=$EEG_CONTEXT adapter_mode=$ADAPTER_MODE use_subject_summary=$USE_SUBJECT_SUMMARY" >&2
 echo "[slurm] moe use_legacy=$USE_LEGACY_MOE hybrid_moe_adapter=$HYBRID_MOE_ADAPTER moe_use_adapter_cond_bias=$MOE_USE_ADAPTER_COND_BIAS" >&2
+echo "[slurm] router_concat subject_summary=$MOE_USE_SUBJECT_SUMMARY_ROUTER_CONCAT eeg_spatial=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPATIAL eeg_spectral=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL" >&2
+if [[ "$STAGE" == "A3b" || "$STAGE" == "A3c" ]]; then
+  echo "[slurm] note: A3b/A3c are bundle stages; per-run flags below intentionally override some global defaults." >&2
+fi
 
 if [[ ! -f "$FACED_META_CSV" ]]; then
   echo "[slurm] FACED_META_CSV not found: $FACED_META_CSV" >&2
@@ -269,7 +283,7 @@ if [[ "$ATTNRES_SUBJECT_GATES" == "1" ]]; then
 fi
 
 # Legacy MoE compatibility path
-if [[ "$USE_LEGACY_MOE" == "1" && "$STAGE" != "A3b" ]]; then
+if [[ "$USE_LEGACY_MOE" == "1" && "$STAGE" != "A3b" && "$STAGE" != "A3c" ]]; then
   if [[ "$HYBRID_MOE_ADAPTER" != "1" ]]; then
     ADAPTER_MODE="none"
     USE_SUBJECT_SUMMARY="0"
@@ -285,6 +299,21 @@ if [[ "$USE_LEGACY_MOE" == "1" && "$STAGE" != "A3b" ]]; then
     EXTRA_FLAGS+=(--moe_use_adapter_cond_bias)
   else
     EXTRA_FLAGS+=(--no-moe_use_adapter_cond_bias)
+  fi
+  if [[ "$MOE_USE_SUBJECT_SUMMARY_ROUTER_CONCAT" == "1" ]]; then
+    EXTRA_FLAGS+=(--moe_use_subject_summary_router_concat)
+  else
+    EXTRA_FLAGS+=(--no-moe_use_subject_summary_router_concat)
+  fi
+  if [[ "$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPATIAL" == "1" ]]; then
+    EXTRA_FLAGS+=(--moe_use_eeg_summary_router_concat_spatial)
+  else
+    EXTRA_FLAGS+=(--no-moe_use_eeg_summary_router_concat_spatial)
+  fi
+  if [[ "$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL" == "1" ]]; then
+    EXTRA_FLAGS+=(--moe_use_eeg_summary_router_concat_spectral)
+  else
+    EXTRA_FLAGS+=(--no-moe_use_eeg_summary_router_concat_spectral)
   fi
   if [[ "$MOE_DOMAIN_BIAS" == "1" ]]; then
     EXTRA_FLAGS+=(--moe_domain_bias)
@@ -342,7 +371,7 @@ summarize_log() {
   best_vals=$(grep -E "^Epoch [0-9]+ :" "$log_path" | \
     awk -F'[,: ]+' 'BEGIN{bestAcc=-1;bestK=-1} {ep=$2; acc=$7; k=$9; if(acc>bestAcc){bestAcc=acc;bestAccEp=ep} if(k>bestK){bestK=k;bestKEp=ep} lastAcc=acc; lastK=k; lastEp=ep} END{printf("%.5f %.5f %d %.5f %.5f",bestAcc,bestK,lastEp,lastAcc,lastK)}')
   if [[ -z "$best_vals" ]]; then
-    echo "[A2b][summary] $label parse_error=1 log=$log_path" >&2
+    echo "[summary][parse_error] label=$label log=$log_path" >&2
     return 1
   fi
 
@@ -567,6 +596,153 @@ elif [[ "$STAGE" == "A3b" ]]; then
   echo "[A3b][delta] vs=A3_adapter_only target=A3_hybrid_nocond d_best_acc=$(calc_delta "$hn_acc" "$base_acc") d_best_kappa=$(calc_delta "$hn_kappa" "$base_kappa")"
   echo "[A3b][delta] vs=A3_adapter_only target=A3_pure_moe d_best_acc=$(calc_delta "$pm_acc" "$base_acc") d_best_kappa=$(calc_delta "$pm_kappa" "$base_kappa")"
   echo "[A3b][delta] vs=A3_hybrid_nocond target=A3_hybrid_cond d_best_acc=$(calc_delta "$hc_acc" "$hn_acc") d_best_kappa=$(calc_delta "$hc_kappa" "$hn_kappa")"
+elif [[ "$STAGE" == "A3c" ]]; then
+  if [[ -z "$SUBJECT_SUMMARY_FILE" ]] || [[ ! -f "$SUBJECT_SUMMARY_FILE" ]]; then
+    echo "[slurm] A3c requires SUBJECT_SUMMARY_FILE to exist for subject-summary router concat runs." >&2
+    exit 2
+  fi
+  if [[ -z "$CHANNEL_CONTEXT_FILE" ]] || [[ ! -f "$CHANNEL_CONTEXT_FILE" ]]; then
+    echo "[slurm] A3c requires CHANNEL_CONTEXT_FILE to exist for EEG-summary router concat runs." >&2
+    exit 2
+  fi
+
+  A3C_LOG_DIR="${A3C_LOG_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/a3c_${SLURM_JOB_ID}}"
+  mkdir -p "$A3C_LOG_DIR"
+
+  if [[ "$MOE_DOMAIN_BIAS" == "1" ]]; then
+    A3C_MOE_BIAS_FLAGS=(--moe_domain_bias)
+  else
+    A3C_MOE_BIAS_FLAGS=()
+  fi
+  if [[ "$MOE_USE_PSD" == "1" ]]; then
+    A3C_MOE_PSD_FLAGS=(--moe_use_psd_router_features)
+  else
+    A3C_MOE_PSD_FLAGS=()
+  fi
+
+  declare -a A3C_ROWS=()
+  declare -A A3C_BEST_ACC=()
+  declare -A A3C_BEST_KAPPA=()
+
+  run_and_collect_a3c() {
+    local label="$1"
+    shift
+    local run_model_dir="$model_dir/$label"
+    local run_log="$A3C_LOG_DIR/${label}.log"
+    mkdir -p "$run_model_dir"
+
+    local -a run_flags=("${EXTRA_FLAGS[@]}")
+    run_flags+=("$@")
+
+    echo "[A3c] start label=$label model_dir=$run_model_dir" >&2
+    run_finetune "$run_model_dir" "${run_flags[@]}" 2>&1 | tee "$run_log"
+
+    local row
+    row=$(summarize_log "$label" "$run_log") || exit 3
+    A3C_ROWS+=("$row")
+
+    local _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static _runtime _ctxfile
+    read -r _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static _runtime _ctxfile <<< "$row"
+    A3C_BEST_ACC["$_label"]="$_best_acc"
+    A3C_BEST_KAPPA["$_label"]="$_best_kappa"
+  }
+
+  # Subject-disjoint-safe default: disable subject_id conditioning in all A3c runs.
+  # 1) Adapter baseline (no MoE)
+  run_and_collect_a3c "A3c_adapter_only_no_sid" \
+    --adapter_mode subject_domain \
+    --no-adapter_use_subject_id
+
+  # 2) Hybrid base (bias paths only)
+  run_and_collect_a3c "A3c_hybrid_bias_no_sid" \
+    --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
+    --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
+    --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
+    --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
+    --moe_load_balance "$MOE_LOAD_BALANCE" \
+    --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
+    "${A3C_MOE_BIAS_FLAGS[@]}" "${A3C_MOE_PSD_FLAGS[@]}" \
+    --moe_use_adapter_cond_bias \
+    --no-moe_use_subject_summary_router_concat \
+    --no-moe_use_eeg_summary_router_concat_spatial \
+    --no-moe_use_eeg_summary_router_concat_spectral \
+    --no-adapter_use_subject_id
+
+  # 3) Add subject-summary concat to both routers.
+  run_and_collect_a3c "A3c_hybrid_subjconcat_no_sid" \
+    --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
+    --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
+    --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
+    --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
+    --moe_load_balance "$MOE_LOAD_BALANCE" \
+    --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
+    "${A3C_MOE_BIAS_FLAGS[@]}" "${A3C_MOE_PSD_FLAGS[@]}" \
+    --moe_use_adapter_cond_bias \
+    --moe_use_subject_summary_router_concat \
+    --no-moe_use_eeg_summary_router_concat_spatial \
+    --no-moe_use_eeg_summary_router_concat_spectral \
+    --use_subject_summary --subject_summary_file "$SUBJECT_SUMMARY_FILE" \
+    --no-adapter_use_subject_id
+
+  # 4) Add EEG compact summary concat to spatial router.
+  run_and_collect_a3c "A3c_hybrid_subj_eeg_spatial_no_sid" \
+    --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
+    --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
+    --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
+    --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
+    --moe_load_balance "$MOE_LOAD_BALANCE" \
+    --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
+    "${A3C_MOE_BIAS_FLAGS[@]}" "${A3C_MOE_PSD_FLAGS[@]}" \
+    --moe_use_adapter_cond_bias \
+    --moe_use_subject_summary_router_concat \
+    --moe_use_eeg_summary_router_concat_spatial \
+    --no-moe_use_eeg_summary_router_concat_spectral \
+    --use_subject_summary --subject_summary_file "$SUBJECT_SUMMARY_FILE" \
+    --eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE" \
+    --no-adapter_use_subject_id
+
+  # 5) Optional symmetry ablation: add EEG compact summary concat to spectral router too.
+  run_and_collect_a3c "A3c_hybrid_subj_eeg_both_no_sid" \
+    --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
+    --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
+    --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
+    --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
+    --moe_load_balance "$MOE_LOAD_BALANCE" \
+    --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
+    "${A3C_MOE_BIAS_FLAGS[@]}" "${A3C_MOE_PSD_FLAGS[@]}" \
+    --moe_use_adapter_cond_bias \
+    --moe_use_subject_summary_router_concat \
+    --moe_use_eeg_summary_router_concat_spatial \
+    --moe_use_eeg_summary_router_concat_spectral \
+    --use_subject_summary --subject_summary_file "$SUBJECT_SUMMARY_FILE" \
+    --eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE" \
+    --no-adapter_use_subject_id
+
+  calc_delta() {
+    awk -v a="$1" -v b="$2" 'BEGIN {printf("%.5f", a - b)}'
+  }
+
+  echo "[A3c][summary] log_dir=$A3C_LOG_DIR"
+  echo "[A3c][summary] label best_acc best_kappa last_ep last_acc last_kappa used_static_fields runtime_state context_file"
+  for row in "${A3C_ROWS[@]}"; do
+    echo "[A3c][summary] $row"
+  done
+
+  b_acc="${A3C_BEST_ACC[A3c_adapter_only_no_sid]}"
+  b_kappa="${A3C_BEST_KAPPA[A3c_adapter_only_no_sid]}"
+  hb_acc="${A3C_BEST_ACC[A3c_hybrid_bias_no_sid]}"
+  hb_kappa="${A3C_BEST_KAPPA[A3c_hybrid_bias_no_sid]}"
+  hs_acc="${A3C_BEST_ACC[A3c_hybrid_subjconcat_no_sid]}"
+  hs_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subjconcat_no_sid]}"
+  he_acc="${A3C_BEST_ACC[A3c_hybrid_subj_eeg_spatial_no_sid]}"
+  he_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subj_eeg_spatial_no_sid]}"
+  h2_acc="${A3C_BEST_ACC[A3c_hybrid_subj_eeg_both_no_sid]}"
+  h2_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subj_eeg_both_no_sid]}"
+
+  echo "[A3c][delta] vs=A3c_adapter_only_no_sid target=A3c_hybrid_bias_no_sid d_best_acc=$(calc_delta "$hb_acc" "$b_acc") d_best_kappa=$(calc_delta "$hb_kappa" "$b_kappa")"
+  echo "[A3c][delta] vs=A3c_hybrid_bias_no_sid target=A3c_hybrid_subjconcat_no_sid d_best_acc=$(calc_delta "$hs_acc" "$hb_acc") d_best_kappa=$(calc_delta "$hs_kappa" "$hb_kappa")"
+  echo "[A3c][delta] vs=A3c_hybrid_subjconcat_no_sid target=A3c_hybrid_subj_eeg_spatial_no_sid d_best_acc=$(calc_delta "$he_acc" "$hs_acc") d_best_kappa=$(calc_delta "$he_kappa" "$hs_kappa")"
+  echo "[A3c][delta] vs=A3c_hybrid_subj_eeg_spatial_no_sid target=A3c_hybrid_subj_eeg_both_no_sid d_best_acc=$(calc_delta "$h2_acc" "$he_acc") d_best_kappa=$(calc_delta "$h2_kappa" "$he_kappa")"
 else
   run_finetune "$model_dir" "${EXTRA_FLAGS[@]}"
 fi

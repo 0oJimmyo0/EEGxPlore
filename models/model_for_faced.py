@@ -27,6 +27,9 @@ class Model(nn.Module):
         print(f"[FACED] eeg_channel_context = {getattr(param, 'eeg_channel_context', False)}")
         print(f"[FACED] use_subject_summary = {getattr(param, 'use_subject_summary', False)}")
         print(f"[FACED] subject_summary_handling = {getattr(param, 'subject_summary_handling', 'project')}")
+        print(f"[FACED] moe_use_subject_summary_router_concat = {getattr(param, 'moe_use_subject_summary_router_concat', False)}")
+        print(f"[FACED] moe_use_eeg_summary_router_concat_spatial = {getattr(param, 'moe_use_eeg_summary_router_concat_spatial', False)}")
+        print(f"[FACED] moe_use_eeg_summary_router_concat_spectral = {getattr(param, 'moe_use_eeg_summary_router_concat_spectral', False)}")
         print(f"[FACED] continual_mode = {getattr(param, 'continual_mode', 'off')}")
         print(f"[FACED] adapter_only_update = {getattr(param, 'adapter_only_update', False)}")
         if getattr(param, 'moe', False):

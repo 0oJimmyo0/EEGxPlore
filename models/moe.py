@@ -27,6 +27,10 @@ _MOE_PSD_ROUTER: contextvars.ContextVar[Optional[Tensor]] = contextvars.ContextV
 _MOE_FACED_METADATA: contextvars.ContextVar[Optional[Dict[str, Tensor]]] = contextvars.ContextVar(
     "moe_faced_metadata", default=None
 )
+# Optional compact EEG summary [B, D] for router concat.
+_MOE_EEG_ROUTER_SUMMARY: contextvars.ContextVar[Optional[Tensor]] = contextvars.ContextVar(
+    "moe_eeg_router_summary", default=None
+)
 
 
 def set_moe_diagnostic_labels(labels: Optional[Tensor]) -> Any:
@@ -51,6 +55,14 @@ def set_moe_faced_metadata(meta: Optional[Dict[str, Tensor]]) -> Any:
 
 def reset_moe_faced_metadata(token: Any) -> None:
     _MOE_FACED_METADATA.reset(token)
+
+
+def set_moe_eeg_router_summary(summary: Optional[Tensor]) -> Any:
+    return _MOE_EEG_ROUTER_SUMMARY.set(summary)
+
+
+def reset_moe_eeg_router_summary(token: Any) -> None:
+    _MOE_EEG_ROUTER_SUMMARY.reset(token)
 
 
 def compact_psd_bandpowers(x: Tensor, n_bands: int = PSD_ROUTER_DIM) -> Tensor:
@@ -168,6 +180,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         use_psd_router_features: bool = False,
         use_adapter_cond_bias: bool = False,
         adapter_cond_dim: int = 0,
+        use_subject_summary_router_concat: bool = False,
+        subject_summary_router_dim: int = 0,
+        use_eeg_summary_router_concat_spatial: bool = False,
+        use_eeg_summary_router_concat_spectral: bool = False,
+        eeg_summary_router_dim: int = 0,
+        router_concat_proj_dim: int = 16,
         load_balance_coef: float = 0.0,
         domain_bias_reg_coef: float = 0.0,
         device=None,
@@ -201,13 +219,64 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.adapter_cond_dim = int(adapter_cond_dim)
         if self.use_adapter_cond_bias and self.adapter_cond_dim <= 0:
             raise ValueError("use_adapter_cond_bias=True requires adapter_cond_dim > 0")
+        self.use_subject_summary_router_concat = bool(use_subject_summary_router_concat)
+        self.subject_summary_router_dim = int(subject_summary_router_dim)
+        self.use_eeg_summary_router_concat_spatial = bool(use_eeg_summary_router_concat_spatial)
+        self.use_eeg_summary_router_concat_spectral = bool(use_eeg_summary_router_concat_spectral)
+        self.eeg_summary_router_dim = int(eeg_summary_router_dim)
+        self.router_concat_proj_dim = int(router_concat_proj_dim)
+        if self.use_subject_summary_router_concat and self.subject_summary_router_dim <= 0:
+            raise ValueError("use_subject_summary_router_concat=True requires subject_summary_router_dim > 0")
+        if (
+            (self.use_eeg_summary_router_concat_spatial or self.use_eeg_summary_router_concat_spectral)
+            and self.eeg_summary_router_dim <= 0
+        ):
+            raise ValueError("EEG router concat requires eeg_summary_router_dim > 0")
         self.load_balance_coef = float(load_balance_coef)
         self.domain_bias_reg_coef = float(domain_bias_reg_coef)
 
         self.shared = ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
 
-        spatial_in = 3 * d_model
-        spectral_in = spatial_in + (PSD_ROUTER_DIM if self.use_psd_router_features else 0)
+        self.subject_summary_router_proj_spatial = None
+        self.subject_summary_router_proj_spectral = None
+        self.eeg_summary_router_proj_spatial = None
+        self.eeg_summary_router_proj_spectral = None
+        spatial_extra = 0
+        spectral_extra = 0
+        if self.use_subject_summary_router_concat:
+            self.subject_summary_router_proj_spatial = nn.Linear(
+                self.subject_summary_router_dim,
+                self.router_concat_proj_dim,
+                bias=True,
+                **factory_kwargs,
+            )
+            self.subject_summary_router_proj_spectral = nn.Linear(
+                self.subject_summary_router_dim,
+                self.router_concat_proj_dim,
+                bias=True,
+                **factory_kwargs,
+            )
+            spatial_extra += self.router_concat_proj_dim
+            spectral_extra += self.router_concat_proj_dim
+        if self.use_eeg_summary_router_concat_spatial:
+            self.eeg_summary_router_proj_spatial = nn.Linear(
+                self.eeg_summary_router_dim,
+                self.router_concat_proj_dim,
+                bias=True,
+                **factory_kwargs,
+            )
+            spatial_extra += self.router_concat_proj_dim
+        if self.use_eeg_summary_router_concat_spectral:
+            self.eeg_summary_router_proj_spectral = nn.Linear(
+                self.eeg_summary_router_dim,
+                self.router_concat_proj_dim,
+                bias=True,
+                **factory_kwargs,
+            )
+            spectral_extra += self.router_concat_proj_dim
+
+        spatial_in = 3 * d_model + spatial_extra
+        spectral_in = 3 * d_model + (PSD_ROUTER_DIM if self.use_psd_router_features else 0) + spectral_extra
         self.spatial_router = _make_router_head(
             spatial_in, num_specialists, router_arch, self.router_mlp_hidden, factory_kwargs
         )
@@ -295,6 +364,42 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             )
         cond = cond.to(device=device)
         return self.adapter_cond_proj_spatial(cond), self.adapter_cond_proj_spectral(cond)
+
+    def _subject_summary_router_features(
+        self,
+        router_context: Optional[Dict[str, Tensor]],
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
+        if not self.use_subject_summary_router_concat:
+            return None, None
+        z = torch.zeros(batch_size, self.subject_summary_router_dim, device=device, dtype=dtype)
+        ssum = z
+        if router_context is not None and torch.is_tensor(router_context.get("subject_summary")):
+            raw = router_context.get("subject_summary")
+            if raw.dim() == 1:
+                raw = raw.unsqueeze(0)
+            if raw.dim() == 2 and raw.shape[0] == batch_size and raw.shape[1] == self.subject_summary_router_dim:
+                ssum = raw.to(device=device, dtype=dtype)
+        return self.subject_summary_router_proj_spatial(ssum), self.subject_summary_router_proj_spectral(ssum)
+
+    def _eeg_summary_router_features(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
+        if not (self.use_eeg_summary_router_concat_spatial or self.use_eeg_summary_router_concat_spectral):
+            return None, None
+        z = torch.zeros(batch_size, self.eeg_summary_router_dim, device=device, dtype=dtype)
+        eeg = z
+        raw = _MOE_EEG_ROUTER_SUMMARY.get()
+        if torch.is_tensor(raw) and raw.dim() == 2 and raw.shape[0] == batch_size and raw.shape[1] == self.eeg_summary_router_dim:
+            eeg = raw.to(device=device, dtype=dtype)
+        sp = self.eeg_summary_router_proj_spatial(eeg) if self.use_eeg_summary_router_concat_spatial else None
+        sc = self.eeg_summary_router_proj_spectral(eeg) if self.use_eeg_summary_router_concat_spectral else None
+        return sp, sc
 
     def _domain_logit_bias(self, batch_size: int, bank: str, device: torch.device) -> Tensor:
         if not self.domain_bias:
@@ -432,7 +537,22 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         batch_idx = torch.arange(b, device=x.device, dtype=torch.long).unsqueeze(1).expand(-1, t).reshape(-1)
 
         base_feat = _attnres_base_features(baseline, attnres)
-        spectral_in = base_feat
+        subj_sp, subj_sc = self._subject_summary_router_features(router_context, b, x.device, base_feat.dtype)
+        eeg_sp, eeg_sc = self._eeg_summary_router_features(b, x.device, base_feat.dtype)
+
+        spatial_parts = [base_feat]
+        spectral_parts = [base_feat]
+        if subj_sp is not None:
+            spatial_parts.append(subj_sp)
+        if eeg_sp is not None:
+            spatial_parts.append(eeg_sp)
+        if subj_sc is not None:
+            spectral_parts.append(subj_sc)
+        if eeg_sc is not None:
+            spectral_parts.append(eeg_sc)
+
+        spatial_in = torch.cat(spatial_parts, dim=-1)
+        spectral_in = torch.cat(spectral_parts, dim=-1)
         psd_stats: Optional[Tuple[List[float], List[float]]] = None
         if self.use_psd_router_features:
             psd = _MOE_PSD_ROUTER.get()
@@ -440,11 +560,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 raise ValueError("moe_use_psd_router_features=True requires PSD context from backbone")
             if psd.shape[0] != b or psd.shape[-1] != PSD_ROUTER_DIM:
                 raise ValueError(f"PSD expected [B,{PSD_ROUTER_DIM}], got {tuple(psd.shape)}")
-            spectral_in = torch.cat([base_feat, psd], dim=-1)
+            spectral_in = torch.cat([spectral_in, psd], dim=-1)
             pd = psd.detach().float()
             psd_stats = (pd.mean(0).cpu().tolist(), pd.std(0).cpu().tolist())
 
-        logits_sp_content = self.spatial_router(base_feat)
+        logits_sp_content = self.spatial_router(spatial_in)
         logits_sc_content = self.spectral_router(spectral_in)
 
         bias_sp = self._domain_logit_bias(b, "spatial", x.device)
@@ -515,6 +635,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "domain_bias_norm": dom_norm,
             "adapter_cond_bias_enabled": bool(self.use_adapter_cond_bias),
             "adapter_cond_bias_norm": cond_norm,
+            "subject_summary_router_concat": bool(self.use_subject_summary_router_concat),
+            "eeg_summary_router_concat_spatial": bool(self.use_eeg_summary_router_concat_spatial),
+            "eeg_summary_router_concat_spectral": bool(self.use_eeg_summary_router_concat_spectral),
             "mean_shared_output_norm": float(h_shared.float().norm(dim=-1).mean().item()),
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),
