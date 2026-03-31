@@ -115,6 +115,7 @@ class TransformerEncoderLayer(nn.Module):
         self.use_pre_attnres = attnres_variant in ['pre_attn', 'full']
         self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
         self.attnres_subject_gates = bool(attnres_subject_gates)
+        self.last_gate_stats: Dict[str, float] = {}
 
         if self.use_pre_attnres:
             self.pre_attn_res = FullAttnRes(d_model)
@@ -185,6 +186,26 @@ class TransformerEncoderLayer(nn.Module):
         delta = gate_proj(cond).view(-1, 1, 1, 1)
         return 0.1 * torch.tanh(delta)
 
+    @staticmethod
+    def _attnres_depth_summary(alpha: Tensor) -> Tensor:
+        # alpha: [N, B, C, S] softmax over depth N
+        if alpha.dim() != 4:
+            raise ValueError(f"attnres alpha must be [N,B,C,S], got {tuple(alpha.shape)}")
+        n, b, _, _ = alpha.shape
+        p = alpha.permute(1, 0, 2, 3).reshape(b, n, -1).mean(dim=-1)
+        p = p.clamp_min(1e-10)
+        ent = -(p * p.log()).sum(dim=-1)
+        if n > 1:
+            ent = ent / float(torch.log(torch.tensor(float(n), device=alpha.device)).item())
+        pmax = p.max(dim=-1).values
+        plast = p[:, -1]
+        if n > 1:
+            top2 = torch.topk(p, k=2, dim=-1).values
+            pgap = top2[:, 0] - top2[:, 1]
+        else:
+            pgap = pmax
+        return torch.stack([ent, pmax, plast, pgap], dim=-1)
+
     def __setstate__(self, state):
         super().__setstate__(state)
         if not hasattr(self, 'activation'):
@@ -234,7 +255,11 @@ class TransformerEncoderLayer(nn.Module):
 
         if use_pre_attn_here:
             baseline_in = x
-            attnres_in = self.pre_attn_res(sources)
+            attnres_in, attnres_alpha = self.pre_attn_res(sources, return_alpha=True)
+            attnres_depth_summary = self._attnres_depth_summary(attnres_alpha).to(
+                device=baseline_in.device,
+                dtype=baseline_in.dtype,
+            )
 
             if self.attnres_gated:
                 base_gate = self.pre_attn_gate.view(1, 1, 1, 1)
@@ -243,6 +268,11 @@ class TransformerEncoderLayer(nn.Module):
                     gate = torch.sigmoid(base_gate + gate_delta) if gate_delta is not None else torch.sigmoid(base_gate)
                 else:
                     gate = torch.sigmoid(base_gate)
+                gd = gate.detach().float()
+                self.last_gate_stats['pre_attn_mean'] = float(gd.mean().item())
+                self.last_gate_stats['pre_attn_std'] = float(gd.std(unbiased=False).item())
+                self.last_gate_stats['pre_attn_min'] = float(gd.min().item())
+                self.last_gate_stats['pre_attn_max'] = float(gd.max().item())
                 attn_in = baseline_in + gate * (attnres_in - baseline_in)
             else:
                 attn_in = attnres_in
@@ -268,6 +298,11 @@ class TransformerEncoderLayer(nn.Module):
                     gate_m = torch.sigmoid(base_gate_m + gate_delta_m) if gate_delta_m is not None else torch.sigmoid(base_gate_m)
                 else:
                     gate_m = torch.sigmoid(base_gate_m)
+                gmd = gate_m.detach().float()
+                self.last_gate_stats['pre_mlp_mean'] = float(gmd.mean().item())
+                self.last_gate_stats['pre_mlp_std'] = float(gmd.std(unbiased=False).item())
+                self.last_gate_stats['pre_mlp_min'] = float(gmd.min().item())
+                self.last_gate_stats['pre_mlp_max'] = float(gmd.max().item())
                 mlp_in = x_attn + gate_m * (mlpres_agg - x_attn)
             else:
                 mlp_in = mlpres_agg
@@ -286,6 +321,8 @@ class TransformerEncoderLayer(nn.Module):
                     "the MoE layer is not above the last layer with pre-attn (see CBraMod typed MoE guard)."
                 )
             router_ctx = {"baseline": baseline_in, "attnres": attnres_in}
+            if use_pre_attn_here:
+                router_ctx["attnres_depth_summary"] = attnres_depth_summary
             adapter_cond = self._adapter_condition_tensor(mlp_in)
             if adapter_cond is not None:
                 router_ctx["adapter_cond"] = adapter_cond

@@ -3,7 +3,7 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_adapter_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_adapter_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -29,7 +29,7 @@
 # ------------------------------
 # RUN IDENTITY
 # ------------------------------
-STAGE="${STAGE:-A3c}"  # A0|A1|A2|A2b|A3|A3b|A3c|A4|A5|custom
+STAGE="${STAGE:-A3d}"  # A0|A1|A2|A2b|A3|A3b|A3c|A3d|A4|A5|custom
 RUN_TAG="${RUN_TAG:-${STAGE}}"
 
 # ------------------------------
@@ -87,7 +87,11 @@ MOE_ROUTER_SOFT_WARMUP_EPOCHS_PRESET="0"
 MOE_ROUTER_WARMUP_MODE_PRESET="off"
 MOE_ROUTER_WARMUP_EPOCHS_PRESET="0"
 MOE_ROUTER_WARMUP_LR_SCALE_PRESET="0.1"
-MOE_CAPACITY_FACTOR_PRESET="1.5"
+MOE_CAPACITY_FACTOR_PRESET="1.25"
+MOE_ROUTER_DISPATCH_MODE_PRESET="hard_capacity"
+MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT_PRESET="1"
+MOE_ATTNRES_DEPTH_ROUTER_DIM_PRESET="4"
+MOE_SYSTEM_MODE_PRESET="dense_soft"
 
 case "$STAGE" in
   A0)
@@ -129,7 +133,8 @@ case "$STAGE" in
     USE_SUBJECT_SUMMARY_PRESET="0"
     ;;
   A3c)
-    # Router-enrichment ablation bundle; per-run knobs are configured later.
+    # Dense soft ablation (no AttnRes-depth router concat).
+    # Per-run knobs for A3c bundle are configured later.
     ATTNRES_VARIANT_PRESET="pre_attn"
     EEG_CONTEXT_PRESET="0"
     ADAPTER_MODE_PRESET="subject_domain"
@@ -149,6 +154,35 @@ case "$STAGE" in
     MOE_ROUTER_WARMUP_EPOCHS_PRESET="3"
     MOE_ROUTER_WARMUP_LR_SCALE_PRESET="0.1"
     MOE_CAPACITY_FACTOR_PRESET="1.25"
+    MOE_SYSTEM_MODE_PRESET="dense_soft"
+    MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT_PRESET="0"
+    MOE_ATTNRES_DEPTH_ROUTER_DIM_PRESET="4"
+    ;;
+  A3d)
+    # Dense soft ablation (+ AttnRes-depth router concat).
+    # Per-run knobs for A3d bundle are configured later.
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="0"
+    ADAPTER_MODE_PRESET="subject_domain"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    # Anti-collapse defaults for A3d. Can still be overridden by explicit env vars.
+    ANTI_COLLAPSE_NO_SUBJECT_ID_PRESET="1"
+    MOE_LINEAR_ROUTER_INPUT_NORM_PRESET="1"
+    MOE_ROUTER_TEMPERATURE_PRESET="1.5"
+    MOE_ROUTER_ENTROPY_COEF_PRESET="0.01"
+    MOE_ROUTER_BALANCE_KL_COEF_PRESET="0.08"
+    MOE_ROUTER_Z_LOSS_COEF_PRESET="0.002"
+    MOE_ROUTER_JITTER_STD_PRESET="0.15"
+    MOE_ROUTER_JITTER_FINAL_STD_PRESET="0.0"
+    MOE_ROUTER_JITTER_ANNEAL_EPOCHS_PRESET="5"
+    MOE_ROUTER_SOFT_WARMUP_EPOCHS_PRESET="5"
+    MOE_ROUTER_WARMUP_MODE_PRESET="low_lr"
+    MOE_ROUTER_WARMUP_EPOCHS_PRESET="3"
+    MOE_ROUTER_WARMUP_LR_SCALE_PRESET="0.1"
+    MOE_CAPACITY_FACTOR_PRESET="1.25"
+    MOE_SYSTEM_MODE_PRESET="dense_soft"
+    MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT_PRESET="1"
+    MOE_ATTNRES_DEPTH_ROUTER_DIM_PRESET="4"
     ;;
   A4)
     ATTNRES_VARIANT_PRESET="pre_attn"
@@ -165,7 +199,7 @@ case "$STAGE" in
   custom)
     ;;
   *)
-    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A3b|A3c|A4|A5|custom." >&2
+    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A3b|A3c|A3d|A4|A5|custom." >&2
     exit 2
     ;;
 esac
@@ -241,6 +275,21 @@ MOE_ROUTER_SOFT_WARMUP_EPOCHS="${MOE_ROUTER_SOFT_WARMUP_EPOCHS:-$MOE_ROUTER_SOFT
 MOE_ROUTER_WARMUP_MODE="${MOE_ROUTER_WARMUP_MODE:-$MOE_ROUTER_WARMUP_MODE_PRESET}" # off|freeze|low_lr
 MOE_ROUTER_WARMUP_EPOCHS="${MOE_ROUTER_WARMUP_EPOCHS:-$MOE_ROUTER_WARMUP_EPOCHS_PRESET}"
 MOE_ROUTER_WARMUP_LR_SCALE="${MOE_ROUTER_WARMUP_LR_SCALE:-$MOE_ROUTER_WARMUP_LR_SCALE_PRESET}"
+MOE_ROUTER_DISPATCH_MODE="${MOE_ROUTER_DISPATCH_MODE:-$MOE_ROUTER_DISPATCH_MODE_PRESET}" # hard_capacity|soft
+MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT="${MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT:-$MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT_PRESET}"
+MOE_ATTNRES_DEPTH_ROUTER_DIM="${MOE_ATTNRES_DEPTH_ROUTER_DIM:-$MOE_ATTNRES_DEPTH_ROUTER_DIM_PRESET}"
+
+# conservative (existing) | dense_soft (all-layer + soft dispatch + AttnRes-depth router summary)
+MOE_SYSTEM_MODE="${MOE_SYSTEM_MODE:-$MOE_SYSTEM_MODE_PRESET}"
+if [[ "$MOE_SYSTEM_MODE" == "dense_soft" ]]; then
+  # Keep dense-soft defaults without clobbering explicit/user stage toggles.
+  if [[ "$MOE_NUM_LAYERS" == "1" ]]; then
+    MOE_NUM_LAYERS="12"
+  fi
+  if [[ "$MOE_ROUTER_DISPATCH_MODE" == "hard_capacity" ]]; then
+    MOE_ROUTER_DISPATCH_MODE="soft"
+  fi
+fi
 
 # tqdm in Slurm logs can generate very large files; keep this 0 on cluster
 FORCE_TQDM="${FORCE_TQDM:-0}"
@@ -258,10 +307,10 @@ EXTRA_FLAGS=()
 echo "[slurm] stage=$STAGE run_tag=$RUN_TAG" >&2
 echo "[slurm] config attnres=$ATTNRES_VARIANT attnres_gated=$ATTNRES_GATED attnres_subject_gates=$ATTNRES_SUBJECT_GATES eeg_context=$EEG_CONTEXT adapter_mode=$ADAPTER_MODE use_subject_summary=$USE_SUBJECT_SUMMARY" >&2
 echo "[slurm] anti_collapse no_subject_id=$ANTI_COLLAPSE_NO_SUBJECT_ID adapter_use_subject_id=$ADAPTER_USE_SUBJECT_ID router_temp=$MOE_ROUTER_TEMPERATURE router_entropy=$MOE_ROUTER_ENTROPY_COEF router_balance_kl=$MOE_ROUTER_BALANCE_KL_COEF router_z_loss=$MOE_ROUTER_Z_LOSS_COEF router_jitter_start=$MOE_ROUTER_JITTER_STD router_jitter_final=$MOE_ROUTER_JITTER_FINAL_STD router_jitter_anneal_epochs=$MOE_ROUTER_JITTER_ANNEAL_EPOCHS soft_warmup_epochs=$MOE_ROUTER_SOFT_WARMUP_EPOCHS warmup_mode=$MOE_ROUTER_WARMUP_MODE warmup_epochs=$MOE_ROUTER_WARMUP_EPOCHS warmup_lr_scale=$MOE_ROUTER_WARMUP_LR_SCALE capacity_factor=$MOE_CAPACITY_FACTOR" >&2
-echo "[slurm] moe use_legacy=$USE_LEGACY_MOE hybrid_moe_adapter=$HYBRID_MOE_ADAPTER moe_use_adapter_cond_bias=$MOE_USE_ADAPTER_COND_BIAS" >&2
-echo "[slurm] router_concat subject_summary=$MOE_USE_SUBJECT_SUMMARY_ROUTER_CONCAT eeg_spatial=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPATIAL eeg_spectral=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL" >&2
-if [[ "$STAGE" == "A3b" || "$STAGE" == "A3c" ]]; then
-  echo "[slurm] note: A3b/A3c are bundle stages; per-run flags below intentionally override some global defaults." >&2
+echo "[slurm] moe use_legacy=$USE_LEGACY_MOE hybrid_moe_adapter=$HYBRID_MOE_ADAPTER system_mode=$MOE_SYSTEM_MODE moe_num_layers=$MOE_NUM_LAYERS dispatch_mode=$MOE_ROUTER_DISPATCH_MODE moe_use_adapter_cond_bias=$MOE_USE_ADAPTER_COND_BIAS" >&2
+echo "[slurm] router_concat subject_summary=$MOE_USE_SUBJECT_SUMMARY_ROUTER_CONCAT eeg_spatial=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPATIAL eeg_spectral=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL attnres_depth=$MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT attnres_depth_dim=$MOE_ATTNRES_DEPTH_ROUTER_DIM" >&2
+if [[ "$STAGE" == "A3b" || "$STAGE" == "A3c" || "$STAGE" == "A3d" ]]; then
+  echo "[slurm] note: A3b/A3c/A3d are bundle stages; per-run flags below intentionally override some global defaults." >&2
 fi
 
 if [[ ! -f "$FACED_META_CSV" ]]; then
@@ -323,10 +372,17 @@ EXTRA_FLAGS+=(--moe_router_soft_warmup_epochs "$MOE_ROUTER_SOFT_WARMUP_EPOCHS")
 EXTRA_FLAGS+=(--moe_router_warmup_mode "$MOE_ROUTER_WARMUP_MODE")
 EXTRA_FLAGS+=(--moe_router_warmup_epochs "$MOE_ROUTER_WARMUP_EPOCHS")
 EXTRA_FLAGS+=(--moe_router_warmup_lr_scale "$MOE_ROUTER_WARMUP_LR_SCALE")
+EXTRA_FLAGS+=(--moe_router_dispatch_mode "$MOE_ROUTER_DISPATCH_MODE")
+EXTRA_FLAGS+=(--moe_attnres_depth_router_dim "$MOE_ATTNRES_DEPTH_ROUTER_DIM")
 if [[ "$MOE_LINEAR_ROUTER_INPUT_NORM" == "1" ]]; then
   EXTRA_FLAGS+=(--moe_linear_router_input_norm)
 else
   EXTRA_FLAGS+=(--no-moe_linear_router_input_norm)
+fi
+if [[ "$MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT" == "1" ]]; then
+  EXTRA_FLAGS+=(--moe_use_attnres_depth_router_concat)
+else
+  EXTRA_FLAGS+=(--no-moe_use_attnres_depth_router_concat)
 fi
 if [[ "$METADATA_DEBUG" == "1" ]]; then
   EXTRA_FLAGS+=(--metadata_debug)
@@ -346,7 +402,7 @@ if [[ "$ATTNRES_SUBJECT_GATES" == "1" ]]; then
 fi
 
 # Legacy MoE compatibility path
-if [[ "$USE_LEGACY_MOE" == "1" && "$STAGE" != "A3b" && "$STAGE" != "A3c" ]]; then
+if [[ "$USE_LEGACY_MOE" == "1" && "$STAGE" != "A3b" && "$STAGE" != "A3c" && "$STAGE" != "A3d" ]]; then
   if [[ "$HYBRID_MOE_ADAPTER" != "1" ]]; then
     ADAPTER_MODE="none"
     USE_SUBJECT_SUMMARY="0"
@@ -659,7 +715,7 @@ elif [[ "$STAGE" == "A3b" ]]; then
   echo "[A3b][delta] vs=A3_adapter_only target=A3_hybrid_nocond d_best_acc=$(calc_delta "$hn_acc" "$base_acc") d_best_kappa=$(calc_delta "$hn_kappa" "$base_kappa")"
   echo "[A3b][delta] vs=A3_adapter_only target=A3_pure_moe d_best_acc=$(calc_delta "$pm_acc" "$base_acc") d_best_kappa=$(calc_delta "$pm_kappa" "$base_kappa")"
   echo "[A3b][delta] vs=A3_hybrid_nocond target=A3_hybrid_cond d_best_acc=$(calc_delta "$hc_acc" "$hn_acc") d_best_kappa=$(calc_delta "$hc_kappa" "$hn_kappa")"
-elif [[ "$STAGE" == "A3c" ]]; then
+elif [[ "$STAGE" == "A3c" || "$STAGE" == "A3d" ]]; then
   A3C_RUN_SET="${A3C_RUN_SET:-performance}"  # performance|full
   if [[ "$A3C_RUN_SET" != "performance" && "$A3C_RUN_SET" != "full" ]]; then
     echo "[slurm] A3C_RUN_SET must be performance|full (got '$A3C_RUN_SET')." >&2
@@ -775,22 +831,24 @@ elif [[ "$STAGE" == "A3c" ]]; then
 
   fi
 
-  # 5) Optional symmetry ablation: add EEG compact summary concat to spectral router too.
-  run_and_collect_a3c "A3c_hybrid_subj_eeg_both_no_sid" \
-    --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
-    --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
-    --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
-    --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
-    --moe_load_balance "$MOE_LOAD_BALANCE" \
-    --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
-    "${A3C_MOE_BIAS_FLAGS[@]}" "${A3C_MOE_PSD_FLAGS[@]}" \
-    --moe_use_adapter_cond_bias \
-    --moe_use_subject_summary_router_concat \
-    --moe_use_eeg_summary_router_concat_spatial \
-    --moe_use_eeg_summary_router_concat_spectral \
-    --use_subject_summary --subject_summary_file "$SUBJECT_SUMMARY_FILE" \
-    --eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE" \
-    --no-adapter_use_subject_id
+  if [[ "$A3C_RUN_SET" == "full" ]]; then
+    # 5) Optional symmetry ablation: add EEG compact summary concat to spectral router too.
+    run_and_collect_a3c "A3c_hybrid_subj_eeg_both_no_sid" \
+      --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
+      --moe_num_layers "$MOE_NUM_LAYERS" --moe_num_experts "$MOE_NUM_EXPERTS" \
+      --moe_capacity_factor "$MOE_CAPACITY_FACTOR" \
+      --moe_domain_emb_dim "$MOE_DOMAIN_EMB_DIM" \
+      --moe_load_balance "$MOE_LOAD_BALANCE" \
+      --moe_domain_bias_reg "$MOE_DOMAIN_BIAS_REG" \
+      "${A3C_MOE_BIAS_FLAGS[@]}" "${A3C_MOE_PSD_FLAGS[@]}" \
+      --moe_use_adapter_cond_bias \
+      --moe_use_subject_summary_router_concat \
+      --moe_use_eeg_summary_router_concat_spatial \
+      --moe_use_eeg_summary_router_concat_spectral \
+      --use_subject_summary --subject_summary_file "$SUBJECT_SUMMARY_FILE" \
+      --eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE" \
+      --no-adapter_use_subject_id
+  fi
 
   calc_delta() {
     awk -v a="$1" -v b="$2" 'BEGIN {printf("%.5f", a - b)}'
@@ -823,25 +881,3 @@ else
   run_finetune "$model_dir" "${EXTRA_FLAGS[@]}"
 fi
 
-# =============================================================================
-# Suggested sweeps for impact analysis (change one group at a time)
-# -----------------------------------------------------------------------------
-# A) Adapter capacity:
-#    ADAPTER_RANK=8,16,32 ; ADAPTER_NUM_LAYERS=1,2,4 ; ADAPTER_COND_DIM=16,32,64
-#
-# B) EEG metadata injection:
-#    EEG_CONTEXT=0 vs 1
-#    with/without CHANNEL_CONTEXT_FILE
-#
-# C) Continual-learning stability:
-#    CONTINUAL_MODE=off vs replay vs replay_distill
-#    CONTINUAL_MEMORY_SIZE=128,512,1024
-#    CONTINUAL_REPLAY_WEIGHT=0.25,0.5,1.0
-#    CONTINUAL_DISTILL_WEIGHT=0.1,0.2,0.5
-#
-# D) Incremental update mode:
-#    ADAPTER_ONLY_UPDATE=0 vs 1
-#
-# Quick metric extraction from a finished .out file:
-#   grep -E "Epoch .*acc:|Test Evaluation:" logs/out/faced_adapter_<JOBID>.out
-# =============================================================================

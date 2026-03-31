@@ -30,7 +30,10 @@ class Model(nn.Module):
         print(f"[FACED] moe_use_subject_summary_router_concat = {getattr(param, 'moe_use_subject_summary_router_concat', False)}")
         print(f"[FACED] moe_use_eeg_summary_router_concat_spatial = {getattr(param, 'moe_use_eeg_summary_router_concat_spatial', False)}")
         print(f"[FACED] moe_use_eeg_summary_router_concat_spectral = {getattr(param, 'moe_use_eeg_summary_router_concat_spectral', False)}")
+        print(f"[FACED] moe_use_attnres_depth_router_concat = {getattr(param, 'moe_use_attnres_depth_router_concat', False)}")
+        print(f"[FACED] moe_attnres_depth_router_dim = {getattr(param, 'moe_attnres_depth_router_dim', 4)}")
         print(f"[FACED] moe_linear_router_input_norm = {getattr(param, 'moe_linear_router_input_norm', False)}")
+        print(f"[FACED] moe_router_dispatch_mode = {getattr(param, 'moe_router_dispatch_mode', 'hard_capacity')}")
         print(f"[FACED] moe_router_temperature = {getattr(param, 'moe_router_temperature', 1.0)}")
         print(f"[FACED] moe_router_entropy_coef = {getattr(param, 'moe_router_entropy_coef', 0.0)}")
         print(f"[FACED] moe_router_balance_kl_coef = {getattr(param, 'moe_router_balance_kl_coef', 0.0)}")
@@ -49,8 +52,10 @@ class Model(nn.Module):
                 f"[FACED] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "
                 f"experts/bank={param.moe_num_experts}, "
                 f"route_mode={getattr(param, 'moe_route_mode', 'typed_capacity_domain')}, "
+                f"dispatch_mode={getattr(param, 'moe_router_dispatch_mode', 'hard_capacity')}, "
                 f"capacity_factor={getattr(param, 'moe_capacity_factor', 1.0)}, "
                 f"psd_router={getattr(param, 'moe_use_psd_router_features', False)}, "
+                f"attnres_depth_router_concat={getattr(param, 'moe_use_attnres_depth_router_concat', False)}, "
                 f"domain_bias={getattr(param, 'moe_domain_bias', False)}, "
                 f"domain_emb_dim={getattr(param, 'moe_domain_emb_dim', 16)}, "
                 f"moe_load_balance={getattr(param, 'moe_load_balance', 0.0)}, "

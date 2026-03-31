@@ -13,6 +13,7 @@ from torch import Tensor
 
 MOE_ROUTE_MODES = ("typed_capacity_domain",)
 MOE_ROUTER_ARCHS = ("linear", "mlp")
+MOE_ROUTER_DISPATCH_MODES = ("hard_capacity", "soft")
 PSD_ROUTER_DIM = 5
 
 # Optional multiclass labels [B] for diagnostics.
@@ -196,9 +197,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         subject_summary_router_dim: int = 0,
         use_eeg_summary_router_concat_spatial: bool = False,
         use_eeg_summary_router_concat_spectral: bool = False,
+        use_attnres_depth_router_concat: bool = False,
+        attnres_depth_router_dim: int = 0,
         eeg_summary_router_dim: int = 0,
         router_concat_proj_dim: int = 16,
         linear_router_input_norm: bool = False,
+        router_dispatch_mode: str = "hard_capacity",
         router_temperature: float = 1.0,
         router_entropy_coef: float = 0.0,
         router_balance_kl_coef: float = 0.0,
@@ -217,6 +221,10 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             raise ValueError(f"route_mode must be one of {MOE_ROUTE_MODES}, got {route_mode!r}")
         if router_arch not in MOE_ROUTER_ARCHS:
             raise ValueError(f"router_arch must be one of {MOE_ROUTER_ARCHS}, got {router_arch!r}")
+        if router_dispatch_mode not in MOE_ROUTER_DISPATCH_MODES:
+            raise ValueError(
+                f"router_dispatch_mode must be one of {MOE_ROUTER_DISPATCH_MODES}, got {router_dispatch_mode!r}"
+            )
         if num_specialists < 1:
             raise ValueError("num_specialists must be >= 1")
         if capacity_factor <= 0:
@@ -244,9 +252,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.subject_summary_router_dim = int(subject_summary_router_dim)
         self.use_eeg_summary_router_concat_spatial = bool(use_eeg_summary_router_concat_spatial)
         self.use_eeg_summary_router_concat_spectral = bool(use_eeg_summary_router_concat_spectral)
+        self.use_attnres_depth_router_concat = bool(use_attnres_depth_router_concat)
+        self.attnres_depth_router_dim = int(attnres_depth_router_dim)
         self.eeg_summary_router_dim = int(eeg_summary_router_dim)
         self.router_concat_proj_dim = int(router_concat_proj_dim)
         self.linear_router_input_norm = bool(linear_router_input_norm)
+        self.router_dispatch_mode = str(router_dispatch_mode)
         self.router_temperature = float(max(1e-4, router_temperature))
         self.router_entropy_coef = float(router_entropy_coef)
         self.router_balance_kl_coef = float(router_balance_kl_coef)
@@ -262,6 +273,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             and self.eeg_summary_router_dim <= 0
         ):
             raise ValueError("EEG router concat requires eeg_summary_router_dim > 0")
+        if self.use_attnres_depth_router_concat and self.attnres_depth_router_dim <= 0:
+            raise ValueError("use_attnres_depth_router_concat=True requires attnres_depth_router_dim > 0")
         self.load_balance_coef = float(load_balance_coef)
         self.domain_bias_reg_coef = float(domain_bias_reg_coef)
 
@@ -271,6 +284,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.subject_summary_router_proj_spectral = None
         self.eeg_summary_router_proj_spatial = None
         self.eeg_summary_router_proj_spectral = None
+        self.attnres_depth_router_proj_spatial = None
+        self.attnres_depth_router_proj_spectral = None
         spatial_extra = 0
         spectral_extra = 0
         if self.use_subject_summary_router_concat:
@@ -303,6 +318,21 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 bias=True,
                 **factory_kwargs,
             )
+            spectral_extra += self.router_concat_proj_dim
+        if self.use_attnres_depth_router_concat:
+            self.attnres_depth_router_proj_spatial = nn.Linear(
+                self.attnres_depth_router_dim,
+                self.router_concat_proj_dim,
+                bias=True,
+                **factory_kwargs,
+            )
+            self.attnres_depth_router_proj_spectral = nn.Linear(
+                self.attnres_depth_router_dim,
+                self.router_concat_proj_dim,
+                bias=True,
+                **factory_kwargs,
+            )
+            spatial_extra += self.router_concat_proj_dim
             spectral_extra += self.router_concat_proj_dim
 
         spatial_in = 3 * d_model + spatial_extra
@@ -438,6 +468,25 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         sp = self.eeg_summary_router_proj_spatial(eeg) if self.use_eeg_summary_router_concat_spatial else None
         sc = self.eeg_summary_router_proj_spectral(eeg) if self.use_eeg_summary_router_concat_spectral else None
         return sp, sc
+
+    def _attnres_depth_router_features(
+        self,
+        router_context: Optional[Dict[str, Tensor]],
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> Tuple[Optional[Tensor], Optional[Tensor]]:
+        if not self.use_attnres_depth_router_concat:
+            return None, None
+        z = torch.zeros(batch_size, self.attnres_depth_router_dim, device=device, dtype=dtype)
+        ds = z
+        if router_context is not None and torch.is_tensor(router_context.get("attnres_depth_summary")):
+            raw = router_context.get("attnres_depth_summary")
+            if raw.dim() == 1:
+                raw = raw.unsqueeze(0)
+            if raw.dim() == 2 and raw.shape[0] == batch_size and raw.shape[1] == self.attnres_depth_router_dim:
+                ds = raw.to(device=device, dtype=dtype)
+        return self.attnres_depth_router_proj_spatial(ds), self.attnres_depth_router_proj_spectral(ds)
 
     def _domain_logit_bias(self, batch_size: int, bank: str, device: torch.device) -> Tensor:
         if not self.domain_bias:
@@ -607,6 +656,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         base_feat = _attnres_base_features(baseline, attnres)
         subj_sp, subj_sc = self._subject_summary_router_features(router_context, b, x.device, base_feat.dtype)
         eeg_sp, eeg_sc = self._eeg_summary_router_features(b, x.device, base_feat.dtype)
+        depth_sp, depth_sc = self._attnres_depth_router_features(router_context, b, x.device, base_feat.dtype)
 
         spatial_parts = [base_feat]
         spectral_parts = [base_feat]
@@ -618,6 +668,10 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             spectral_parts.append(subj_sc)
         if eeg_sc is not None:
             spectral_parts.append(eeg_sc)
+        if depth_sp is not None:
+            spatial_parts.append(depth_sp)
+        if depth_sc is not None:
+            spectral_parts.append(depth_sc)
 
         spatial_in = torch.cat(spatial_parts, dim=-1)
         spectral_in = torch.cat(spectral_parts, dim=-1)
@@ -647,6 +701,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         cur_epoch = int(_MOE_TRAIN_EPOCH.get())
         eff_jitter_std = self._effective_router_jitter_std(cur_epoch)
 
+        logits_sp_domain = (logits_sp_content + bias_sp) / self.router_temperature
+        logits_sc_domain = (logits_sc_content + bias_sc) / self.router_temperature
         logits_sp = (logits_sp_content + bias_sp + cond_bias_sp) / self.router_temperature
         logits_sc = (logits_sc_content + bias_sc + cond_bias_sc) / self.router_temperature
         if self.training and eff_jitter_std > 0:
@@ -658,6 +714,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
 
         raw_top1_sp = logits_sp.argmax(dim=-1)
         raw_top1_sc = logits_sc.argmax(dim=-1)
+        raw_top1_sp_domain = logits_sp_domain.argmax(dim=-1)
+        raw_top1_sc_domain = logits_sc_domain.argmax(dim=-1)
         raw_top1_sp_content = logits_sp_content.argmax(dim=-1)
         raw_top1_sc_content = logits_sc_content.argmax(dim=-1)
 
@@ -678,8 +736,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             and cur_epoch > 0
             and cur_epoch <= self.router_soft_warmup_epochs
         )
+        soft_dispatch_active = (self.router_dispatch_mode == "soft")
 
-        if soft_warmup_active:
+        if soft_warmup_active or soft_dispatch_active:
             assign_sp = raw_top1_sp
             assign_sc = raw_top1_sc
             rerouted_sp = torch.zeros_like(assign_sp, dtype=torch.bool)
@@ -707,7 +766,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         reroute_frac = rerouted_sp.float().mean() + rerouted_sc.float().mean()
         fallback_frac = fallback_sp.float().mean() + fallback_sc.float().mean()
         overflow_penalty = reroute_frac + fallback_frac
-        if soft_warmup_active:
+        if soft_warmup_active or soft_dispatch_active:
             overflow_penalty = overflow_penalty * 0.0
         domain_reg = bias_sp.pow(2).mean() + bias_sc.pow(2).mean()
         entropy_sp = (-(probs_sp * probs_sp.clamp_min(1e-10).log()).sum(dim=-1)).mean()
@@ -737,6 +796,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         post_ent_sc = self._hist_entropy(counts_sc)
         dom_norm = float(torch.cat([bias_sp, bias_sc], dim=1).float().norm(dim=-1).mean().item())
         cond_norm = float(torch.cat([cond_bias_sp, cond_bias_sc], dim=1).float().norm(dim=-1).mean().item())
+        sp_content_abs = float(logits_sp_content.abs().mean().item())
+        sc_content_abs = float(logits_sc_content.abs().mean().item())
+        sp_domain_abs = float(bias_sp.abs().mean().item())
+        sc_domain_abs = float(bias_sc.abs().mean().item())
+        sp_adapter_abs = float(cond_bias_sp.abs().mean().item())
+        sc_adapter_abs = float(cond_bias_sc.abs().mean().item())
 
         self.last_diagnostics = {
             "moe_kind": self.moe_kind,
@@ -746,10 +811,21 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "domain_bias_norm": dom_norm,
             "adapter_cond_bias_enabled": bool(self.use_adapter_cond_bias),
             "adapter_cond_bias_norm": cond_norm,
+            "content_logit_abs_spatial": sp_content_abs,
+            "content_logit_abs_spectral": sc_content_abs,
+            "adapter_cond_bias_abs_spatial": sp_adapter_abs,
+            "adapter_cond_bias_abs_spectral": sc_adapter_abs,
+            "adapter_cond_bias_rel_spatial": float(sp_adapter_abs / max(sp_content_abs, 1e-8)),
+            "adapter_cond_bias_rel_spectral": float(sc_adapter_abs / max(sc_content_abs, 1e-8)),
             "router_temperature": float(self.router_temperature),
             "router_soft_warmup_epochs": int(self.router_soft_warmup_epochs),
             "router_soft_warmup_active": bool(soft_warmup_active),
-            "route_strategy": "soft_warmup" if soft_warmup_active else "hard_capacity",
+            "router_dispatch_mode": str(self.router_dispatch_mode),
+            "route_strategy": (
+                "soft_dispatch"
+                if soft_dispatch_active
+                else ("soft_warmup" if soft_warmup_active else "hard_capacity")
+            ),
             "router_entropy_coef": float(self.router_entropy_coef),
             "router_balance_kl_coef": float(self.router_balance_kl_coef),
             "router_z_loss_coef": float(self.router_z_loss_coef),
@@ -760,6 +836,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "subject_summary_router_concat": bool(self.use_subject_summary_router_concat),
             "eeg_summary_router_concat_spatial": bool(self.use_eeg_summary_router_concat_spatial),
             "eeg_summary_router_concat_spectral": bool(self.use_eeg_summary_router_concat_spectral),
+            "attnres_depth_router_concat": bool(self.use_attnres_depth_router_concat),
             "mean_shared_output_norm": float(h_shared.float().norm(dim=-1).mean().item()),
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),
@@ -770,10 +847,16 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "aux_balance_kl": float(balance_kl.detach().item()),
             "aux_z_loss": float(z_loss.detach().item()),
             "aux_total": float(self._last_aux_loss.detach().item()),
-            "domain_bias_abs_spatial": float(bias_sp.abs().mean().item()),
-            "domain_bias_abs_spectral": float(bias_sc.abs().mean().item()),
-            "domain_bias_shift_rate_spatial": float((raw_top1_sp != raw_top1_sp_content).float().mean().item()),
-            "domain_bias_shift_rate_spectral": float((raw_top1_sc != raw_top1_sc_content).float().mean().item()),
+            "domain_bias_abs_spatial": sp_domain_abs,
+            "domain_bias_abs_spectral": sc_domain_abs,
+            "domain_bias_rel_spatial": float(sp_domain_abs / max(sp_content_abs, 1e-8)),
+            "domain_bias_rel_spectral": float(sc_domain_abs / max(sc_content_abs, 1e-8)),
+            "domain_shift_rate_spatial": float((raw_top1_sp_domain != raw_top1_sp_content).float().mean().item()),
+            "domain_shift_rate_spectral": float((raw_top1_sc_domain != raw_top1_sc_content).float().mean().item()),
+            "adapter_shift_rate_spatial": float((raw_top1_sp != raw_top1_sp_domain).float().mean().item()),
+            "adapter_shift_rate_spectral": float((raw_top1_sc != raw_top1_sc_domain).float().mean().item()),
+            "full_shift_rate_spatial": float((raw_top1_sp != raw_top1_sp_content).float().mean().item()),
+            "full_shift_rate_spectral": float((raw_top1_sc != raw_top1_sc_content).float().mean().item()),
             "spatial": {
                 "pre_top1_histogram": counts_sp_pre.detach().cpu().tolist(),
                 "pre_max_expert_fraction": float((counts_sp_pre.float().max() / max(float(b), 1.0)).item()),
@@ -921,10 +1004,29 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"|bias|_sc={diag.get('domain_bias_abs_spectral', 0.0):.6f}"
         ),
         (
+            f"    |content_logit|_sp={diag.get('content_logit_abs_spatial', 0.0):.6f}  "
+            f"|content_logit|_sc={diag.get('content_logit_abs_spectral', 0.0):.6f}  "
+            f"|adapter_bias|_sp={diag.get('adapter_cond_bias_abs_spatial', 0.0):.6f}  "
+            f"|adapter_bias|_sc={diag.get('adapter_cond_bias_abs_spectral', 0.0):.6f}"
+        ),
+        (
+            f"    rel_bias_vs_content: domain(sp/sc)=({diag.get('domain_bias_rel_spatial', 0.0):.4f}/"
+            f"{diag.get('domain_bias_rel_spectral', 0.0):.4f})  "
+            f"adapter(sp/sc)=({diag.get('adapter_cond_bias_rel_spatial', 0.0):.4f}/"
+            f"{diag.get('adapter_cond_bias_rel_spectral', 0.0):.4f})"
+        ),
+        (
             f"    route={diag.get('route_strategy', 'hard_capacity')}  "
+            f"dispatch_mode={diag.get('router_dispatch_mode', 'hard_capacity')}  "
             f"temp={diag.get('router_temperature', 1.0):.4f}  "
             f"soft_warmup_active={diag.get('router_soft_warmup_active', False)}  "
             f"soft_warmup_epochs={diag.get('router_soft_warmup_epochs', 0)}"
+        ),
+        (
+            f"    router_concat: subject_summary={diag.get('subject_summary_router_concat', False)}  "
+            f"eeg_spatial={diag.get('eeg_summary_router_concat_spatial', False)}  "
+            f"eeg_spectral={diag.get('eeg_summary_router_concat_spectral', False)}  "
+            f"attnres_depth={diag.get('attnres_depth_router_concat', False)}"
         ),
         (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "
@@ -940,8 +1042,12 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"jitter_anneal_epochs={diag.get('router_jitter_anneal_epochs', 0)}"
         ),
         (
-            f"    domain_shift_rate: spatial={diag.get('domain_bias_shift_rate_spatial', 0.0):.4f}  "
-            f"spectral={diag.get('domain_bias_shift_rate_spectral', 0.0):.4f}"
+            f"    route_shift_rate: domain(sp/sc)=({diag.get('domain_shift_rate_spatial', 0.0):.4f}/"
+            f"{diag.get('domain_shift_rate_spectral', 0.0):.4f})  "
+            f"adapter(sp/sc)=({diag.get('adapter_shift_rate_spatial', 0.0):.4f}/"
+            f"{diag.get('adapter_shift_rate_spectral', 0.0):.4f})  "
+            f"full(sp/sc)=({diag.get('full_shift_rate_spatial', 0.0):.4f}/"
+            f"{diag.get('full_shift_rate_spectral', 0.0):.4f})"
         ),
         (
             f"    [spatial] pre_hist={sp.get('pre_top1_histogram')}  pre_max_frac={sp.get('pre_max_expert_fraction', 0.0):.4f}  "

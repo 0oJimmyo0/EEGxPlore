@@ -333,10 +333,29 @@ def main():
         help='Concat compact EEG-context summary features into the spectral router input.',
     )
     parser.add_argument(
+        '--moe_use_attnres_depth_router_concat',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Concat compact AttnRes depth-behavior summary features into both router inputs.',
+    )
+    parser.add_argument(
+        '--moe_attnres_depth_router_dim',
+        type=int,
+        default=4,
+        help='Dimensionality for AttnRes depth summary fed to MoE router concat path.',
+    )
+    parser.add_argument(
         '--moe_linear_router_input_norm',
         action=argparse.BooleanOptionalAction,
         default=False,
         help='Apply LayerNorm on router inputs when router_arch=linear.',
+    )
+    parser.add_argument(
+        '--moe_router_dispatch_mode',
+        type=str,
+        default='hard_capacity',
+        choices=['hard_capacity', 'soft'],
+        help='Router dispatch mode: hard_capacity (top-1 + capacity correction) or soft (weighted experts).',
     )
     parser.add_argument(
         '--moe_router_temperature',
@@ -460,6 +479,8 @@ def main():
         )
     if params.moe_use_adapter_cond_bias and not (params.moe and params.subject_adapter):
         raise ValueError("--moe_use_adapter_cond_bias requires both --moe and adapter_mode subject_domain.")
+    if params.moe_attnres_depth_router_dim <= 0:
+        raise ValueError("--moe_attnres_depth_router_dim must be > 0.")
     if params.moe_router_temperature <= 0:
         raise ValueError("--moe_router_temperature must be > 0.")
     if params.moe_router_balance_kl_coef < 0:
@@ -491,9 +512,15 @@ def main():
         )
     if params.moe_use_subject_summary_router_concat and not params.moe:
         raise ValueError("--moe_use_subject_summary_router_concat requires --moe.")
+    if params.moe_use_attnres_depth_router_concat and not params.moe:
+        raise ValueError("--moe_use_attnres_depth_router_concat requires --moe.")
     if params.moe_use_subject_summary_router_concat and not params.use_subject_summary:
         raise ValueError(
             "--moe_use_subject_summary_router_concat requires --use_subject_summary and --subject_summary_file."
+        )
+    if params.moe_use_attnres_depth_router_concat and params.attnres_variant not in ('pre_attn', 'full'):
+        raise ValueError(
+            "--moe_use_attnres_depth_router_concat requires attnres_variant pre_attn or full."
         )
     if (
         (params.moe_use_eeg_summary_router_concat_spatial or params.moe_use_eeg_summary_router_concat_spectral)
@@ -551,7 +578,10 @@ def main():
         f"moe_use_subject_summary_router_concat={params.moe_use_subject_summary_router_concat} "
         f"moe_use_eeg_summary_router_concat_spatial={params.moe_use_eeg_summary_router_concat_spatial} "
         f"moe_use_eeg_summary_router_concat_spectral={params.moe_use_eeg_summary_router_concat_spectral} "
+        f"moe_use_attnres_depth_router_concat={params.moe_use_attnres_depth_router_concat} "
+        f"moe_attnres_depth_router_dim={params.moe_attnres_depth_router_dim} "
         f"moe_linear_router_input_norm={params.moe_linear_router_input_norm} "
+        f"moe_router_dispatch_mode={params.moe_router_dispatch_mode} "
         f"moe_router_temperature={params.moe_router_temperature} "
         f"moe_router_entropy_coef={params.moe_router_entropy_coef} "
         f"moe_router_balance_kl_coef={params.moe_router_balance_kl_coef} "

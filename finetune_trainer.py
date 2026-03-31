@@ -747,6 +747,18 @@ class Trainer(object):
                                 parts.append(f"attn={torch.sigmoid(layer.pre_attn_gate).item():.4f}")
                             if hasattr(layer, "pre_mlp_gate"):
                                 parts.append(f"mlp={torch.sigmoid(layer.pre_mlp_gate).item():.4f}")
+                            gs = getattr(layer, "last_gate_stats", None)
+                            if isinstance(gs, dict):
+                                if "pre_attn_std" in gs:
+                                    parts.append(
+                                        "attn_batch_std="
+                                        f"{float(gs.get('pre_attn_std', 0.0)):.4f}"
+                                    )
+                                if "pre_mlp_std" in gs:
+                                    parts.append(
+                                        "mlp_batch_std="
+                                        f"{float(gs.get('pre_mlp_std', 0.0)):.4f}"
+                                    )
                             if parts:
                                 gate_vals.append(f"L{i}:" + ",".join(parts))
                         if len(gate_vals) > 0:
