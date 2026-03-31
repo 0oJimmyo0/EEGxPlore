@@ -201,6 +201,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         linear_router_input_norm: bool = False,
         router_temperature: float = 1.0,
         router_entropy_coef: float = 0.0,
+        router_balance_kl_coef: float = 0.0,
+        router_z_loss_coef: float = 0.0,
+        router_jitter_std: float = 0.0,
+        router_jitter_final_std: float = 0.0,
+        router_jitter_anneal_epochs: int = 0,
         router_soft_warmup_epochs: int = 0,
         load_balance_coef: float = 0.0,
         domain_bias_reg_coef: float = 0.0,
@@ -244,6 +249,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.linear_router_input_norm = bool(linear_router_input_norm)
         self.router_temperature = float(max(1e-4, router_temperature))
         self.router_entropy_coef = float(router_entropy_coef)
+        self.router_balance_kl_coef = float(router_balance_kl_coef)
+        self.router_z_loss_coef = float(router_z_loss_coef)
+        self.router_jitter_std = float(max(0.0, router_jitter_std))
+        self.router_jitter_final_std = float(max(0.0, router_jitter_final_std))
+        self.router_jitter_anneal_epochs = int(max(0, router_jitter_anneal_epochs))
         self.router_soft_warmup_epochs = int(max(0, router_soft_warmup_epochs))
         if self.use_subject_summary_router_concat and self.subject_summary_router_dim <= 0:
             raise ValueError("use_subject_summary_router_concat=True requires subject_summary_router_dim > 0")
@@ -341,6 +351,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self._last_overflow_penalty = z
         self._last_domain_bias_reg = z
         self._last_entropy_reg = z
+        self._last_balance_kl = z
+        self._last_z_loss = z
         self._last_aux_loss = z
 
         self.last_diagnostics: Optional[Dict[str, Any]] = None
@@ -534,6 +546,15 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         pi = probs.mean(dim=0)
         return e * (fi * pi).sum()
 
+    @staticmethod
+    def _batch_uniform_kl(probs: Tensor) -> Tensor:
+        if probs.numel() == 0:
+            return probs.new_zeros(())
+        e = probs.size(1)
+        pi = probs.mean(dim=0).clamp_min(1e-10)
+        log_u = math.log(1.0 / float(max(e, 1)))
+        return (pi * (pi.log() - log_u)).sum()
+
     def _bank_residual(self, x_flat: Tensor, sample_assign: Tensor, batch_idx: Tensor, bank: nn.ModuleList) -> Tensor:
         res = torch.zeros_like(x_flat)
         per_token = sample_assign[batch_idx]
@@ -550,6 +571,19 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             w = sample_probs[:, e].index_select(0, batch_idx).unsqueeze(-1)
             res = res + w * out_e
         return res
+
+    def _effective_router_jitter_std(self, cur_epoch: int) -> float:
+        start = float(max(0.0, self.router_jitter_std))
+        final = float(max(0.0, self.router_jitter_final_std))
+        n = int(max(0, self.router_jitter_anneal_epochs))
+        if n <= 0:
+            return start
+        if cur_epoch <= 0:
+            return start
+        if n == 1:
+            return final
+        t = float(max(0.0, min(1.0, (float(cur_epoch) - 1.0) / float(n - 1))))
+        return (1.0 - t) * start + t * final
 
     def forward(self, x: Tensor, router_context: Optional[Dict[str, Tensor]] = None) -> Tensor:
         leading = x.shape[:-1]
@@ -610,8 +644,14 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         bias_sc = self._domain_logit_bias(b, "spectral", x.device)
         cond_bias_sp, cond_bias_sc = self._adapter_cond_logit_bias(router_context, b, x.device)
 
+        cur_epoch = int(_MOE_TRAIN_EPOCH.get())
+        eff_jitter_std = self._effective_router_jitter_std(cur_epoch)
+
         logits_sp = (logits_sp_content + bias_sp + cond_bias_sp) / self.router_temperature
         logits_sc = (logits_sc_content + bias_sc + cond_bias_sc) / self.router_temperature
+        if self.training and eff_jitter_std > 0:
+            logits_sp = logits_sp + torch.randn_like(logits_sp) * eff_jitter_std
+            logits_sc = logits_sc + torch.randn_like(logits_sc) * eff_jitter_std
 
         probs_sp = F.softmax(logits_sp, dim=-1)
         probs_sc = F.softmax(logits_sc, dim=-1)
@@ -632,7 +672,6 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         margin_sc_prob = top2_sc_p[:, 0] - (top2_sc_p[:, 1] if top2_sc_p.size(1) > 1 else 0.0)
 
         capacity = max(1, int(math.ceil(self.capacity_factor * b / float(self.num_specialists))))
-        cur_epoch = int(_MOE_TRAIN_EPOCH.get())
         soft_warmup_active = (
             self.training
             and self.router_soft_warmup_epochs > 0
@@ -674,16 +713,22 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         entropy_sp = (-(probs_sp * probs_sp.clamp_min(1e-10).log()).sum(dim=-1)).mean()
         entropy_sc = (-(probs_sc * probs_sc.clamp_min(1e-10).log()).sum(dim=-1)).mean()
         entropy_reg = -(entropy_sp + entropy_sc)
+        balance_kl = self._batch_uniform_kl(probs_sp) + self._batch_uniform_kl(probs_sc)
+        z_loss = torch.logsumexp(logits_sp, dim=-1).pow(2).mean() + torch.logsumexp(logits_sc, dim=-1).pow(2).mean()
 
         self._last_lb_loss = lb
         self._last_overflow_penalty = overflow_penalty
         self._last_domain_bias_reg = domain_reg
         self._last_entropy_reg = entropy_reg
+        self._last_balance_kl = balance_kl
+        self._last_z_loss = z_loss
         self._last_aux_loss = (
             self.load_balance_coef * lb
             + overflow_penalty
             + self.domain_bias_reg_coef * domain_reg
             + self.router_entropy_coef * entropy_reg
+            + self.router_balance_kl_coef * balance_kl
+            + self.router_z_loss_coef * z_loss
         )
 
         pre_ent_sp = self._sample_entropy(probs_sp)
@@ -706,6 +751,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "router_soft_warmup_active": bool(soft_warmup_active),
             "route_strategy": "soft_warmup" if soft_warmup_active else "hard_capacity",
             "router_entropy_coef": float(self.router_entropy_coef),
+            "router_balance_kl_coef": float(self.router_balance_kl_coef),
+            "router_z_loss_coef": float(self.router_z_loss_coef),
+            "router_jitter_std": float(self.router_jitter_std),
+            "router_jitter_std_effective": float(eff_jitter_std),
+            "router_jitter_final_std": float(self.router_jitter_final_std),
+            "router_jitter_anneal_epochs": int(self.router_jitter_anneal_epochs),
             "subject_summary_router_concat": bool(self.use_subject_summary_router_concat),
             "eeg_summary_router_concat_spatial": bool(self.use_eeg_summary_router_concat_spatial),
             "eeg_summary_router_concat_spectral": bool(self.use_eeg_summary_router_concat_spectral),
@@ -716,6 +767,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "aux_overflow": float(overflow_penalty.detach().item()),
             "aux_domain_bias_reg": float(domain_reg.detach().item()),
             "aux_entropy_reg": float(entropy_reg.detach().item()),
+            "aux_balance_kl": float(balance_kl.detach().item()),
+            "aux_z_loss": float(z_loss.detach().item()),
             "aux_total": float(self._last_aux_loss.detach().item()),
             "domain_bias_abs_spatial": float(bias_sp.abs().mean().item()),
             "domain_bias_abs_spectral": float(bias_sc.abs().mean().item()),
@@ -876,7 +929,15 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
         (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "
             f"overflow={diag.get('aux_overflow', 0.0):.6f}  domain_reg={diag.get('aux_domain_bias_reg', 0.0):.6f}  "
-            f"entropy_reg={diag.get('aux_entropy_reg', 0.0):.6f}  entropy_coef={diag.get('router_entropy_coef', 0.0):.6f}"
+            f"entropy_reg={diag.get('aux_entropy_reg', 0.0):.6f}  entropy_coef={diag.get('router_entropy_coef', 0.0):.6f}  "
+            f"balance_kl={diag.get('aux_balance_kl', 0.0):.6f}  balance_kl_coef={diag.get('router_balance_kl_coef', 0.0):.6f}  "
+            f"z_loss={diag.get('aux_z_loss', 0.0):.6f}  z_loss_coef={diag.get('router_z_loss_coef', 0.0):.6f}"
+        ),
+        (
+            f"    router_jitter_std(start/effective/final)=({diag.get('router_jitter_std', 0.0):.4f}/"
+            f"{diag.get('router_jitter_std_effective', diag.get('router_jitter_std', 0.0)):.4f}/"
+            f"{diag.get('router_jitter_final_std', 0.0):.4f})  "
+            f"jitter_anneal_epochs={diag.get('router_jitter_anneal_epochs', 0)}"
         ),
         (
             f"    domain_shift_rate: spatial={diag.get('domain_bias_shift_rate_spatial', 0.0):.4f}  "

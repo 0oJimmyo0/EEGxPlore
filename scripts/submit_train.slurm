@@ -2,8 +2,8 @@
 #SBATCH --job-name=FACED_ADAPTER
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_adapter_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_adapter_%j.err
-#SBATCH --partition=gpu_devel
-#SBATCH --gres=gpu:a40:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -78,10 +78,16 @@ ANTI_COLLAPSE_NO_SUBJECT_ID_PRESET="0"
 MOE_LINEAR_ROUTER_INPUT_NORM_PRESET="0"
 MOE_ROUTER_TEMPERATURE_PRESET="1.0"
 MOE_ROUTER_ENTROPY_COEF_PRESET="0.0"
+MOE_ROUTER_BALANCE_KL_COEF_PRESET="0.0"
+MOE_ROUTER_Z_LOSS_COEF_PRESET="0.0"
+MOE_ROUTER_JITTER_STD_PRESET="0.0"
+MOE_ROUTER_JITTER_FINAL_STD_PRESET="0.0"
+MOE_ROUTER_JITTER_ANNEAL_EPOCHS_PRESET="0"
 MOE_ROUTER_SOFT_WARMUP_EPOCHS_PRESET="0"
 MOE_ROUTER_WARMUP_MODE_PRESET="off"
 MOE_ROUTER_WARMUP_EPOCHS_PRESET="0"
 MOE_ROUTER_WARMUP_LR_SCALE_PRESET="0.1"
+MOE_CAPACITY_FACTOR_PRESET="1.5"
 
 case "$STAGE" in
   A0)
@@ -133,10 +139,16 @@ case "$STAGE" in
     MOE_LINEAR_ROUTER_INPUT_NORM_PRESET="1"
     MOE_ROUTER_TEMPERATURE_PRESET="1.5"
     MOE_ROUTER_ENTROPY_COEF_PRESET="0.01"
+    MOE_ROUTER_BALANCE_KL_COEF_PRESET="0.08"
+    MOE_ROUTER_Z_LOSS_COEF_PRESET="0.002"
+    MOE_ROUTER_JITTER_STD_PRESET="0.15"
+    MOE_ROUTER_JITTER_FINAL_STD_PRESET="0.0"
+    MOE_ROUTER_JITTER_ANNEAL_EPOCHS_PRESET="5"
     MOE_ROUTER_SOFT_WARMUP_EPOCHS_PRESET="5"
     MOE_ROUTER_WARMUP_MODE_PRESET="low_lr"
     MOE_ROUTER_WARMUP_EPOCHS_PRESET="3"
     MOE_ROUTER_WARMUP_LR_SCALE_PRESET="0.1"
+    MOE_CAPACITY_FACTOR_PRESET="1.25"
     ;;
   A4)
     ATTNRES_VARIANT_PRESET="pre_attn"
@@ -207,7 +219,7 @@ USE_LEGACY_MOE="${USE_LEGACY_MOE:-0}"
 HYBRID_MOE_ADAPTER="${HYBRID_MOE_ADAPTER:-1}"  # 1 keeps adapter_mode in MoE runs; 0 forces pure MoE
 MOE_NUM_LAYERS="${MOE_NUM_LAYERS:-1}"
 MOE_NUM_EXPERTS="${MOE_NUM_EXPERTS:-4}"
-MOE_CAPACITY_FACTOR="${MOE_CAPACITY_FACTOR:-1.0}"
+MOE_CAPACITY_FACTOR="${MOE_CAPACITY_FACTOR:-$MOE_CAPACITY_FACTOR_PRESET}"
 MOE_DOMAIN_BIAS="${MOE_DOMAIN_BIAS:-1}"
 MOE_DOMAIN_EMB_DIM="${MOE_DOMAIN_EMB_DIM:-16}"
 MOE_LOAD_BALANCE="${MOE_LOAD_BALANCE:-0.005}"
@@ -220,6 +232,11 @@ MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL="${MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_
 MOE_LINEAR_ROUTER_INPUT_NORM="${MOE_LINEAR_ROUTER_INPUT_NORM:-$MOE_LINEAR_ROUTER_INPUT_NORM_PRESET}"
 MOE_ROUTER_TEMPERATURE="${MOE_ROUTER_TEMPERATURE:-$MOE_ROUTER_TEMPERATURE_PRESET}"
 MOE_ROUTER_ENTROPY_COEF="${MOE_ROUTER_ENTROPY_COEF:-$MOE_ROUTER_ENTROPY_COEF_PRESET}"
+MOE_ROUTER_BALANCE_KL_COEF="${MOE_ROUTER_BALANCE_KL_COEF:-$MOE_ROUTER_BALANCE_KL_COEF_PRESET}"
+MOE_ROUTER_Z_LOSS_COEF="${MOE_ROUTER_Z_LOSS_COEF:-$MOE_ROUTER_Z_LOSS_COEF_PRESET}"
+MOE_ROUTER_JITTER_STD="${MOE_ROUTER_JITTER_STD:-$MOE_ROUTER_JITTER_STD_PRESET}"
+MOE_ROUTER_JITTER_FINAL_STD="${MOE_ROUTER_JITTER_FINAL_STD:-$MOE_ROUTER_JITTER_FINAL_STD_PRESET}"
+MOE_ROUTER_JITTER_ANNEAL_EPOCHS="${MOE_ROUTER_JITTER_ANNEAL_EPOCHS:-$MOE_ROUTER_JITTER_ANNEAL_EPOCHS_PRESET}"
 MOE_ROUTER_SOFT_WARMUP_EPOCHS="${MOE_ROUTER_SOFT_WARMUP_EPOCHS:-$MOE_ROUTER_SOFT_WARMUP_EPOCHS_PRESET}"
 MOE_ROUTER_WARMUP_MODE="${MOE_ROUTER_WARMUP_MODE:-$MOE_ROUTER_WARMUP_MODE_PRESET}" # off|freeze|low_lr
 MOE_ROUTER_WARMUP_EPOCHS="${MOE_ROUTER_WARMUP_EPOCHS:-$MOE_ROUTER_WARMUP_EPOCHS_PRESET}"
@@ -240,7 +257,7 @@ EXTRA_FLAGS=()
 
 echo "[slurm] stage=$STAGE run_tag=$RUN_TAG" >&2
 echo "[slurm] config attnres=$ATTNRES_VARIANT attnres_gated=$ATTNRES_GATED attnres_subject_gates=$ATTNRES_SUBJECT_GATES eeg_context=$EEG_CONTEXT adapter_mode=$ADAPTER_MODE use_subject_summary=$USE_SUBJECT_SUMMARY" >&2
-echo "[slurm] anti_collapse no_subject_id=$ANTI_COLLAPSE_NO_SUBJECT_ID adapter_use_subject_id=$ADAPTER_USE_SUBJECT_ID router_temp=$MOE_ROUTER_TEMPERATURE router_entropy=$MOE_ROUTER_ENTROPY_COEF soft_warmup_epochs=$MOE_ROUTER_SOFT_WARMUP_EPOCHS warmup_mode=$MOE_ROUTER_WARMUP_MODE warmup_epochs=$MOE_ROUTER_WARMUP_EPOCHS warmup_lr_scale=$MOE_ROUTER_WARMUP_LR_SCALE" >&2
+echo "[slurm] anti_collapse no_subject_id=$ANTI_COLLAPSE_NO_SUBJECT_ID adapter_use_subject_id=$ADAPTER_USE_SUBJECT_ID router_temp=$MOE_ROUTER_TEMPERATURE router_entropy=$MOE_ROUTER_ENTROPY_COEF router_balance_kl=$MOE_ROUTER_BALANCE_KL_COEF router_z_loss=$MOE_ROUTER_Z_LOSS_COEF router_jitter_start=$MOE_ROUTER_JITTER_STD router_jitter_final=$MOE_ROUTER_JITTER_FINAL_STD router_jitter_anneal_epochs=$MOE_ROUTER_JITTER_ANNEAL_EPOCHS soft_warmup_epochs=$MOE_ROUTER_SOFT_WARMUP_EPOCHS warmup_mode=$MOE_ROUTER_WARMUP_MODE warmup_epochs=$MOE_ROUTER_WARMUP_EPOCHS warmup_lr_scale=$MOE_ROUTER_WARMUP_LR_SCALE capacity_factor=$MOE_CAPACITY_FACTOR" >&2
 echo "[slurm] moe use_legacy=$USE_LEGACY_MOE hybrid_moe_adapter=$HYBRID_MOE_ADAPTER moe_use_adapter_cond_bias=$MOE_USE_ADAPTER_COND_BIAS" >&2
 echo "[slurm] router_concat subject_summary=$MOE_USE_SUBJECT_SUMMARY_ROUTER_CONCAT eeg_spatial=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPATIAL eeg_spectral=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL" >&2
 if [[ "$STAGE" == "A3b" || "$STAGE" == "A3c" ]]; then
@@ -297,6 +314,11 @@ EXTRA_FLAGS+=(--channel_id_align_mode "$CHANNEL_ID_ALIGN_MODE")
 EXTRA_FLAGS+=(--subject_summary_handling "$SUBJECT_SUMMARY_HANDLING")
 EXTRA_FLAGS+=(--moe_router_temperature "$MOE_ROUTER_TEMPERATURE")
 EXTRA_FLAGS+=(--moe_router_entropy_coef "$MOE_ROUTER_ENTROPY_COEF")
+EXTRA_FLAGS+=(--moe_router_balance_kl_coef "$MOE_ROUTER_BALANCE_KL_COEF")
+EXTRA_FLAGS+=(--moe_router_z_loss_coef "$MOE_ROUTER_Z_LOSS_COEF")
+EXTRA_FLAGS+=(--moe_router_jitter_std "$MOE_ROUTER_JITTER_STD")
+EXTRA_FLAGS+=(--moe_router_jitter_final_std "$MOE_ROUTER_JITTER_FINAL_STD")
+EXTRA_FLAGS+=(--moe_router_jitter_anneal_epochs "$MOE_ROUTER_JITTER_ANNEAL_EPOCHS")
 EXTRA_FLAGS+=(--moe_router_soft_warmup_epochs "$MOE_ROUTER_SOFT_WARMUP_EPOCHS")
 EXTRA_FLAGS+=(--moe_router_warmup_mode "$MOE_ROUTER_WARMUP_MODE")
 EXTRA_FLAGS+=(--moe_router_warmup_epochs "$MOE_ROUTER_WARMUP_EPOCHS")
@@ -638,13 +660,20 @@ elif [[ "$STAGE" == "A3b" ]]; then
   echo "[A3b][delta] vs=A3_adapter_only target=A3_pure_moe d_best_acc=$(calc_delta "$pm_acc" "$base_acc") d_best_kappa=$(calc_delta "$pm_kappa" "$base_kappa")"
   echo "[A3b][delta] vs=A3_hybrid_nocond target=A3_hybrid_cond d_best_acc=$(calc_delta "$hc_acc" "$hn_acc") d_best_kappa=$(calc_delta "$hc_kappa" "$hn_kappa")"
 elif [[ "$STAGE" == "A3c" ]]; then
-  if [[ -z "$SUBJECT_SUMMARY_FILE" ]] || [[ ! -f "$SUBJECT_SUMMARY_FILE" ]]; then
-    echo "[slurm] A3c requires SUBJECT_SUMMARY_FILE to exist for subject-summary router concat runs." >&2
+  A3C_RUN_SET="${A3C_RUN_SET:-performance}"  # performance|full
+  if [[ "$A3C_RUN_SET" != "performance" && "$A3C_RUN_SET" != "full" ]]; then
+    echo "[slurm] A3C_RUN_SET must be performance|full (got '$A3C_RUN_SET')." >&2
     exit 2
   fi
-  if [[ -z "$CHANNEL_CONTEXT_FILE" ]] || [[ ! -f "$CHANNEL_CONTEXT_FILE" ]]; then
-    echo "[slurm] A3c requires CHANNEL_CONTEXT_FILE to exist for EEG-summary router concat runs." >&2
-    exit 2
+  if [[ "$A3C_RUN_SET" == "full" ]]; then
+    if [[ -z "$SUBJECT_SUMMARY_FILE" ]] || [[ ! -f "$SUBJECT_SUMMARY_FILE" ]]; then
+      echo "[slurm] A3c full run requires SUBJECT_SUMMARY_FILE for subject-summary router concat runs." >&2
+      exit 2
+    fi
+    if [[ -z "$CHANNEL_CONTEXT_FILE" ]] || [[ ! -f "$CHANNEL_CONTEXT_FILE" ]]; then
+      echo "[slurm] A3c full run requires CHANNEL_CONTEXT_FILE for EEG-summary router concat runs." >&2
+      exit 2
+    fi
   fi
 
   A3C_LOG_DIR="${A3C_LOG_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/a3c_${SLURM_JOB_ID}}"
@@ -709,6 +738,8 @@ elif [[ "$STAGE" == "A3c" ]]; then
     --no-moe_use_eeg_summary_router_concat_spectral \
     --no-adapter_use_subject_id
 
+  if [[ "$A3C_RUN_SET" == "full" ]]; then
+
   # 3) Add subject-summary concat to both routers.
   run_and_collect_a3c "A3c_hybrid_subjconcat_no_sid" \
     --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
@@ -742,6 +773,8 @@ elif [[ "$STAGE" == "A3c" ]]; then
     --eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE" \
     --no-adapter_use_subject_id
 
+  fi
+
   # 5) Optional symmetry ablation: add EEG compact summary concat to spectral router too.
   run_and_collect_a3c "A3c_hybrid_subj_eeg_both_no_sid" \
     --moe --moe_route_mode typed_capacity_domain --moe_diagnostics \
@@ -773,17 +806,19 @@ elif [[ "$STAGE" == "A3c" ]]; then
   b_kappa="${A3C_BEST_KAPPA[A3c_adapter_only_no_sid]}"
   hb_acc="${A3C_BEST_ACC[A3c_hybrid_bias_no_sid]}"
   hb_kappa="${A3C_BEST_KAPPA[A3c_hybrid_bias_no_sid]}"
-  hs_acc="${A3C_BEST_ACC[A3c_hybrid_subjconcat_no_sid]}"
-  hs_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subjconcat_no_sid]}"
-  he_acc="${A3C_BEST_ACC[A3c_hybrid_subj_eeg_spatial_no_sid]}"
-  he_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subj_eeg_spatial_no_sid]}"
-  h2_acc="${A3C_BEST_ACC[A3c_hybrid_subj_eeg_both_no_sid]}"
-  h2_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subj_eeg_both_no_sid]}"
 
   echo "[A3c][delta] vs=A3c_adapter_only_no_sid target=A3c_hybrid_bias_no_sid d_best_acc=$(calc_delta "$hb_acc" "$b_acc") d_best_kappa=$(calc_delta "$hb_kappa" "$b_kappa")"
-  echo "[A3c][delta] vs=A3c_hybrid_bias_no_sid target=A3c_hybrid_subjconcat_no_sid d_best_acc=$(calc_delta "$hs_acc" "$hb_acc") d_best_kappa=$(calc_delta "$hs_kappa" "$hb_kappa")"
-  echo "[A3c][delta] vs=A3c_hybrid_subjconcat_no_sid target=A3c_hybrid_subj_eeg_spatial_no_sid d_best_acc=$(calc_delta "$he_acc" "$hs_acc") d_best_kappa=$(calc_delta "$he_kappa" "$hs_kappa")"
-  echo "[A3c][delta] vs=A3c_hybrid_subj_eeg_spatial_no_sid target=A3c_hybrid_subj_eeg_both_no_sid d_best_acc=$(calc_delta "$h2_acc" "$he_acc") d_best_kappa=$(calc_delta "$h2_kappa" "$he_kappa")"
+  if [[ "$A3C_RUN_SET" == "full" ]]; then
+    hs_acc="${A3C_BEST_ACC[A3c_hybrid_subjconcat_no_sid]}"
+    hs_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subjconcat_no_sid]}"
+    he_acc="${A3C_BEST_ACC[A3c_hybrid_subj_eeg_spatial_no_sid]}"
+    he_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subj_eeg_spatial_no_sid]}"
+    h2_acc="${A3C_BEST_ACC[A3c_hybrid_subj_eeg_both_no_sid]}"
+    h2_kappa="${A3C_BEST_KAPPA[A3c_hybrid_subj_eeg_both_no_sid]}"
+    echo "[A3c][delta] vs=A3c_hybrid_bias_no_sid target=A3c_hybrid_subjconcat_no_sid d_best_acc=$(calc_delta "$hs_acc" "$hb_acc") d_best_kappa=$(calc_delta "$hs_kappa" "$hb_kappa")"
+    echo "[A3c][delta] vs=A3c_hybrid_subjconcat_no_sid target=A3c_hybrid_subj_eeg_spatial_no_sid d_best_acc=$(calc_delta "$he_acc" "$hs_acc") d_best_kappa=$(calc_delta "$he_kappa" "$hs_kappa")"
+    echo "[A3c][delta] vs=A3c_hybrid_subj_eeg_spatial_no_sid target=A3c_hybrid_subj_eeg_both_no_sid d_best_acc=$(calc_delta "$h2_acc" "$he_acc") d_best_kappa=$(calc_delta "$h2_kappa" "$he_kappa")"
+  fi
 else
   run_finetune "$model_dir" "${EXTRA_FLAGS[@]}"
 fi

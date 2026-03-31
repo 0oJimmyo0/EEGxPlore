@@ -342,7 +342,101 @@ class Trainer(object):
         aux = bb.moe_auxiliary_loss()
         return loss + aux
 
-    def _log_moe_diagnostics(self):
+    def _accumulate_moe_train_diag(self, agg: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(agg, dict):
+            return
+        bb = getattr(self.model, 'backbone', None)
+        if bb is None or not hasattr(bb, 'encoder'):
+            return
+        for layer in bb.encoder.layers:
+            m = getattr(layer, 'moe_ffn', None)
+            diag = getattr(m, 'last_diagnostics', None) if m is not None else None
+            if not isinstance(diag, dict):
+                continue
+            sp = diag.get('spatial', {})
+            sc = diag.get('spectral', {})
+            if isinstance(sp, dict):
+                agg['max_frac_vals'].append(float(sp.get('pre_max_expert_fraction', 0.0)))
+                agg['reroute_vals'].append(float(sp.get('reroute_rate', 0.0)))
+                agg['margin_vals'].append(float(sp.get('pre_margin_logit', 0.0)))
+            if isinstance(sc, dict):
+                agg['max_frac_vals'].append(float(sc.get('pre_max_expert_fraction', 0.0)))
+                agg['reroute_vals'].append(float(sc.get('reroute_rate', 0.0)))
+                agg['margin_vals'].append(float(sc.get('pre_margin_logit', 0.0)))
+            rs = str(diag.get('route_strategy', 'hard_capacity'))
+            agg['route_strategies'][rs] = agg['route_strategies'].get(rs, 0) + 1
+
+    def _print_moe_train_summary(self, epoch_one_based: int, agg: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(agg, dict) or not agg.get('max_frac_vals'):
+            return
+        n_layers = len(agg['max_frac_vals']) // 2 if len(agg['max_frac_vals']) >= 2 else len(agg['max_frac_vals'])
+        print(
+            "[MoE train summary] "
+            f"ep={epoch_one_based} "
+            f"layers={n_layers} "
+            f"avg_pre_max_frac={float(np.mean(agg['max_frac_vals'])):.4f} "
+            f"avg_reroute_rate={float(np.mean(agg['reroute_vals'])):.4f} "
+            f"avg_pre_margin_logit={float(np.mean(agg['margin_vals'])):.4f} "
+            f"route_strategies={agg['route_strategies']}",
+            flush=True,
+        )
+
+    def _collect_moe_snapshot(self) -> Optional[Dict[str, Any]]:
+        bb = getattr(self.model, 'backbone', None)
+        if bb is None or not hasattr(bb, 'encoder'):
+            return None
+        max_frac_vals = []
+        reroute_vals = []
+        overflow_vals = []
+        pre_entropy_vals = []
+        route_counts: Dict[str, int] = {}
+        for layer in bb.encoder.layers:
+            m = getattr(layer, 'moe_ffn', None)
+            diag = getattr(m, 'last_diagnostics', None) if m is not None else None
+            if not isinstance(diag, dict):
+                continue
+            sp = diag.get('spatial', {})
+            sc = diag.get('spectral', {})
+            if isinstance(sp, dict):
+                max_frac_vals.append(float(sp.get('pre_max_expert_fraction', 0.0)))
+                reroute_vals.append(float(sp.get('reroute_rate', 0.0)))
+                overflow_vals.append(float(sp.get('overflow_count', 0.0)))
+                pre_entropy_vals.append(float(sp.get('pre_entropy', 0.0)))
+            if isinstance(sc, dict):
+                max_frac_vals.append(float(sc.get('pre_max_expert_fraction', 0.0)))
+                reroute_vals.append(float(sc.get('reroute_rate', 0.0)))
+                overflow_vals.append(float(sc.get('overflow_count', 0.0)))
+                pre_entropy_vals.append(float(sc.get('pre_entropy', 0.0)))
+            rs = str(diag.get('route_strategy', 'hard_capacity'))
+            route_counts[rs] = route_counts.get(rs, 0) + 1
+        if not max_frac_vals:
+            return None
+        n_layers = len(max_frac_vals) // 2 if len(max_frac_vals) >= 2 else len(max_frac_vals)
+        return {
+            'layers': n_layers,
+            'avg_pre_max_frac': float(np.mean(max_frac_vals)),
+            'avg_pre_entropy': float(np.mean(pre_entropy_vals)) if pre_entropy_vals else 0.0,
+            'avg_reroute_rate': float(np.mean(reroute_vals)) if reroute_vals else 0.0,
+            'avg_overflow_count': float(np.mean(overflow_vals)) if overflow_vals else 0.0,
+            'route_strategies': route_counts,
+        }
+
+    def _print_moe_snapshot(self, tag: str, epoch_one_based: int, snap: Optional[Dict[str, Any]]) -> None:
+        if not isinstance(snap, dict):
+            return
+        print(
+            f"[MoE compare][{tag}] "
+            f"ep={epoch_one_based} "
+            f"layers={snap.get('layers', 0)} "
+            f"avg_pre_max_frac={snap.get('avg_pre_max_frac', 0.0):.4f} "
+            f"avg_pre_entropy={snap.get('avg_pre_entropy', 0.0):.4f} "
+            f"avg_reroute_rate={snap.get('avg_reroute_rate', 0.0):.4f} "
+            f"avg_overflow_count={snap.get('avg_overflow_count', 0.0):.4f} "
+            f"route_strategies={snap.get('route_strategies', {})}",
+            flush=True,
+        )
+
+    def _log_moe_diagnostics(self, epoch_one_based: Optional[int] = None):
         if not getattr(self.params, 'moe_diagnostics', False) or not getattr(self.params, 'moe', False):
             return
         bb = getattr(self.model, 'backbone', None)
@@ -367,8 +461,11 @@ class Trainer(object):
         finally:
             if label_tok is not None:
                 reset_moe_diagnostic_labels(label_tok)
+        val_snap = self._collect_moe_snapshot()
+        if epoch_one_based is not None:
+            self._print_moe_snapshot('val-diag', epoch_one_based, val_snap)
         print(
-            '[MoE diagnostics] one val batch, eval (no router noise)  '
+            '[MoE diagnostics] one val batch, eval (no router noise; train-time warmup/jitter may differ)  '
             f"route_mode={getattr(self.params, 'moe_route_mode', '?')}  "
             f"psd_feats={getattr(self.params, 'moe_use_psd_router_features', False)}  "
             f"domain_bias={getattr(self.params, 'moe_domain_bias', False)}"
@@ -518,6 +615,15 @@ class Trainer(object):
                 self.model.train()
                 start_time = timer()
                 losses = []
+                moe_train_agg = None
+                if getattr(self.params, 'moe', False):
+                    moe_train_agg = {
+                        'max_frac_vals': [],
+                        'reroute_vals': [],
+                        'margin_vals': [],
+                        'route_strategies': {},
+                    }
+                train_first_snap = None
                 for batch_idx, batch in enumerate(tqdm_auto(self.data_loader['train'], self.params, mininterval=10)):
                     try:
                         x, y = batch[0], batch[1]
@@ -526,6 +632,9 @@ class Trainer(object):
                         y = y.cuda()
                         batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
                         pred = _forward_with_optional_meta(self.model, x, batch_meta)
+                        self._accumulate_moe_train_diag(moe_train_agg)
+                        if train_first_snap is None and getattr(self.params, 'moe', False):
+                            train_first_snap = self._collect_moe_snapshot()
                         with torch.no_grad():
                             pred_cls = torch.argmax(pred.detach(), dim=-1).reshape(-1).to(dtype=torch.long)
                             true_cls = y.detach().reshape(-1).to(dtype=torch.long)
@@ -603,6 +712,7 @@ class Trainer(object):
                     f"[diag][train] ep={epoch + 1} meta_unknown_ratio={tr_unknown_ratio}",
                     flush=True,
                 )
+                self._print_moe_train_summary(epoch + 1, moe_train_agg)
 
                 lr_cur = self.optimizer.param_groups[0]["lr"]
 
@@ -660,8 +770,9 @@ class Trainer(object):
                     if isinstance(val_diag, dict) and "meta_unknown_ratio" in val_diag:
                         vu = {k: round(float(v), 4) for k, v in val_diag["meta_unknown_ratio"].items()}
                         print(f"[diag][val] ep={epoch + 1} meta_unknown_ratio={vu}", flush=True)
+                    self._print_moe_snapshot('train-first', epoch + 1, train_first_snap)
                     print("starting MoE diagnostics", flush=True)
-                    self._log_moe_diagnostics()
+                    self._log_moe_diagnostics(epoch_one_based=epoch + 1)
                     if kappa > kappa_best:
                         print("kappa increasing....saving weights !! ")
                         print("Val Evaluation: acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}".format(
@@ -812,6 +923,15 @@ class Trainer(object):
                 self.model.train()
                 start_time = timer()
                 losses = []
+                moe_train_agg = None
+                if getattr(self.params, 'moe', False):
+                    moe_train_agg = {
+                        'max_frac_vals': [],
+                        'reroute_vals': [],
+                        'margin_vals': [],
+                        'route_strategies': {},
+                    }
+                train_first_snap = None
                 for batch_idx, batch in enumerate(tqdm_auto(self.data_loader['train'], self.params, mininterval=10)):
                     x, y = batch[0], batch[1]
                     self.optimizer.zero_grad(set_to_none=True)
@@ -819,6 +939,9 @@ class Trainer(object):
                     y = y.cuda()
                     batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
                     pred = _forward_with_optional_meta(self.model, x, batch_meta)
+                    self._accumulate_moe_train_diag(moe_train_agg)
+                    if train_first_snap is None and getattr(self.params, 'moe', False):
+                        train_first_snap = self._collect_moe_snapshot()
 
                     loss = self.criterion(pred, y)
                     loss = self._add_moe_auxiliary_loss(loss)
@@ -844,6 +967,7 @@ class Trainer(object):
 
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}_binary", md)
+                self._print_moe_train_summary(epoch + 1, moe_train_agg)
 
                 lr_cur = self.optimizer.param_groups[0]["lr"]
 
@@ -868,8 +992,9 @@ class Trainer(object):
                         )
                     )
                     print(cm)
+                    self._print_moe_snapshot('train-first', epoch + 1, train_first_snap)
                     print("starting MoE diagnostics", flush=True)
-                    self._log_moe_diagnostics()
+                    self._log_moe_diagnostics(epoch_one_based=epoch + 1)
                     if roc_auc > roc_auc_best:
                         print("roc_auc increasing....saving weights !! ")
                         print("Val Evaluation: acc: {:.5f}, pr_auc: {:.5f}, roc_auc: {:.5f}".format(
@@ -953,6 +1078,15 @@ class Trainer(object):
                 self.model.train()
                 start_time = timer()
                 losses = []
+                moe_train_agg = None
+                if getattr(self.params, 'moe', False):
+                    moe_train_agg = {
+                        'max_frac_vals': [],
+                        'reroute_vals': [],
+                        'margin_vals': [],
+                        'route_strategies': {},
+                    }
+                train_first_snap = None
                 for batch_idx, batch in enumerate(tqdm_auto(self.data_loader['train'], self.params, mininterval=10)):
                     x, y = batch[0], batch[1]
                     self.optimizer.zero_grad(set_to_none=True)
@@ -960,6 +1094,9 @@ class Trainer(object):
                     y = y.cuda()
                     batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
                     pred = _forward_with_optional_meta(self.model, x, batch_meta)
+                    self._accumulate_moe_train_diag(moe_train_agg)
+                    if train_first_snap is None and getattr(self.params, 'moe', False):
+                        train_first_snap = self._collect_moe_snapshot()
                     loss = self.criterion(pred, y)
                     loss = self._add_moe_auxiliary_loss(loss)
                     continual_penalty, continual_stats = self._continual_replay_penalty("regression")
@@ -984,6 +1121,7 @@ class Trainer(object):
 
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}_regr", md)
+                self._print_moe_train_summary(epoch + 1, moe_train_agg)
 
                 lr_cur = self.optimizer.param_groups[0]["lr"]
 
@@ -1007,8 +1145,9 @@ class Trainer(object):
                             (timer() - start_time) / 60
                         )
                     )
+                    self._print_moe_snapshot('train-first', epoch + 1, train_first_snap)
                     print("starting MoE diagnostics", flush=True)
-                    self._log_moe_diagnostics()
+                    self._log_moe_diagnostics(epoch_one_based=epoch + 1)
                     if r2 > r2_best:
                         print("r2 increasing....saving weights !! ")
                         print("Val Evaluation: corrcoef: {:.5f}, r2: {:.5f}, rmse: {:.5f}".format(

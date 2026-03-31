@@ -351,6 +351,36 @@ def main():
         help='Entropy regularization coefficient for router probs. Positive encourages higher entropy.',
     )
     parser.add_argument(
+        '--moe_router_balance_kl_coef',
+        type=float,
+        default=0.0,
+        help='Batch-level KL(mean_router_probs || uniform) coefficient. Positive discourages one-expert collapse.',
+    )
+    parser.add_argument(
+        '--moe_router_z_loss_coef',
+        type=float,
+        default=0.0,
+        help='Router z-loss coefficient to suppress logit explosion (Switch-style logsumexp penalty).',
+    )
+    parser.add_argument(
+        '--moe_router_jitter_std',
+        type=float,
+        default=0.0,
+        help='Std of Gaussian jitter added to router logits during training only (0 disables).',
+    )
+    parser.add_argument(
+        '--moe_router_jitter_final_std',
+        type=float,
+        default=0.0,
+        help='Final router jitter std after annealing (used with --moe_router_jitter_anneal_epochs).',
+    )
+    parser.add_argument(
+        '--moe_router_jitter_anneal_epochs',
+        type=int,
+        default=0,
+        help='Linear jitter anneal epochs from start std to final std (0 keeps fixed jitter).',
+    )
+    parser.add_argument(
         '--moe_router_soft_warmup_epochs',
         type=int,
         default=0,
@@ -432,6 +462,16 @@ def main():
         raise ValueError("--moe_use_adapter_cond_bias requires both --moe and adapter_mode subject_domain.")
     if params.moe_router_temperature <= 0:
         raise ValueError("--moe_router_temperature must be > 0.")
+    if params.moe_router_balance_kl_coef < 0:
+        raise ValueError("--moe_router_balance_kl_coef must be >= 0.")
+    if params.moe_router_z_loss_coef < 0:
+        raise ValueError("--moe_router_z_loss_coef must be >= 0.")
+    if params.moe_router_jitter_std < 0:
+        raise ValueError("--moe_router_jitter_std must be >= 0.")
+    if params.moe_router_jitter_final_std < 0:
+        raise ValueError("--moe_router_jitter_final_std must be >= 0.")
+    if params.moe_router_jitter_anneal_epochs < 0:
+        raise ValueError("--moe_router_jitter_anneal_epochs must be >= 0.")
     if params.moe_router_soft_warmup_epochs < 0:
         raise ValueError("--moe_router_soft_warmup_epochs must be >= 0.")
     if params.moe_router_warmup_epochs < 0:
@@ -514,6 +554,11 @@ def main():
         f"moe_linear_router_input_norm={params.moe_linear_router_input_norm} "
         f"moe_router_temperature={params.moe_router_temperature} "
         f"moe_router_entropy_coef={params.moe_router_entropy_coef} "
+        f"moe_router_balance_kl_coef={params.moe_router_balance_kl_coef} "
+        f"moe_router_z_loss_coef={params.moe_router_z_loss_coef} "
+        f"moe_router_jitter_std={params.moe_router_jitter_std} "
+        f"moe_router_jitter_final_std={params.moe_router_jitter_final_std} "
+        f"moe_router_jitter_anneal_epochs={params.moe_router_jitter_anneal_epochs} "
         f"moe_router_soft_warmup_epochs={params.moe_router_soft_warmup_epochs} "
         f"moe_router_warmup_mode={params.moe_router_warmup_mode} "
         f"moe_router_warmup_epochs={params.moe_router_warmup_epochs} "
