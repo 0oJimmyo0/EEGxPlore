@@ -23,6 +23,9 @@ class Model(nn.Module):
         print(f"[FACED] attnres_gated = {param.attnres_gated}")
         print(f"[FACED] attnres_gate_init = {param.attnres_gate_init}")
         print(f"[FACED] attnres_start_layer = {param.attnres_start_layer}")
+        print(f"[FACED] attnres_subject_gates = {getattr(param, 'attnres_subject_gates', False)}")
+        print(f"[FACED] attnres_eeg_cond_gates = {getattr(param, 'attnres_eeg_cond_gates', False)}")
+        print(f"[FACED] attnres_eeg_gate_scale = {getattr(param, 'attnres_eeg_gate_scale', 0.1)}")
         print(f"[FACED] adapter_mode = {getattr(param, 'adapter_mode', 'none')}")
         print(f"[FACED] eeg_channel_context = {getattr(param, 'eeg_channel_context', False)}")
         print(f"[FACED] use_subject_summary = {getattr(param, 'use_subject_summary', False)}")
@@ -130,7 +133,10 @@ class Model(nn.Module):
         print(f'Loaded pretrained params: {len(self.pretrained_param_names)}')
         print(f'New params: {len(self.new_param_names)}')
 
-    def forward(self, x, batch_meta=None):
+    def forward(self, x, batch_meta=None, return_features: bool = False):
         feats = self.backbone(x, batch_meta=batch_meta)
         out = self.classifier(feats)
+        if return_features:
+            shared = self.backbone.pooled_shared_feature(feats)
+            return out, shared
         return out

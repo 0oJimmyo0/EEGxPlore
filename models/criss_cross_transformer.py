@@ -79,6 +79,9 @@ class TransformerEncoderLayer(nn.Module):
                  attnres_variant: str = 'none', attnres_gated: bool = False,
                  attnres_gate_init: float = 0.0, attnres_start_layer: int = 0,
                  attnres_subject_gates: bool = False,
+                 attnres_eeg_cond_gates: bool = False,
+                 attnres_eeg_context_dim: int = 0,
+                 attnres_eeg_gate_scale: float = 0.1,
                  moe_ffn: Optional[nn.Module] = None,
                  subject_adapter: Optional[nn.Module] = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -115,6 +118,9 @@ class TransformerEncoderLayer(nn.Module):
         self.use_pre_attnres = attnres_variant in ['pre_attn', 'full']
         self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
         self.attnres_subject_gates = bool(attnres_subject_gates)
+        self.attnres_eeg_cond_gates = bool(attnres_eeg_cond_gates)
+        self.attnres_eeg_context_dim = int(attnres_eeg_context_dim)
+        self.attnres_eeg_gate_scale = float(attnres_eeg_gate_scale)
         self.last_gate_stats: Dict[str, float] = {}
 
         if self.use_pre_attnres:
@@ -127,6 +133,11 @@ class TransformerEncoderLayer(nn.Module):
                     self.pre_attn_gate_cond = nn.Linear(cond_dim, 1, bias=True)
                     nn.init.zeros_(self.pre_attn_gate_cond.weight)
                     nn.init.zeros_(self.pre_attn_gate_cond.bias)
+                self.pre_attn_eeg_gate_cond = None
+                if self.attnres_eeg_cond_gates and self.attnres_eeg_context_dim > 0:
+                    self.pre_attn_eeg_gate_cond = nn.Linear(self.attnres_eeg_context_dim, 1, bias=True)
+                    nn.init.zeros_(self.pre_attn_eeg_gate_cond.weight)
+                    nn.init.zeros_(self.pre_attn_eeg_gate_cond.bias)
 
         if self.use_pre_mlpres:
             self.pre_mlp_res = FullAttnRes(d_model)
@@ -138,6 +149,11 @@ class TransformerEncoderLayer(nn.Module):
                     self.pre_mlp_gate_cond = nn.Linear(cond_dim, 1, bias=True)
                     nn.init.zeros_(self.pre_mlp_gate_cond.weight)
                     nn.init.zeros_(self.pre_mlp_gate_cond.bias)
+                self.pre_mlp_eeg_gate_cond = None
+                if self.attnres_eeg_cond_gates and self.attnres_eeg_context_dim > 0:
+                    self.pre_mlp_eeg_gate_cond = nn.Linear(self.attnres_eeg_context_dim, 1, bias=True)
+                    nn.init.zeros_(self.pre_mlp_eeg_gate_cond.weight)
+                    nn.init.zeros_(self.pre_mlp_eeg_gate_cond.bias)
 
         # Legacy string support for activation function.
         if isinstance(activation, str):
@@ -184,7 +200,50 @@ class TransformerEncoderLayer(nn.Module):
         if cond is None:
             return None
         delta = gate_proj(cond).view(-1, 1, 1, 1)
-        return 0.1 * torch.tanh(delta)
+        return self.attnres_eeg_gate_scale * torch.tanh(delta)
+
+    def _eeg_context_tensor(self, x_ref: Tensor) -> Optional[Tensor]:
+        batch_meta = get_adapter_batch_meta()
+        if not isinstance(batch_meta, dict):
+            return None
+        ctx = batch_meta.get("eeg_context_summary")
+        if not torch.is_tensor(ctx):
+            return None
+        if ctx.ndim == 1:
+            ctx = ctx.unsqueeze(0)
+        if ctx.ndim != 2:
+            return None
+        if self.attnres_eeg_context_dim <= 0:
+            return None
+        if int(ctx.shape[-1]) != int(self.attnres_eeg_context_dim):
+            return None
+        return ctx.to(device=x_ref.device, dtype=x_ref.dtype)
+
+    def _eeg_gate_delta(self, gate_proj: Optional[nn.Module], x_ref: Tensor) -> Optional[Tensor]:
+        if gate_proj is None:
+            return None
+        ctx = self._eeg_context_tensor(x_ref)
+        if ctx is None:
+            return None
+        delta = gate_proj(ctx).view(-1, 1, 1, 1)
+        return self.attnres_eeg_gate_scale * torch.tanh(delta)
+
+    def _record_gate_stats(self, prefix: str, gate: Tensor, subject_delta: Optional[Tensor], eeg_delta: Optional[Tensor]) -> None:
+        gd = gate.detach().float()
+        self.last_gate_stats[f'{prefix}_mean'] = float(gd.mean().item())
+        self.last_gate_stats[f'{prefix}_std'] = float(gd.std(unbiased=False).item())
+        self.last_gate_stats[f'{prefix}_min'] = float(gd.min().item())
+        self.last_gate_stats[f'{prefix}_max'] = float(gd.max().item())
+        if subject_delta is not None:
+            sd = subject_delta.detach().float()
+            self.last_gate_stats[f'{prefix}_subject_delta_mean'] = float(sd.mean().item())
+            self.last_gate_stats[f'{prefix}_subject_delta_std'] = float(sd.std(unbiased=False).item())
+            self.last_gate_stats[f'{prefix}_subject_delta_norm'] = float(sd.norm().item())
+        if eeg_delta is not None:
+            ed = eeg_delta.detach().float()
+            self.last_gate_stats[f'{prefix}_eeg_delta_mean'] = float(ed.mean().item())
+            self.last_gate_stats[f'{prefix}_eeg_delta_std'] = float(ed.std(unbiased=False).item())
+            self.last_gate_stats[f'{prefix}_eeg_delta_norm'] = float(ed.norm().item())
 
     @staticmethod
     def _attnres_depth_summary(alpha: Tensor) -> Tensor:
@@ -263,16 +322,19 @@ class TransformerEncoderLayer(nn.Module):
 
             if self.attnres_gated:
                 base_gate = self.pre_attn_gate.view(1, 1, 1, 1)
+                subj_delta = None
+                eeg_delta = None
                 if self.attnres_subject_gates:
-                    gate_delta = self._subject_gate_delta(getattr(self, 'pre_attn_gate_cond', None), baseline_in)
-                    gate = torch.sigmoid(base_gate + gate_delta) if gate_delta is not None else torch.sigmoid(base_gate)
-                else:
-                    gate = torch.sigmoid(base_gate)
-                gd = gate.detach().float()
-                self.last_gate_stats['pre_attn_mean'] = float(gd.mean().item())
-                self.last_gate_stats['pre_attn_std'] = float(gd.std(unbiased=False).item())
-                self.last_gate_stats['pre_attn_min'] = float(gd.min().item())
-                self.last_gate_stats['pre_attn_max'] = float(gd.max().item())
+                    subj_delta = self._subject_gate_delta(getattr(self, 'pre_attn_gate_cond', None), baseline_in)
+                if self.attnres_eeg_cond_gates:
+                    eeg_delta = self._eeg_gate_delta(getattr(self, 'pre_attn_eeg_gate_cond', None), baseline_in)
+                gate_logits = base_gate
+                if subj_delta is not None:
+                    gate_logits = gate_logits + subj_delta
+                if eeg_delta is not None:
+                    gate_logits = gate_logits + eeg_delta
+                gate = torch.sigmoid(gate_logits)
+                self._record_gate_stats('pre_attn', gate, subj_delta, eeg_delta)
                 attn_in = baseline_in + gate * (attnres_in - baseline_in)
             else:
                 attn_in = attnres_in
@@ -293,16 +355,19 @@ class TransformerEncoderLayer(nn.Module):
             mlpres_agg = self.pre_mlp_res(mlp_source_pool)
             if self.attnres_gated:
                 base_gate_m = self.pre_mlp_gate.view(1, 1, 1, 1)
+                subj_delta_m = None
+                eeg_delta_m = None
                 if self.attnres_subject_gates:
-                    gate_delta_m = self._subject_gate_delta(getattr(self, 'pre_mlp_gate_cond', None), x_attn)
-                    gate_m = torch.sigmoid(base_gate_m + gate_delta_m) if gate_delta_m is not None else torch.sigmoid(base_gate_m)
-                else:
-                    gate_m = torch.sigmoid(base_gate_m)
-                gmd = gate_m.detach().float()
-                self.last_gate_stats['pre_mlp_mean'] = float(gmd.mean().item())
-                self.last_gate_stats['pre_mlp_std'] = float(gmd.std(unbiased=False).item())
-                self.last_gate_stats['pre_mlp_min'] = float(gmd.min().item())
-                self.last_gate_stats['pre_mlp_max'] = float(gmd.max().item())
+                    subj_delta_m = self._subject_gate_delta(getattr(self, 'pre_mlp_gate_cond', None), x_attn)
+                if self.attnres_eeg_cond_gates:
+                    eeg_delta_m = self._eeg_gate_delta(getattr(self, 'pre_mlp_eeg_gate_cond', None), x_attn)
+                gate_logits_m = base_gate_m
+                if subj_delta_m is not None:
+                    gate_logits_m = gate_logits_m + subj_delta_m
+                if eeg_delta_m is not None:
+                    gate_logits_m = gate_logits_m + eeg_delta_m
+                gate_m = torch.sigmoid(gate_logits_m)
+                self._record_gate_stats('pre_mlp', gate_m, subj_delta_m, eeg_delta_m)
                 mlp_in = x_attn + gate_m * (mlpres_agg - x_attn)
             else:
                 mlp_in = mlpres_agg

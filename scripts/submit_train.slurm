@@ -3,33 +3,20 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/faced_adapter_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/err/faced_adapter_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=0-04:00:00
 
-# =============================================================================
-# CBraMod adapter-first finetuning script (new version)
-#
-# How to use:
-# 1) Edit the KNOBS section below.
-# 2) Submit: sbatch scripts/submit_train.slurm
-# 3) Monitor:
-#    - queue:   squeue -u $USER
-#    - logs:    tail -f logs/out/faced_adapter_<JOBID>.out
-#    - errors:  tail -f logs/err/faced_adapter_<JOBID>.err
-#
-# What to watch in logs for performance:
-# - per-epoch validation line: "Epoch ... acc ... kappa ... f1"
-# - final test line:           "Test Evaluation: acc: ..., kappa: ..., f1: ..."
-# - best checkpoint path is printed as "model save in ..." and also includes metrics in filename.
-# =============================================================================
+# CBraMod finetune launcher.
+# Submit: sbatch scripts/submit_train.slurm
+# Monitor: squeue -u $USER ; tail -f logs/out/faced_adapter_<JOBID>.out
 
 # ------------------------------
 # RUN IDENTITY
 # ------------------------------
-STAGE="${STAGE:-A3e}"  # A0|A1|A2|A2b|A3|A3b|A3c|A3d|A3e|A4|A5|custom
+STAGE="${STAGE:-B1a}"  # A0|A1|A2|A2b|A3|A3b|A3c|A3d|A3e|A4|A5|B1a|custom
 RUN_TAG="${RUN_TAG:-${STAGE}}"
 
 # ------------------------------
@@ -224,10 +211,19 @@ case "$STAGE" in
     ADAPTER_MODE_PRESET="subject_domain"
     USE_SUBJECT_SUMMARY_PRESET="1"
     ;;
+  B1a)
+    # New-feature bundle (adapter+AttnRes baseline vs EEG-gated/prototype ablations).
+    # Keep global presets neutral; per-run flags in the bundle block set exact mechanisms.
+    ATTNRES_VARIANT_PRESET="pre_attn"
+    EEG_CONTEXT_PRESET="0"
+    ADAPTER_MODE_PRESET="subject_domain"
+    USE_SUBJECT_SUMMARY_PRESET="0"
+    ANTI_COLLAPSE_NO_SUBJECT_ID_PRESET="1"
+    ;;
   custom)
     ;;
   *)
-    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A3b|A3c|A3d|A3e|A4|A5|custom." >&2
+    echo "[slurm] Unknown STAGE='$STAGE'. Use A0|A1|A2|A2b|A3|A3b|A3c|A3d|A3e|A4|A5|B1a|custom." >&2
     exit 2
     ;;
 esac
@@ -237,6 +233,9 @@ ATTNRES_START_LAYER="${ATTNRES_START_LAYER:-0}"
 ATTNRES_GATED="${ATTNRES_GATED:-1}"                           # 0|1
 ATTNRES_GATE_INIT="${ATTNRES_GATE_INIT:-0.0}"
 ATTNRES_SUBJECT_GATES="${ATTNRES_SUBJECT_GATES:-1}"           # 0|1 (requires ATTNRES_GATED=1)
+ATTNRES_EEG_COND_GATES="${ATTNRES_EEG_COND_GATES:-0}"         # 0|1
+ATTNRES_EEG_GATE_SCALE="${ATTNRES_EEG_GATE_SCALE:-0.1}"
+ATTNRES_DIAG_INTERVAL="${ATTNRES_DIAG_INTERVAL:-1}"
 ADAPTER_MODE="${ADAPTER_MODE:-$ADAPTER_MODE_PRESET}"   # subject_domain | none
 ADAPTER_NUM_LAYERS="${ADAPTER_NUM_LAYERS:-4}"
 ADAPTER_RANK="${ADAPTER_RANK:-8}"
@@ -259,6 +258,12 @@ EEG_CONTEXT="${EEG_CONTEXT:-$EEG_CONTEXT_PRESET}"
 # Apply stage preset for subject summary unless explicitly set by user
 USE_SUBJECT_SUMMARY="${USE_SUBJECT_SUMMARY:-$USE_SUBJECT_SUMMARY_PRESET}"
 
+# B1a controls EEG context per-subrun. Force global EEG context off to avoid accidental contamination.
+if [[ "$STAGE" == "B1a" && "$EEG_CONTEXT" != "0" ]]; then
+  echo "[slurm] B1a overrides global EEG_CONTEXT to 0; EEG context is enabled only in specific B1a subruns." >&2
+  EEG_CONTEXT="0"
+fi
+
 # ------------------------------
 # CONTINUAL LEARNING KNOBS
 # ------------------------------
@@ -269,6 +274,16 @@ CONTINUAL_REPLAY_BATCH_SIZE="${CONTINUAL_REPLAY_BATCH_SIZE:-32}"
 CONTINUAL_REPLAY_WEIGHT="${CONTINUAL_REPLAY_WEIGHT:-0.5}"
 CONTINUAL_DISTILL_WEIGHT="${CONTINUAL_DISTILL_WEIGHT:-0.2}"
 CONTINUAL_DISTILL_TEMP="${CONTINUAL_DISTILL_TEMP:-2.0}"
+
+# ------------------------------
+# PROTOTYPE ALIGNMENT KNOBS
+# ------------------------------
+PROTOTYPE_ALIGNMENT="${PROTOTYPE_ALIGNMENT:-0}"
+PROTOTYPE_MOMENTUM="${PROTOTYPE_MOMENTUM:-0.95}"
+PROTOTYPE_PULL_WEIGHT="${PROTOTYPE_PULL_WEIGHT:-0.05}"
+PROTOTYPE_PUSH_WEIGHT="${PROTOTYPE_PUSH_WEIGHT:-0.02}"
+PROTOTYPE_MARGIN="${PROTOTYPE_MARGIN:-0.10}"
+PROTOTYPE_START_EPOCH="${PROTOTYPE_START_EPOCH:-1}"
 
 # 1 => freeze backbone except adapter/context/classifier (for incremental subject update)
 ADAPTER_ONLY_UPDATE="${ADAPTER_ONLY_UPDATE:-0}"
@@ -333,12 +348,11 @@ conda activate cbramod
 EXTRA_FLAGS=()
 
 echo "[slurm] stage=$STAGE run_tag=$RUN_TAG" >&2
-echo "[slurm] config attnres=$ATTNRES_VARIANT attnres_gated=$ATTNRES_GATED attnres_subject_gates=$ATTNRES_SUBJECT_GATES eeg_context=$EEG_CONTEXT adapter_mode=$ADAPTER_MODE use_subject_summary=$USE_SUBJECT_SUMMARY" >&2
-echo "[slurm] anti_collapse no_subject_id=$ANTI_COLLAPSE_NO_SUBJECT_ID adapter_use_subject_id=$ADAPTER_USE_SUBJECT_ID router_temp=$MOE_ROUTER_TEMPERATURE router_entropy=$MOE_ROUTER_ENTROPY_COEF router_balance_kl=$MOE_ROUTER_BALANCE_KL_COEF router_z_loss=$MOE_ROUTER_Z_LOSS_COEF router_jitter_start=$MOE_ROUTER_JITTER_STD router_jitter_final=$MOE_ROUTER_JITTER_FINAL_STD router_jitter_anneal_epochs=$MOE_ROUTER_JITTER_ANNEAL_EPOCHS soft_warmup_epochs=$MOE_ROUTER_SOFT_WARMUP_EPOCHS warmup_mode=$MOE_ROUTER_WARMUP_MODE warmup_epochs=$MOE_ROUTER_WARMUP_EPOCHS warmup_lr_scale=$MOE_ROUTER_WARMUP_LR_SCALE capacity_factor=$MOE_CAPACITY_FACTOR" >&2
-echo "[slurm] moe use_legacy=$USE_LEGACY_MOE hybrid_moe_adapter=$HYBRID_MOE_ADAPTER system_mode=$MOE_SYSTEM_MODE moe_num_layers=$MOE_NUM_LAYERS dispatch_mode=$MOE_ROUTER_DISPATCH_MODE moe_use_adapter_cond_bias=$MOE_USE_ADAPTER_COND_BIAS" >&2
-echo "[slurm] router_concat subject_summary=$MOE_USE_SUBJECT_SUMMARY_ROUTER_CONCAT eeg_spatial=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPATIAL eeg_spectral=$MOE_USE_EEG_SUMMARY_ROUTER_CONCAT_SPECTRAL attnres_depth=$MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT attnres_depth_dim=$MOE_ATTNRES_DEPTH_ROUTER_DIM" >&2
-if [[ "$STAGE" == "A3b" || "$STAGE" == "A3c" || "$STAGE" == "A3d" || "$STAGE" == "A3e" ]]; then
-  echo "[slurm] note: A3b/A3c/A3d/A3e are bundle stages; per-run flags below intentionally override some global defaults." >&2
+echo "[slurm] core attnres=$ATTNRES_VARIANT gated=$ATTNRES_GATED subj_gates=$ATTNRES_SUBJECT_GATES eeg_gates=$ATTNRES_EEG_COND_GATES eeg_ctx=$EEG_CONTEXT adapter=$ADAPTER_MODE" >&2
+echo "[slurm] proto on=$PROTOTYPE_ALIGNMENT mom=$PROTOTYPE_MOMENTUM pull=$PROTOTYPE_PULL_WEIGHT push=$PROTOTYPE_PUSH_WEIGHT margin=$PROTOTYPE_MARGIN" >&2
+echo "[slurm] moe legacy=$USE_LEGACY_MOE mode=$MOE_SYSTEM_MODE layers=$MOE_NUM_LAYERS dispatch=$MOE_ROUTER_DISPATCH_MODE attnres_depth_concat=$MOE_USE_ATTNRES_DEPTH_ROUTER_CONCAT" >&2
+if [[ "$STAGE" == "A3b" || "$STAGE" == "A3c" || "$STAGE" == "A3d" || "$STAGE" == "A3e" || "$STAGE" == "B1a" ]]; then
+  echo "[slurm] note: A3b/A3c/A3d/A3e/B1a are bundle stages; per-run flags below intentionally override some global defaults." >&2
 fi
 
 if [[ ! -f "$FACED_META_CSV" ]]; then
@@ -428,9 +442,27 @@ fi
 if [[ "$ATTNRES_SUBJECT_GATES" == "1" ]]; then
   EXTRA_FLAGS+=(--attnres_subject_gates)
 fi
+if [[ "$ATTNRES_EEG_COND_GATES" == "1" ]]; then
+  EXTRA_FLAGS+=(--attnres_eeg_cond_gates)
+else
+  EXTRA_FLAGS+=(--no-attnres_eeg_cond_gates)
+fi
+EXTRA_FLAGS+=(--attnres_eeg_gate_scale "$ATTNRES_EEG_GATE_SCALE")
+EXTRA_FLAGS+=(--attnres_diag_interval "$ATTNRES_DIAG_INTERVAL")
+
+if [[ "$PROTOTYPE_ALIGNMENT" == "1" ]]; then
+  EXTRA_FLAGS+=(--prototype_alignment)
+else
+  EXTRA_FLAGS+=(--no-prototype_alignment)
+fi
+EXTRA_FLAGS+=(--prototype_momentum "$PROTOTYPE_MOMENTUM")
+EXTRA_FLAGS+=(--prototype_pull_weight "$PROTOTYPE_PULL_WEIGHT")
+EXTRA_FLAGS+=(--prototype_push_weight "$PROTOTYPE_PUSH_WEIGHT")
+EXTRA_FLAGS+=(--prototype_margin "$PROTOTYPE_MARGIN")
+EXTRA_FLAGS+=(--prototype_start_epoch "$PROTOTYPE_START_EPOCH")
 
 # Legacy MoE compatibility path
-if [[ "$USE_LEGACY_MOE" == "1" && "$STAGE" != "A3b" && "$STAGE" != "A3c" && "$STAGE" != "A3d" && "$STAGE" != "A3e" ]]; then
+if [[ "$USE_LEGACY_MOE" == "1" && "$STAGE" != "A3b" && "$STAGE" != "A3c" && "$STAGE" != "A3d" && "$STAGE" != "A3e" && "$STAGE" != "B1a" ]]; then
   if [[ "$HYBRID_MOE_ADAPTER" != "1" ]]; then
     ADAPTER_MODE="none"
     USE_SUBJECT_SUMMARY="0"
@@ -858,6 +890,98 @@ elif [[ "$STAGE" == "A3e" ]]; then
   echo "[A3e][delta] vs=baseline target=dense_soft_no_depth d_best_acc=$(calc_delta "$c0_acc" "$b_acc") d_best_kappa=$(calc_delta "$c0_kappa" "$b_kappa")"
   echo "[A3e][delta] vs=baseline target=dense_soft_with_depth d_best_acc=$(calc_delta "$c1_acc" "$b_acc") d_best_kappa=$(calc_delta "$c1_kappa" "$b_kappa")"
   echo "[A3e][delta] vs=dense_soft_no_depth target=dense_soft_with_depth d_best_acc=$(calc_delta "$c1_acc" "$c0_acc") d_best_kappa=$(calc_delta "$c1_kappa" "$c0_kappa")"
+elif [[ "$STAGE" == "B1a" ]]; then
+  B1A_LOG_DIR="${B1A_LOG_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CBraMod/logs/out/b1a_${SLURM_JOB_ID}}"
+  mkdir -p "$B1A_LOG_DIR"
+
+  if [[ -z "$CHANNEL_CONTEXT_FILE" ]] || [[ ! -f "$CHANNEL_CONTEXT_FILE" ]]; then
+    echo "[slurm] B1a requires a valid CHANNEL_CONTEXT_FILE for EEG-conditioned AttnRes runs." >&2
+    exit 2
+  fi
+
+  declare -a B1A_ROWS=()
+  declare -A B1A_BEST_ACC=()
+  declare -A B1A_BEST_KAPPA=()
+
+  run_and_collect_b1a() {
+    local label="$1"
+    shift
+    local run_model_dir="$model_dir/$label"
+    local run_log="$B1A_LOG_DIR/${label}.log"
+    mkdir -p "$run_model_dir"
+
+    local -a run_flags=("${EXTRA_FLAGS[@]}")
+    run_flags+=("$@")
+
+    echo "[B1a] start label=$label model_dir=$run_model_dir" >&2
+    run_finetune "$run_model_dir" "${run_flags[@]}" 2>&1 | tee "$run_log"
+
+    local row
+    row=$(summarize_log "$label" "$run_log") || exit 3
+    B1A_ROWS+=("$row")
+
+    local _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static _runtime _ctxfile
+    read -r _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _static _runtime _ctxfile <<< "$row"
+    B1A_BEST_ACC["$_label"]="$_best_acc"
+    B1A_BEST_KAPPA["$_label"]="$_best_kappa"
+  }
+
+  # 0) Baseline: adapter + AttnRes only
+  run_and_collect_b1a "B1a_exp0_baseline" \
+    --adapter_mode subject_domain \
+    --no-adapter_use_subject_id \
+    --no-attnres_eeg_cond_gates \
+    --no-prototype_alignment
+
+  # 1) Baseline + EEG-conditioned AttnRes
+  run_and_collect_b1a "B1a_exp1_eeg_attnres" \
+    --adapter_mode subject_domain \
+    --no-adapter_use_subject_id \
+    --eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE" \
+    --attnres_eeg_cond_gates \
+    --attnres_eeg_gate_scale "$ATTNRES_EEG_GATE_SCALE" \
+    --no-prototype_alignment
+
+  # 2) Baseline + prototype alignment
+  run_and_collect_b1a "B1a_exp2_prototype" \
+    --adapter_mode subject_domain \
+    --no-adapter_use_subject_id \
+    --no-attnres_eeg_cond_gates \
+    --prototype_alignment
+
+  # 3) Baseline + EEG-conditioned AttnRes + prototype alignment
+  run_and_collect_b1a "B1a_exp3_eeg_plus_prototype" \
+    --adapter_mode subject_domain \
+    --no-adapter_use_subject_id \
+    --eeg_channel_context --channel_context_file "$CHANNEL_CONTEXT_FILE" \
+    --attnres_eeg_cond_gates \
+    --attnres_eeg_gate_scale "$ATTNRES_EEG_GATE_SCALE" \
+    --prototype_alignment
+
+  calc_delta() {
+    awk -v a="$1" -v b="$2" 'BEGIN {printf("%.5f", a - b)}'
+  }
+
+  echo "[B1a][summary] log_dir=$B1A_LOG_DIR"
+  echo "[B1a][summary] label best_acc best_kappa last_ep last_acc last_kappa used_static_fields runtime_state context_file"
+  for row in "${B1A_ROWS[@]}"; do
+    echo "[B1a][summary] $row"
+  done
+
+  b_acc="${B1A_BEST_ACC[B1a_exp0_baseline]}"
+  b_kappa="${B1A_BEST_KAPPA[B1a_exp0_baseline]}"
+  e_acc="${B1A_BEST_ACC[B1a_exp1_eeg_attnres]}"
+  e_kappa="${B1A_BEST_KAPPA[B1a_exp1_eeg_attnres]}"
+  p_acc="${B1A_BEST_ACC[B1a_exp2_prototype]}"
+  p_kappa="${B1A_BEST_KAPPA[B1a_exp2_prototype]}"
+  ep_acc="${B1A_BEST_ACC[B1a_exp3_eeg_plus_prototype]}"
+  ep_kappa="${B1A_BEST_KAPPA[B1a_exp3_eeg_plus_prototype]}"
+
+  echo "[B1a][delta] vs=exp0_baseline target=exp1_eeg_attnres d_best_acc=$(calc_delta "$e_acc" "$b_acc") d_best_kappa=$(calc_delta "$e_kappa" "$b_kappa")"
+  echo "[B1a][delta] vs=exp0_baseline target=exp2_prototype d_best_acc=$(calc_delta "$p_acc" "$b_acc") d_best_kappa=$(calc_delta "$p_kappa" "$b_kappa")"
+  echo "[B1a][delta] vs=exp0_baseline target=exp3_eeg_plus_prototype d_best_acc=$(calc_delta "$ep_acc" "$b_acc") d_best_kappa=$(calc_delta "$ep_kappa" "$b_kappa")"
+  echo "[B1a][delta] vs=exp1_eeg_attnres target=exp3_eeg_plus_prototype d_best_acc=$(calc_delta "$ep_acc" "$e_acc") d_best_kappa=$(calc_delta "$ep_kappa" "$e_kappa")"
+  echo "[B1a][delta] vs=exp2_prototype target=exp3_eeg_plus_prototype d_best_acc=$(calc_delta "$ep_acc" "$p_acc") d_best_kappa=$(calc_delta "$ep_kappa" "$p_kappa")"
 elif [[ "$STAGE" == "A3c" || "$STAGE" == "A3d" ]]; then
   BUNDLE_TAG="$STAGE"
   BUNDLE_TAG_LOWER="$(printf '%s' "$BUNDLE_TAG" | tr '[:upper:]' '[:lower:]')"

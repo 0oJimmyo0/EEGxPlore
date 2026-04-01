@@ -18,6 +18,7 @@ from models.moe import (
     set_moe_train_epoch,
     set_moe_diagnostic_labels,
 )
+from models.prototype_alignment import PrototypeBank
 
 try:
     import psutil
@@ -82,6 +83,20 @@ def _forward_with_optional_meta(model, x, batch_meta):
         return model(x, batch_meta=batch_meta)
     except TypeError:
         return model(x)
+
+
+def _forward_with_shared_feature(model, x, batch_meta):
+    try:
+        if batch_meta is None:
+            out = model(x, return_features=True)
+        else:
+            out = model(x, batch_meta=batch_meta, return_features=True)
+        if isinstance(out, tuple) and len(out) == 2:
+            return out
+    except TypeError:
+        pass
+    logits = _forward_with_optional_meta(model, x, batch_meta)
+    return logits, None
 
 
 def _extract_batch_meta(batch):
@@ -279,6 +294,29 @@ class Trainer(object):
             self.optimizer, T_max=self.params.epochs * self.data_length, eta_min=1e-6
         )
         self.replay_buffer = ReplayBuffer(getattr(self.params, "continual_memory_size", 0))
+        self.prototype_bank = None
+        self._prototype_active = bool(getattr(self.params, "prototype_alignment", False))
+        if self._prototype_active and int(getattr(self.params, "num_of_classes", 0)) > 1:
+            feat_dim = 200
+            bb = getattr(self.model, "backbone", None)
+            pe = getattr(bb, "patch_embedding", None)
+            if pe is not None and hasattr(pe, "d_model"):
+                feat_dim = int(pe.d_model)
+            self.prototype_bank = PrototypeBank(
+                num_classes=int(self.params.num_of_classes),
+                feat_dim=feat_dim,
+                momentum=float(getattr(self.params, "prototype_momentum", 0.95)),
+            ).cuda()
+        print(
+            "[mechanism-summary] "
+            f"eeg_conditioned_attnres={getattr(self.params, 'attnres_eeg_cond_gates', False)} "
+            f"subject_conditioned_attnres={getattr(self.params, 'attnres_subject_gates', False)} "
+            f"prototype_alignment={self._prototype_active} "
+            f"moe_active={getattr(self.params, 'moe', False)} "
+            f"eeg_context_active={getattr(self.params, 'eeg_channel_context', False)} "
+            f"subject_summary_active={getattr(self.params, 'use_subject_summary', False)}",
+            flush=True,
+        )
 
         print(
             "[optim] "
@@ -341,6 +379,46 @@ class Trainer(object):
             return loss
         aux = bb.moe_auxiliary_loss()
         return loss + aux
+
+    def _prototype_loss(self, shared_feat, y, epoch_one_based: int):
+        device = next(self.model.parameters()).device
+        z = torch.zeros((), device=device)
+        if self.prototype_bank is None or shared_feat is None:
+            return z, {}
+        if epoch_one_based < int(getattr(self.params, "prototype_start_epoch", 1)):
+            return z, {}
+        losses = self.prototype_bank.losses(
+            shared_feat,
+            y,
+            pull_weight=float(getattr(self.params, "prototype_pull_weight", 0.05)),
+            push_weight=float(getattr(self.params, "prototype_push_weight", 0.02)),
+            margin=float(getattr(self.params, "prototype_margin", 0.1)),
+        )
+        return losses["total"], {
+            "pull": float(losses["pull"].detach().item()),
+            "push": float(losses["push"].detach().item()),
+            "total": float(losses["total"].detach().item()),
+        }
+
+    @torch.no_grad()
+    def _prototype_update(self, shared_feat, y):
+        if self.prototype_bank is None or shared_feat is None:
+            return
+        self.prototype_bank.update(shared_feat, y)
+
+    def _print_attnres_diagnostics(self, epoch_one_based: int) -> None:
+        interval = int(getattr(self.params, "attnres_diag_interval", 1))
+        if interval <= 0 or (epoch_one_based % interval) != 0:
+            return
+        bb = getattr(self.model, "backbone", None)
+        if bb is None or not hasattr(bb, "attnres_gate_diagnostics"):
+            return
+        diag = bb.attnres_gate_diagnostics()
+        if not diag:
+            return
+        keys = sorted(diag.keys())
+        preview = " ".join([f"{k}={diag[k]:.4f}" for k in keys[:14]])
+        print(f"[attnres][diag] ep={epoch_one_based} {preview}", flush=True)
 
     def _accumulate_moe_train_diag(self, agg: Optional[Dict[str, Any]]) -> None:
         if not isinstance(agg, dict):
@@ -631,7 +709,7 @@ class Trainer(object):
                         x = x.cuda()
                         y = y.cuda()
                         batch_meta = _move_meta_to_cuda(_extract_batch_meta(batch))
-                        pred = _forward_with_optional_meta(self.model, x, batch_meta)
+                        pred, shared_feat = _forward_with_shared_feature(self.model, x, batch_meta)
                         self._accumulate_moe_train_diag(moe_train_agg)
                         if train_first_snap is None and getattr(self.params, 'moe', False):
                             train_first_snap = self._collect_moe_snapshot()
@@ -650,6 +728,8 @@ class Trainer(object):
                             loss = self.criterion(pred.transpose(1, 2), y)
                         else:
                             loss = self.criterion(pred, y)
+                        ploss, pstats = self._prototype_loss(shared_feat, y, epoch + 1)
+                        loss = loss + ploss
                         loss = self._add_moe_auxiliary_loss(loss)
                         continual_penalty, continual_stats = self._continual_replay_penalty("multiclass")
                         loss = loss + continual_penalty
@@ -668,12 +748,15 @@ class Trainer(object):
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                         self.optimizer.step()
                         self.optimizer_scheduler.step()
+                        self._prototype_update(shared_feat, y)
                         self._continual_add_current_batch(x, y, batch_meta, pred)
                         train_steps += 1
                         if train_steps % 50 == 0:
                             _mem_report(f"train_step ep={epoch + 1} batch={batch_idx} step={train_steps}", md)
                         if train_steps % 100 == 0 and continual_stats:
                             print(f"[continual] step={train_steps} {continual_stats}", flush=True)
+                        if train_steps % 100 == 0 and pstats:
+                            print(f"[prototype][train] step={train_steps} {pstats}", flush=True)
                     except RuntimeError as e:
                         err = str(e).lower()
                         if "out of memory" in err:
@@ -713,6 +796,10 @@ class Trainer(object):
                     flush=True,
                 )
                 self._print_moe_train_summary(epoch + 1, moe_train_agg)
+                self._print_attnres_diagnostics(epoch + 1)
+                if self.prototype_bank is not None:
+                    pdiag = self.prototype_bank.diagnostics()
+                    print(f"[prototype][bank] ep={epoch + 1} {pdiag}", flush=True)
 
                 lr_cur = self.optimizer.param_groups[0]["lr"]
 
@@ -763,6 +850,15 @@ class Trainer(object):
                                 gate_vals.append(f"L{i}:" + ",".join(parts))
                         if len(gate_vals) > 0:
                             print("[Gate values] " + " | ".join(gate_vals))
+                    if self.prototype_bank is not None:
+                        val_diag = getattr(self.val_eval, "last_multiclass_diag", None)
+                        sid = None
+                        if isinstance(val_diag, dict):
+                            sid_raw = val_diag.get("subject_ids")
+                            if torch.is_tensor(sid_raw):
+                                sid = sid_raw
+                        pdiag = self.prototype_bank.diagnostics(subject_ids=sid)
+                        print(f"[prototype][val] ep={epoch + 1} {pdiag}", flush=True)
                     print(cm)
                     val_hist = np.asarray(cm).sum(axis=0).astype(int).tolist()
                     val_true_hist = np.asarray(cm).sum(axis=1).astype(int).tolist()

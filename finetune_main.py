@@ -92,6 +92,24 @@ def main():
         help='Use subject/domain adapter conditioning to modulate AttnRes gates per sample. '
              'Only effective when --attnres_gated is enabled and adapter_mode is subject_domain.',
     )
+    parser.add_argument(
+        '--attnres_eeg_cond_gates',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Use compact EEG context to modulate AttnRes gates in the shared trunk.',
+    )
+    parser.add_argument(
+        '--attnres_eeg_gate_scale',
+        type=float,
+        default=0.1,
+        help='Scale for EEG/subject-conditioned AttnRes gate deltas after tanh.',
+    )
+    parser.add_argument(
+        '--attnres_diag_interval',
+        type=int,
+        default=1,
+        help='Epoch interval for detailed AttnRes gate diagnostics (<=0 disables periodic print).',
+    )
 
     parser.add_argument(
     '--attnres_start_layer',
@@ -242,6 +260,42 @@ def main():
         type=float,
         default=2.0,
         help='Temperature for multiclass replay distillation.',
+    )
+    parser.add_argument(
+        '--prototype_alignment',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Enable running class-prototype alignment on shared pre-classifier features.',
+    )
+    parser.add_argument(
+        '--prototype_momentum',
+        type=float,
+        default=0.95,
+        help='Momentum for running class prototype updates.',
+    )
+    parser.add_argument(
+        '--prototype_pull_weight',
+        type=float,
+        default=0.05,
+        help='Weight for sample-to-class prototype pull loss.',
+    )
+    parser.add_argument(
+        '--prototype_push_weight',
+        type=float,
+        default=0.02,
+        help='Weight for hard-negative push margin loss vs non-target prototypes.',
+    )
+    parser.add_argument(
+        '--prototype_margin',
+        type=float,
+        default=0.1,
+        help='Margin for prototype hard-negative push loss.',
+    )
+    parser.add_argument(
+        '--prototype_start_epoch',
+        type=int,
+        default=1,
+        help='First epoch index (1-based) to activate prototype alignment.',
     )
 
     # Deprecated/legacy MoE path retained for backward compatibility.
@@ -557,12 +611,35 @@ def main():
             "Subject-conditioned gates are disabled unless --attnres_gated is enabled.",
             flush=True,
         )
+    if params.attnres_eeg_cond_gates and not params.attnres_gated:
+        print(
+            "[warning] attnres_eeg_cond_gates=True but attnres_gated=False. "
+            "EEG-conditioned gates are disabled unless --attnres_gated is enabled.",
+            flush=True,
+        )
+    if params.attnres_eeg_cond_gates and not params.eeg_channel_context:
+        raise ValueError("--attnres_eeg_cond_gates requires --eeg_channel_context.")
+    if params.attnres_eeg_gate_scale < 0:
+        raise ValueError("--attnres_eeg_gate_scale must be >= 0.")
+    if params.attnres_diag_interval < 0:
+        raise ValueError("--attnres_diag_interval must be >= 0.")
+    if params.prototype_momentum < 0 or params.prototype_momentum >= 1:
+        raise ValueError("--prototype_momentum must be in [0, 1).")
+    if params.prototype_pull_weight < 0 or params.prototype_push_weight < 0:
+        raise ValueError("prototype loss weights must be >= 0.")
+    if params.prototype_margin < 0:
+        raise ValueError("--prototype_margin must be >= 0.")
+    if params.prototype_start_epoch < 1:
+        raise ValueError("--prototype_start_epoch must be >= 1.")
     print(params)
     print(
         "[ablation-config] "
         f"attnres_variant={params.attnres_variant} "
         f"attnres_gated={params.attnres_gated} "
         f"attnres_subject_gates={params.attnres_subject_gates} "
+        f"attnres_eeg_cond_gates={params.attnres_eeg_cond_gates} "
+        f"attnres_eeg_gate_scale={params.attnres_eeg_gate_scale} "
+        f"attnres_diag_interval={params.attnres_diag_interval} "
         f"eeg_channel_context={params.eeg_channel_context} "
         f"subject_adapters={params.subject_adapter} "
         f"use_subject_summary={params.use_subject_summary} "
@@ -592,7 +669,13 @@ def main():
         f"moe_router_soft_warmup_epochs={params.moe_router_soft_warmup_epochs} "
         f"moe_router_warmup_mode={params.moe_router_warmup_mode} "
         f"moe_router_warmup_epochs={params.moe_router_warmup_epochs} "
-        f"moe_router_warmup_lr_scale={params.moe_router_warmup_lr_scale}",
+        f"moe_router_warmup_lr_scale={params.moe_router_warmup_lr_scale} "
+        f"prototype_alignment={params.prototype_alignment} "
+        f"prototype_momentum={params.prototype_momentum} "
+        f"prototype_pull_weight={params.prototype_pull_weight} "
+        f"prototype_push_weight={params.prototype_push_weight} "
+        f"prototype_margin={params.prototype_margin} "
+        f"prototype_start_epoch={params.prototype_start_epoch}",
         flush=True,
     )
 

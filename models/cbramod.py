@@ -40,6 +40,8 @@ class CBraMod(nn.Module):
         attnres_gate_init=0.0,
         attnres_start_layer=0,
         attnres_subject_gates: bool = False,
+        attnres_eeg_cond_gates: bool = False,
+        attnres_eeg_gate_scale: float = 0.1,
         dropout=0.1,
         use_moe=False,
         moe_num_layers=2,
@@ -102,6 +104,7 @@ class CBraMod(nn.Module):
         self._moe_use_eeg_summary_router_concat_spatial = bool(moe_use_eeg_summary_router_concat_spatial)
         self._moe_use_eeg_summary_router_concat_spectral = bool(moe_use_eeg_summary_router_concat_spectral)
         self.moe_eeg_summary_dim = 0
+        self.attnres_eeg_context_dim = 0
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         channel_ctx_data = {}
@@ -133,6 +136,7 @@ class CBraMod(nn.Module):
         coords_dim = int(self.channel_context_encoder.coords.shape[1])
         # EEG summary = coords_mean + coords_std + montage_mean + region_nonzero + normalized_channel_count
         self.moe_eeg_summary_dim = (2 * coords_dim) + 3
+        self.attnres_eeg_context_dim = self.moe_eeg_summary_dim
         if self.metadata_debug:
             status = bool(self.channel_context_encoder.use_channel_context)
             reason = "enabled_and_valid" if status else "disabled_by_flag"
@@ -283,6 +287,9 @@ class CBraMod(nn.Module):
                         attnres_gate_init=attnres_gate_init,
                         attnres_start_layer=attnres_start_layer,
                         attnres_subject_gates=attnres_subject_gates,
+                        attnres_eeg_cond_gates=attnres_eeg_cond_gates,
+                        attnres_eeg_context_dim=self.attnres_eeg_context_dim,
+                        attnres_eeg_gate_scale=attnres_eeg_gate_scale,
                         moe_ffn=moe_mod,
                         subject_adapter=adapter_mod,
                     )
@@ -311,6 +318,9 @@ class CBraMod(nn.Module):
                 attnres_gate_init=attnres_gate_init,
                 attnres_start_layer=attnres_start_layer,
                 attnres_subject_gates=attnres_subject_gates,
+                attnres_eeg_cond_gates=attnres_eeg_cond_gates,
+                attnres_eeg_context_dim=self.attnres_eeg_context_dim,
+                attnres_eeg_gate_scale=attnres_eeg_gate_scale,
                 subject_adapter=None,
             )
 
@@ -330,6 +340,9 @@ class CBraMod(nn.Module):
                         attnres_gate_init=attnres_gate_init,
                         attnres_start_layer=attnres_start_layer,
                         attnres_subject_gates=attnres_subject_gates,
+                        attnres_eeg_cond_gates=attnres_eeg_cond_gates,
+                        attnres_eeg_context_dim=self.attnres_eeg_context_dim,
+                        attnres_eeg_gate_scale=attnres_eeg_gate_scale,
                         subject_adapter=(
                             SubjectDomainAdapter(
                                 d_model=d_model,
@@ -402,7 +415,16 @@ class CBraMod(nn.Module):
         tok_psd = None
         tok_meta = None
         tok_eeg = None
-        tok_adapter = set_adapter_batch_meta(batch_meta if isinstance(batch_meta, dict) else None)
+        attnres_meta = dict(batch_meta) if isinstance(batch_meta, dict) else {}
+        if self.channel_context_encoder.use_channel_context:
+            bsz = int(x.shape[0])
+            attnres_meta["eeg_context_summary"] = self._build_moe_eeg_router_summary(
+                batch_meta,
+                x.device,
+                x.dtype,
+                bsz,
+            )
+        tok_adapter = set_adapter_batch_meta(attnres_meta if attnres_meta else None)
         if self.metadata_debug and not self._metadata_runtime_logged:
             present = sorted(list(batch_meta.keys())) if isinstance(batch_meta, dict) else []
             print(
@@ -461,6 +483,25 @@ class CBraMod(nn.Module):
             if tok_eeg is not None:
                 reset_moe_eeg_router_summary(tok_eeg)
             reset_adapter_batch_meta(tok_adapter)
+
+    def attnres_gate_diagnostics(self) -> Dict[str, float]:
+        diag: Dict[str, float] = {}
+        if not hasattr(self, "encoder"):
+            return diag
+        for idx, layer in enumerate(self.encoder.layers):
+            gs = getattr(layer, "last_gate_stats", None)
+            if not isinstance(gs, dict):
+                continue
+            for k, v in gs.items():
+                diag[f"L{idx}_{k}"] = float(v)
+        return diag
+
+    @staticmethod
+    def pooled_shared_feature(feats: torch.Tensor) -> torch.Tensor:
+        # Shared pre-classifier representation used for prototype alignment.
+        if feats.ndim != 4:
+            raise ValueError(f"Expected [B,C,S,D], got {tuple(feats.shape)}")
+        return feats.mean(dim=(1, 2))
 
     def moe_auxiliary_loss(self) -> torch.Tensor:
         """Combined MoE auxiliary loss from all active MoE layers."""
@@ -556,6 +597,8 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'attnres_gate_init': getattr(param, 'attnres_gate_init', 0.0),
         'attnres_start_layer': getattr(param, 'attnres_start_layer', 0),
         'attnres_subject_gates': getattr(param, 'attnres_subject_gates', False),
+        'attnres_eeg_cond_gates': getattr(param, 'attnres_eeg_cond_gates', False),
+        'attnres_eeg_gate_scale': getattr(param, 'attnres_eeg_gate_scale', 0.1),
         'use_moe': getattr(param, 'moe', False),
         'moe_num_layers': getattr(param, 'moe_num_layers', 2),
         'moe_num_experts': getattr(param, 'moe_num_experts', 4),
