@@ -42,6 +42,8 @@ class CBraMod(nn.Module):
         attnres_subject_gates: bool = False,
         attnres_eeg_cond_gates: bool = False,
         attnres_eeg_gate_scale: float = 0.1,
+        attnres_eeg_depth_cond: bool = False,
+        attnres_eeg_depth_cond_scale: float = 1.0,
         dropout=0.1,
         use_moe=False,
         moe_num_layers=2,
@@ -290,6 +292,8 @@ class CBraMod(nn.Module):
                         attnres_eeg_cond_gates=attnres_eeg_cond_gates,
                         attnres_eeg_context_dim=self.attnres_eeg_context_dim,
                         attnres_eeg_gate_scale=attnres_eeg_gate_scale,
+                        attnres_eeg_depth_cond=attnres_eeg_depth_cond,
+                        attnres_eeg_depth_cond_scale=attnres_eeg_depth_cond_scale,
                         moe_ffn=moe_mod,
                         subject_adapter=adapter_mod,
                     )
@@ -321,6 +325,8 @@ class CBraMod(nn.Module):
                 attnres_eeg_cond_gates=attnres_eeg_cond_gates,
                 attnres_eeg_context_dim=self.attnres_eeg_context_dim,
                 attnres_eeg_gate_scale=attnres_eeg_gate_scale,
+                attnres_eeg_depth_cond=attnres_eeg_depth_cond,
+                attnres_eeg_depth_cond_scale=attnres_eeg_depth_cond_scale,
                 subject_adapter=None,
             )
 
@@ -343,6 +349,8 @@ class CBraMod(nn.Module):
                         attnres_eeg_cond_gates=attnres_eeg_cond_gates,
                         attnres_eeg_context_dim=self.attnres_eeg_context_dim,
                         attnres_eeg_gate_scale=attnres_eeg_gate_scale,
+                        attnres_eeg_depth_cond=attnres_eeg_depth_cond,
+                        attnres_eeg_depth_cond_scale=attnres_eeg_depth_cond_scale,
                         subject_adapter=(
                             SubjectDomainAdapter(
                                 d_model=d_model,
@@ -599,6 +607,8 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'attnres_subject_gates': getattr(param, 'attnres_subject_gates', False),
         'attnres_eeg_cond_gates': getattr(param, 'attnres_eeg_cond_gates', False),
         'attnres_eeg_gate_scale': getattr(param, 'attnres_eeg_gate_scale', 0.1),
+        'attnres_eeg_depth_cond': getattr(param, 'attnres_eeg_depth_cond', False),
+        'attnres_eeg_depth_cond_scale': getattr(param, 'attnres_eeg_depth_cond_scale', 1.0),
         'use_moe': getattr(param, 'moe', False),
         'moe_num_layers': getattr(param, 'moe_num_layers', 2),
         'moe_num_experts': getattr(param, 'moe_num_experts', 4),

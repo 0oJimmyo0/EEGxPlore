@@ -105,6 +105,18 @@ def main():
         help='Scale for EEG/subject-conditioned AttnRes gate deltas after tanh.',
     )
     parser.add_argument(
+        '--attnres_eeg_depth_cond',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Use EEG/context summary to condition AttnRes depth reuse selection (pre-attn) per sample.',
+    )
+    parser.add_argument(
+        '--attnres_eeg_depth_cond_scale',
+        type=float,
+        default=1.0,
+        help='Scale for EEG-conditioned AttnRes depth-selection bias terms.',
+    )
+    parser.add_argument(
         '--attnres_diag_interval',
         type=int,
         default=1,
@@ -619,8 +631,14 @@ def main():
         )
     if params.attnres_eeg_cond_gates and not params.eeg_channel_context:
         raise ValueError("--attnres_eeg_cond_gates requires --eeg_channel_context.")
+    if params.attnres_eeg_depth_cond and not params.eeg_channel_context:
+        raise ValueError("--attnres_eeg_depth_cond requires --eeg_channel_context.")
+    if params.attnres_eeg_depth_cond and params.attnres_variant not in ('pre_attn', 'full'):
+        raise ValueError("--attnres_eeg_depth_cond requires attnres_variant pre_attn or full.")
     if params.attnres_eeg_gate_scale < 0:
         raise ValueError("--attnres_eeg_gate_scale must be >= 0.")
+    if params.attnres_eeg_depth_cond_scale < 0:
+        raise ValueError("--attnres_eeg_depth_cond_scale must be >= 0.")
     if params.attnres_diag_interval < 0:
         raise ValueError("--attnres_diag_interval must be >= 0.")
     if params.prototype_momentum < 0 or params.prototype_momentum >= 1:
@@ -639,6 +657,8 @@ def main():
         f"attnres_subject_gates={params.attnres_subject_gates} "
         f"attnres_eeg_cond_gates={params.attnres_eeg_cond_gates} "
         f"attnres_eeg_gate_scale={params.attnres_eeg_gate_scale} "
+        f"attnres_eeg_depth_cond={params.attnres_eeg_depth_cond} "
+        f"attnres_eeg_depth_cond_scale={params.attnres_eeg_depth_cond_scale} "
         f"attnres_diag_interval={params.attnres_diag_interval} "
         f"eeg_channel_context={params.eeg_channel_context} "
         f"subject_adapters={params.subject_adapter} "

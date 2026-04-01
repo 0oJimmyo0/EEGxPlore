@@ -82,6 +82,8 @@ class TransformerEncoderLayer(nn.Module):
                  attnres_eeg_cond_gates: bool = False,
                  attnres_eeg_context_dim: int = 0,
                  attnres_eeg_gate_scale: float = 0.1,
+                 attnres_eeg_depth_cond: bool = False,
+                 attnres_eeg_depth_cond_scale: float = 1.0,
                  moe_ffn: Optional[nn.Module] = None,
                  subject_adapter: Optional[nn.Module] = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
@@ -121,6 +123,8 @@ class TransformerEncoderLayer(nn.Module):
         self.attnres_eeg_cond_gates = bool(attnres_eeg_cond_gates)
         self.attnres_eeg_context_dim = int(attnres_eeg_context_dim)
         self.attnres_eeg_gate_scale = float(attnres_eeg_gate_scale)
+        self.attnres_eeg_depth_cond = bool(attnres_eeg_depth_cond)
+        self.attnres_eeg_depth_cond_scale = float(attnres_eeg_depth_cond_scale)
         self.last_gate_stats: Dict[str, float] = {}
 
         if self.use_pre_attnres:
@@ -138,6 +142,11 @@ class TransformerEncoderLayer(nn.Module):
                     self.pre_attn_eeg_gate_cond = nn.Linear(self.attnres_eeg_context_dim, 1, bias=True)
                     nn.init.zeros_(self.pre_attn_eeg_gate_cond.weight)
                     nn.init.zeros_(self.pre_attn_eeg_gate_cond.bias)
+                self.pre_attn_eeg_depth_cond = None
+                if self.attnres_eeg_depth_cond and self.attnres_eeg_context_dim > 0:
+                    self.pre_attn_eeg_depth_cond = nn.Linear(self.attnres_eeg_context_dim, 2, bias=True)
+                    nn.init.zeros_(self.pre_attn_eeg_depth_cond.weight)
+                    nn.init.zeros_(self.pre_attn_eeg_depth_cond.bias)
 
         if self.use_pre_mlpres:
             self.pre_mlp_res = FullAttnRes(d_model)
@@ -245,6 +254,40 @@ class TransformerEncoderLayer(nn.Module):
             self.last_gate_stats[f'{prefix}_eeg_delta_std'] = float(ed.std(unbiased=False).item())
             self.last_gate_stats[f'{prefix}_eeg_delta_norm'] = float(ed.norm().item())
 
+    def _apply_eeg_depth_condition(self, alpha: Tensor, x_ref: Tensor) -> Tensor:
+        if not self.attnres_eeg_depth_cond:
+            return alpha
+        depth_proj = getattr(self, 'pre_attn_eeg_depth_cond', None)
+        if depth_proj is None:
+            return alpha
+        ctx = self._eeg_context_tensor(x_ref)
+        if ctx is None:
+            return alpha
+        n_depth = int(alpha.shape[0])
+        depth_bias = depth_proj(ctx)
+        if depth_bias.ndim != 2:
+            return alpha
+        if depth_bias.shape[-1] != 2:
+            return alpha
+
+        pos = torch.linspace(0.0, 1.0, steps=n_depth, device=alpha.device, dtype=alpha.dtype)
+        pos_center = pos - 0.5
+        coeff = self.attnres_eeg_depth_cond_scale * torch.tanh(depth_bias).to(dtype=alpha.dtype)
+        depth_curve = (
+            coeff[:, 0:1] * pos.view(1, -1)
+            + coeff[:, 1:2] * (pos_center.view(1, -1) ** 2)
+        )
+        depth_bias = depth_curve.transpose(0, 1).unsqueeze(-1).unsqueeze(-1)
+
+        log_alpha = torch.log(alpha.clamp_min(1e-10))
+        alpha_cond = torch.softmax(log_alpha + depth_bias, dim=0)
+
+        db = depth_bias.detach().float()
+        self.last_gate_stats['pre_attn_depth_cond_mean'] = float(db.mean().item())
+        self.last_gate_stats['pre_attn_depth_cond_std'] = float(db.std(unbiased=False).item())
+        self.last_gate_stats['pre_attn_depth_cond_norm'] = float(db.norm().item())
+        return alpha_cond
+
     @staticmethod
     def _attnres_depth_summary(alpha: Tensor) -> Tensor:
         # alpha: [N, B, C, S] softmax over depth N
@@ -315,6 +358,10 @@ class TransformerEncoderLayer(nn.Module):
         if use_pre_attn_here:
             baseline_in = x
             attnres_in, attnres_alpha = self.pre_attn_res(sources, return_alpha=True)
+            attnres_alpha = self._apply_eeg_depth_condition(attnres_alpha, baseline_in)
+            if self.attnres_eeg_depth_cond:
+                src_stack = torch.stack(sources, dim=0)
+                attnres_in = torch.sum(attnres_alpha.unsqueeze(-1) * src_stack, dim=0)
             attnres_depth_summary = self._attnres_depth_summary(attnres_alpha).to(
                 device=baseline_in.device,
                 dtype=baseline_in.dtype,
