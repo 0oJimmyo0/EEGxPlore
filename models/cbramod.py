@@ -1,4 +1,4 @@
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 import torch
 import torch.nn as nn
@@ -13,6 +13,7 @@ from models.adapters import (
     set_adapter_batch_meta,
 )
 from models.moe import (
+    PSD_ROUTER_DIM,
     TypedCapacityDomainMoEFFN,
     compact_psd_bandpowers,
     reset_moe_eeg_router_summary,
@@ -100,6 +101,7 @@ class CBraMod(nn.Module):
         self.metadata_debug = bool(metadata_debug)
         self._metadata_runtime_logged = False
         self._channel_context_runtime_logged = False
+        self._eeg_summary_runtime_logged = False
         self._adapter_use_subject_id = bool(use_subject_id_metadata)
         self._adapter_use_age_bucket = bool(use_age_bucket_metadata)
         self._adapter_use_segment_bucket = bool(use_segment_bucket_metadata)
@@ -136,8 +138,10 @@ class CBraMod(nn.Module):
             metadata_debug=metadata_debug,
         )
         coords_dim = int(self.channel_context_encoder.coords.shape[1])
-        # EEG summary = coords_mean + coords_std + montage_mean + region_nonzero + normalized_channel_count
-        self.moe_eeg_summary_dim = (2 * coords_dim) + 3
+        # EEG summary = static montage prior + compact per-sample signal summary.
+        self._eeg_static_summary_dim = (2 * coords_dim) + 3
+        self._eeg_dynamic_summary_dim = 4 + PSD_ROUTER_DIM
+        self.moe_eeg_summary_dim = self._eeg_static_summary_dim + self._eeg_dynamic_summary_dim
         self.attnres_eeg_context_dim = self.moe_eeg_summary_dim
         if self.metadata_debug:
             status = bool(self.channel_context_encoder.use_channel_context)
@@ -398,12 +402,20 @@ class CBraMod(nn.Module):
                 if isinstance(m, TypedCapacityDomainMoEFFN):
                     m._zero_specialist_output_weights()
 
-    def _build_moe_eeg_router_summary(self, batch_meta, device, dtype, batch_size: int) -> torch.Tensor:
+    def _build_moe_eeg_router_summary(
+        self,
+        x: torch.Tensor,
+        batch_meta,
+        device,
+        dtype,
+        psd_summary: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         chenc = self.channel_context_encoder
         num_ch = max(int(chenc.num_channels), 1)
         coords = chenc.coords.to(device=device, dtype=dtype)
         mm = chenc.montage_mask.to(device=device, dtype=dtype)
         rg = chenc.region_ids.to(device=device)
+        batch_size = int(x.shape[0])
 
         coords_mean = coords.mean(dim=0)
         coords_std = coords.std(dim=0, unbiased=False)
@@ -417,20 +429,53 @@ class CBraMod(nn.Module):
         else:
             cc = torch.full((batch_size, 1), float(num_ch), device=device, dtype=dtype)
         cc = cc / float(num_ch)
-        return torch.cat([static, cc], dim=-1)
+        static = torch.cat([static, cc], dim=-1)
+
+        x_stats = x.to(device=device, dtype=dtype)
+        mean_abs = x_stats.abs().mean(dim=(1, 2, 3), keepdim=True).view(batch_size, 1)
+        global_std = x_stats.std(dim=(1, 2, 3), unbiased=False, keepdim=True).view(batch_size, 1)
+        channel_energy = x_stats.pow(2).mean(dim=(2, 3)).sqrt()
+        channel_energy_std = channel_energy.std(dim=1, unbiased=False, keepdim=True)
+        segment_energy = x_stats.pow(2).mean(dim=(1, 3)).sqrt()
+        segment_energy_std = segment_energy.std(dim=1, unbiased=False, keepdim=True)
+        if psd_summary is None:
+            psd_summary = compact_psd_bandpowers(x_stats)
+        psd_summary = psd_summary.to(device=device, dtype=dtype)
+        dynamic = torch.cat(
+            [mean_abs, global_std, channel_energy_std, segment_energy_std, psd_summary],
+            dim=-1,
+        )
+
+        summary = torch.cat([static, dynamic], dim=-1)
+        if self.metadata_debug and not self._eeg_summary_runtime_logged:
+            feat_std = summary.detach().float().std(dim=0, unbiased=False).cpu().tolist()
+            print(
+                "[eeg-summary] "
+                f"dim={int(summary.shape[-1])} "
+                f"static_dim={self._eeg_static_summary_dim} "
+                f"dynamic_dim={self._eeg_dynamic_summary_dim} "
+                f"batch_std_mean={float(summary.detach().float().std(dim=0, unbiased=False).mean().item()):.6f} "
+                f"feature_std={[round(float(v), 6) for v in feat_std]}",
+                flush=True,
+            )
+            self._eeg_summary_runtime_logged = True
+        return summary
 
     def forward(self, x, mask=None, batch_meta=None):
         tok_psd = None
         tok_meta = None
         tok_eeg = None
+        psd_router = None
+        if self.channel_context_encoder.use_channel_context or (self.use_moe and self.moe_use_psd_router_features):
+            psd_router = compact_psd_bandpowers(x)
         attnres_meta = dict(batch_meta) if isinstance(batch_meta, dict) else {}
         if self.channel_context_encoder.use_channel_context:
-            bsz = int(x.shape[0])
             attnres_meta["eeg_context_summary"] = self._build_moe_eeg_router_summary(
+                x,
                 batch_meta,
                 x.device,
                 x.dtype,
-                bsz,
+                psd_summary=psd_router,
             )
         tok_adapter = set_adapter_batch_meta(attnres_meta if attnres_meta else None)
         if self.metadata_debug and not self._metadata_runtime_logged:
@@ -444,7 +489,7 @@ class CBraMod(nn.Module):
             )
             self._metadata_runtime_logged = True
         if self.use_moe and self.moe_use_psd_router_features:
-            tok_psd = set_moe_psd_router_features(compact_psd_bandpowers(x))
+            tok_psd = set_moe_psd_router_features(psd_router if psd_router is not None else compact_psd_bandpowers(x))
         if self.use_moe and self.moe_route_mode == "typed_capacity_domain":
             tok_meta = set_moe_faced_metadata(batch_meta)
         if (
@@ -452,8 +497,13 @@ class CBraMod(nn.Module):
             and (self._moe_use_eeg_summary_router_concat_spatial or self._moe_use_eeg_summary_router_concat_spectral)
             and self.channel_context_encoder.use_channel_context
         ):
-            bsz = int(x.shape[0])
-            eeg_summary = self._build_moe_eeg_router_summary(batch_meta, x.device, x.dtype, bsz)
+            eeg_summary = self._build_moe_eeg_router_summary(
+                x,
+                batch_meta,
+                x.device,
+                x.dtype,
+                psd_summary=psd_router,
+            )
             tok_eeg = set_moe_eeg_router_summary(eeg_summary)
         try:
             patch_emb = self.patch_embedding(x, mask)

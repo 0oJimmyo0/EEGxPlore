@@ -26,14 +26,25 @@ class FullAttnRes(nn.Module):
         self.norm = RMSNorm(d_model, eps=eps)
         self.query = nn.Parameter(torch.zeros(d_model))  # zero-init per paper
 
-    def forward(self, sources, return_alpha=False):
+    def forward(self, sources, return_alpha=False, query_delta=None):
         # [N, B, C, S, D]
         v = torch.stack(sources, dim=0)
         k = self.norm(v)
 
         # logits over depth dimension N
         # result: [N, B, C, S]
-        logits = torch.einsum('d,n...d->n...', self.query, k)
+        if query_delta is None:
+            logits = torch.einsum('d,n...d->n...', self.query, k)
+        else:
+            if query_delta.ndim != 2:
+                raise ValueError(f"query_delta must be [B,D], got {tuple(query_delta.shape)}")
+            if int(query_delta.shape[-1]) != int(self.query.shape[0]):
+                raise ValueError(
+                    "query_delta dim mismatch: "
+                    f"got {int(query_delta.shape[-1])}, expected {int(self.query.shape[0])}"
+                )
+            q = self.query.view(1, -1) + query_delta.to(device=v.device, dtype=v.dtype)
+            logits = (k * q.view(1, q.shape[0], 1, 1, q.shape[1])).sum(dim=-1)
 
         alpha = torch.softmax(logits, dim=0)
 

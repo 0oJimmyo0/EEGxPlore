@@ -10,9 +10,9 @@
 #SBATCH --time=0-04:00:00
 
 # Lean B1a launcher only.
-# Default run is 2x2 gate-isolation (prototype off):
+# Default run is 2x2 geometry-isolation (prototype off):
 # subject-only, eeg-only, both, neither.
-# Optional B1A_MODE=geometry_2x2 runs the same matrix for EEG depth-conditioning.
+# gate_2x2 remains available for scalar-gate ablations.
 
 set -euo pipefail
 
@@ -238,7 +238,39 @@ summarize_log() {
 
   local best_acc best_kappa last_ep last_acc last_kappa
   read -r best_acc best_kappa last_ep last_acc last_kappa <<< "$best_vals"
-  echo "$label $best_acc $best_kappa $last_ep $last_acc $last_kappa"
+
+  local test_vals test_acc test_kappa test_f1
+  test_vals=$(grep -E "^Test Evaluation:" "$log_path" | tail -n1 | \
+    awk -F'[,: ]+' '{printf("%.5f %.5f %.5f",$4,$6,$8)}')
+  if [[ -z "$test_vals" ]]; then
+    test_acc="nan"
+    test_kappa="nan"
+    test_f1="nan"
+  else
+    read -r test_acc test_kappa test_f1 <<< "$test_vals"
+  fi
+
+  local eeg_batch_std
+  eeg_batch_std=$(grep -E "\\[eeg-summary\\]" "$log_path" | tail -n1 | \
+    sed -n 's/.*batch_std_mean=\([0-9.eE+-]*\).*/\1/p')
+  eeg_batch_std="${eeg_batch_std:-nan}"
+
+  local max_query_delta_std
+  max_query_delta_std=$(grep -oE 'pre_attn_query_delta_std=[0-9.eE+-]+' "$log_path" | \
+    sed 's/.*=//' | sort -g | tail -n1)
+  max_query_delta_std="${max_query_delta_std:-nan}"
+
+  local max_depth_cond_std
+  max_depth_cond_std=$(grep -oE 'pre_attn_depth_cond_std=[0-9.eE+-]+' "$log_path" | \
+    sed 's/.*=//' | sort -g | tail -n1)
+  max_depth_cond_std="${max_depth_cond_std:-nan}"
+
+  local max_eeg_gate_std
+  max_eeg_gate_std=$(grep -oE 'pre_attn_eeg_delta_std=[0-9.eE+-]+' "$log_path" | \
+    sed 's/.*=//' | sort -g | tail -n1)
+  max_eeg_gate_std="${max_eeg_gate_std:-nan}"
+
+  echo "$label $best_acc $best_kappa $last_ep $last_acc $last_kappa $test_acc $test_kappa $test_f1 $eeg_batch_std $max_query_delta_std $max_depth_cond_std $max_eeg_gate_std"
 }
 
 calc_delta() {
@@ -268,7 +300,7 @@ run_and_collect_b1a() {
   B1A_ROWS+=("$row")
 
   local _label _best_acc _best_kappa _last_ep _last_acc _last_kappa
-  read -r _label _best_acc _best_kappa _last_ep _last_acc _last_kappa <<< "$row"
+  read -r _label _best_acc _best_kappa _last_ep _last_acc _last_kappa _rest <<< "$row"
   B1A_BEST_ACC["$_label"]="$_best_acc"
   B1A_BEST_KAPPA["$_label"]="$_best_kappa"
 }
@@ -396,7 +428,7 @@ else
 fi
 
 echo "[B1a][summary] log_dir=$B1A_LOG_DIR"
-echo "[B1a][summary] label best_acc best_kappa last_ep last_acc last_kappa"
+echo "[B1a][summary] label best_acc best_kappa last_ep last_acc last_kappa test_acc test_kappa test_f1 eeg_batch_std max_query_delta_std max_depth_cond_std max_eeg_gate_std"
 for row in "${B1A_ROWS[@]}"; do
   echo "[B1a][summary] $row"
 done

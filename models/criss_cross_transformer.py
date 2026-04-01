@@ -129,6 +129,15 @@ class TransformerEncoderLayer(nn.Module):
 
         if self.use_pre_attnres:
             self.pre_attn_res = FullAttnRes(d_model)
+            self.pre_attn_eeg_query_cond = None
+            self.pre_attn_eeg_depth_cond = None
+            if self.attnres_eeg_depth_cond and self.attnres_eeg_context_dim > 0:
+                self.pre_attn_eeg_query_cond = nn.Linear(self.attnres_eeg_context_dim, d_model, bias=True)
+                nn.init.zeros_(self.pre_attn_eeg_query_cond.weight)
+                nn.init.zeros_(self.pre_attn_eeg_query_cond.bias)
+                self.pre_attn_eeg_depth_cond = nn.Linear(self.attnres_eeg_context_dim, 2, bias=True)
+                nn.init.zeros_(self.pre_attn_eeg_depth_cond.weight)
+                nn.init.zeros_(self.pre_attn_eeg_depth_cond.bias)
             if self.attnres_gated:
                 self.pre_attn_gate = nn.Parameter(torch.tensor(float(attnres_gate_init)))
                 self.pre_attn_gate_cond = None
@@ -142,11 +151,6 @@ class TransformerEncoderLayer(nn.Module):
                     self.pre_attn_eeg_gate_cond = nn.Linear(self.attnres_eeg_context_dim, 1, bias=True)
                     nn.init.zeros_(self.pre_attn_eeg_gate_cond.weight)
                     nn.init.zeros_(self.pre_attn_eeg_gate_cond.bias)
-                self.pre_attn_eeg_depth_cond = None
-                if self.attnres_eeg_depth_cond and self.attnres_eeg_context_dim > 0:
-                    self.pre_attn_eeg_depth_cond = nn.Linear(self.attnres_eeg_context_dim, 2, bias=True)
-                    nn.init.zeros_(self.pre_attn_eeg_depth_cond.weight)
-                    nn.init.zeros_(self.pre_attn_eeg_depth_cond.bias)
 
         if self.use_pre_mlpres:
             self.pre_mlp_res = FullAttnRes(d_model)
@@ -237,6 +241,22 @@ class TransformerEncoderLayer(nn.Module):
         delta = gate_proj(ctx).view(-1, 1, 1, 1)
         return self.attnres_eeg_gate_scale * torch.tanh(delta)
 
+    def _eeg_query_delta(self, proj: Optional[nn.Module], x_ref: Tensor) -> Optional[Tensor]:
+        if proj is None:
+            return None
+        ctx = self._eeg_context_tensor(x_ref)
+        if ctx is None:
+            return None
+        delta = proj(ctx)
+        if delta.ndim != 2:
+            return None
+        delta = self.attnres_eeg_depth_cond_scale * torch.tanh(delta)
+        dd = delta.detach().float()
+        self.last_gate_stats['pre_attn_query_delta_mean'] = float(dd.mean().item())
+        self.last_gate_stats['pre_attn_query_delta_std'] = float(dd.std(unbiased=False).item())
+        self.last_gate_stats['pre_attn_query_delta_norm'] = float(dd.norm().item())
+        return delta.to(device=x_ref.device, dtype=x_ref.dtype)
+
     def _record_gate_stats(self, prefix: str, gate: Tensor, subject_delta: Optional[Tensor], eeg_delta: Optional[Tensor]) -> None:
         gd = gate.detach().float()
         self.last_gate_stats[f'{prefix}_mean'] = float(gd.mean().item())
@@ -256,6 +276,8 @@ class TransformerEncoderLayer(nn.Module):
 
     def _apply_eeg_depth_condition(self, alpha: Tensor, x_ref: Tensor) -> Tensor:
         if not self.attnres_eeg_depth_cond:
+            return alpha
+        if int(alpha.shape[0]) <= 1:
             return alpha
         depth_proj = getattr(self, 'pre_attn_eeg_depth_cond', None)
         if depth_proj is None:
@@ -357,7 +379,14 @@ class TransformerEncoderLayer(nn.Module):
 
         if use_pre_attn_here:
             baseline_in = x
-            attnres_in, attnres_alpha = self.pre_attn_res(sources, return_alpha=True)
+            query_delta = None
+            if self.attnres_eeg_depth_cond:
+                query_delta = self._eeg_query_delta(getattr(self, 'pre_attn_eeg_query_cond', None), baseline_in)
+            attnres_in, attnres_alpha = self.pre_attn_res(
+                sources,
+                return_alpha=True,
+                query_delta=query_delta,
+            )
             attnres_alpha = self._apply_eeg_depth_condition(attnres_alpha, baseline_in)
             if self.attnres_eeg_depth_cond:
                 src_stack = torch.stack(sources, dim=0)

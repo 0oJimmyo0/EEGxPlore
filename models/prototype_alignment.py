@@ -42,11 +42,12 @@ class PrototypeBank(nn.Module):
             mask = (y == c)
             if int(mask.sum().item()) <= 0:
                 continue
-            cls_mean = feats[mask].mean(dim=0)
+            cls_mean = self._safe_norm(feats[mask].mean(dim=0, keepdim=True)).squeeze(0)
             if int(self.seen_counts[c].item()) == 0:
                 self.prototypes[c] = cls_mean
             else:
-                self.prototypes[c].mul_(self.momentum).add_((1.0 - self.momentum) * cls_mean)
+                mixed = self.prototypes[c] * self.momentum + (1.0 - self.momentum) * cls_mean
+                self.prototypes[c] = self._safe_norm(mixed.unsqueeze(0)).squeeze(0)
             self.seen_counts[c] += int(mask.sum().item())
 
     def losses(
@@ -60,7 +61,9 @@ class PrototypeBank(nn.Module):
         if labels.ndim != 1:
             labels = labels.view(-1)
         y = labels.long()
+        seen_mask = self.seen_counts > 0
         valid = (y >= 0) & (y < self.num_classes)
+        valid = valid & seen_mask.index_select(0, y.clamp(min=0, max=self.num_classes - 1))
         if int(valid.sum().item()) == 0:
             z = features.new_zeros(())
             return {"total": z, "pull": z, "push": z}
@@ -75,7 +78,7 @@ class PrototypeBank(nn.Module):
         pos = sims.gather(1, y.view(-1, 1)).squeeze(1)
         pull_loss = (1.0 - pos).mean()
 
-        neg_mask = torch.ones_like(sims, dtype=torch.bool)
+        neg_mask = seen_mask.view(1, -1).expand_as(sims)
         neg_mask.scatter_(1, y.view(-1, 1), False)
         neg = sims.masked_fill(~neg_mask, -1e9).max(dim=1).values
         push_loss = F.relu(neg - pos + float(margin)).mean()
@@ -94,11 +97,13 @@ class PrototypeBank(nn.Module):
         out["proto_norm_mean"] = float(proto_norm.mean().item())
         out["proto_norm_std"] = float(proto_norm.std(unbiased=False).item())
 
-        pn = self._safe_norm(self.prototypes)
-        sim = torch.matmul(pn, pn.t())
-        off = ~torch.eye(self.num_classes, device=sim.device, dtype=torch.bool)
-        if int(off.sum().item()) > 0:
-            out["between_class_cos"] = float(sim[off].mean().item())
+        seen = self.seen_counts > 0
+        if int(seen.sum().item()) > 1:
+            pn = self._safe_norm(self.prototypes.index_select(0, seen.nonzero(as_tuple=False).view(-1)))
+            sim = torch.matmul(pn, pn.t())
+            off = ~torch.eye(int(pn.shape[0]), device=sim.device, dtype=torch.bool)
+            if int(off.sum().item()) > 0:
+                out["between_class_cos"] = float(sim[off].mean().item())
 
         if features is None or labels is None:
             return out
