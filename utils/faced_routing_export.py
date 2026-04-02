@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from utils.faced_meta import join_meta_for_key, load_recording_info_csv
-from utils.faced_routing_analyze import write_all_analyses
+from utils.faced_routing_analyze import project_rows_for_analysis, write_all_analyses
 from utils.tqdm_auto import tqdm_auto
 
 
@@ -139,16 +139,12 @@ def export_facced_routing_split(
         w.writeheader()
         w.writerows(rows)
 
-    # Keep existing analysis pipeline by using the first MoE layer as canonical typed router output.
     num_e = moe_layers[0][1].num_specialists
-    canonical_rows = []
     li0 = moe_layers[0][0]
-    for r in rows:
-        rc = dict(r)
-        rc["spatial_top1_expert"] = rc.get(f"layer{li0}_raw_top1_spatial", -1)
-        rc["spectral_top1_expert"] = rc.get(f"layer{li0}_raw_top1_spectral", -1)
-        canonical_rows.append(rc)
-    write_all_analyses(canonical_rows, out_dir, base, num_e)
+    assigned_rows = project_rows_for_analysis(rows, expert_mode="assigned", layer_idx=li0)
+    raw_rows = project_rows_for_analysis(rows, expert_mode="raw", layer_idx=li0)
+    write_all_analyses(assigned_rows, out_dir, base, num_e)
+    write_all_analyses(raw_rows, out_dir, f"{base}_raw_top1", num_e)
 
     print(f"[routing_export] wrote {per_path}", flush=True)
     return per_path, base

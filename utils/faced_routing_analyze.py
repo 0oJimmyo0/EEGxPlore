@@ -29,18 +29,127 @@ def _as_int_correct(x: Dict[str, Any]) -> int:
         return 0
 
 
+def _layer_indices_in_row(r: Dict[str, Any]) -> List[int]:
+    out = set()
+    pat = re.compile(r"^layer(\d+)_")
+    for k in r:
+        m = pat.match(k)
+        if m:
+            out.add(int(m.group(1)))
+    return sorted(out)
+
+
+def _pick_analysis_layer(rows: List[Dict[str, Any]], layer_idx: Optional[int] = None) -> Optional[int]:
+    if layer_idx is not None:
+        return layer_idx
+    seen = set()
+    for r in rows:
+        seen.update(_layer_indices_in_row(r))
+    if not seen:
+        return None
+    return min(seen)
+
+
+def _layer_key(r: Dict[str, Any], layer_idx: Optional[int], suffix: str) -> Optional[str]:
+    if layer_idx is not None:
+        key = f"layer{layer_idx}_{suffix}"
+        return key if key in r else None
+    for li in _layer_indices_in_row(r):
+        key = f"layer{li}_{suffix}"
+        if key in r:
+            return key
+    return None
+
+
+def _safe_int(v: Any, default: int = -1) -> int:
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def project_rows_for_analysis(
+    rows: List[Dict[str, Any]],
+    expert_mode: str = "assigned",
+    layer_idx: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Normalize per-sample rows into canonical analysis columns.
+
+    expert_mode:
+      - assigned: use post-capacity assigned experts
+      - raw: use raw pre-capacity top-1 experts
+    """
+    if expert_mode not in {"assigned", "raw"}:
+        raise ValueError(f"expert_mode must be assigned or raw, got {expert_mode!r}")
+
+    picked_layer = _pick_analysis_layer(rows, layer_idx)
+    projected: List[Dict[str, Any]] = []
+    for r in rows:
+        rc = dict(r)
+        if expert_mode == "assigned":
+            sp_key = _layer_key(r, picked_layer, "assigned_spatial_expert")
+            sc_key = _layer_key(r, picked_layer, "assigned_spectral_expert")
+        else:
+            sp_key = _layer_key(r, picked_layer, "raw_top1_spatial")
+            sc_key = _layer_key(r, picked_layer, "raw_top1_spectral")
+
+        ent_sp_key = _layer_key(r, picked_layer, "pre_entropy_spatial")
+        ent_sc_key = _layer_key(r, picked_layer, "pre_entropy_spectral")
+
+        rc["spatial_top1_expert"] = _safe_int(r.get(sp_key, _get(r, "spatial_top1_expert", default=-1)))
+        rc["spectral_top1_expert"] = _safe_int(r.get(sc_key, _get(r, "spectral_top1_expert", default=-1)))
+        rc["spatial_entropy"] = _safe_float(r.get(ent_sp_key, _get(r, "spatial_entropy", default=0.0)))
+        rc["spectral_entropy"] = _safe_float(r.get(ent_sc_key, _get(r, "spectral_entropy", default=0.0)))
+        rc["analysis_layer_idx"] = "" if picked_layer is None else picked_layer
+        rc["expert_source"] = "assigned" if expert_mode == "assigned" else "raw_top1"
+        projected.append(rc)
+    return projected
+
+
+def _ensure_analysis_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not rows:
+        return rows
+    sample = rows[0]
+    has_generic_experts = "spatial_top1_expert" in sample and "spectral_top1_expert" in sample
+    has_generic_entropy = "spatial_entropy" in sample and "spectral_entropy" in sample
+    if has_generic_experts and has_generic_entropy:
+        return rows
+    return project_rows_for_analysis(rows, expert_mode="assigned")
+
+
 def _spatial_top1(r: Dict[str, Any]) -> int:
-    v = _get(r, "spatial_top1_expert", "spatial_expert", default=None)
-    if v is None or v == "":
-        return -1
-    return int(v)
+    v = _get(r, "spatial_top1_expert", "assigned_spatial_expert", "spatial_expert", default=None)
+    if v is not None and v != "":
+        return _safe_int(v)
+    layer_key = _layer_key(r, None, "assigned_spatial_expert") or _layer_key(r, None, "raw_top1_spatial")
+    return _safe_int(r.get(layer_key, -1))
 
 
 def _spectral_top1(r: Dict[str, Any]) -> int:
-    v = _get(r, "spectral_top1_expert", "spectral_expert", default=None)
-    if v is None or v == "":
-        return -1
-    return int(v)
+    v = _get(r, "spectral_top1_expert", "assigned_spectral_expert", "spectral_expert", default=None)
+    if v is not None and v != "":
+        return _safe_int(v)
+    layer_key = _layer_key(r, None, "assigned_spectral_expert") or _layer_key(r, None, "raw_top1_spectral")
+    return _safe_int(r.get(layer_key, -1))
+
+
+def _entropy_value(r: Dict[str, Any], bank: str) -> float:
+    generic = _get(r, f"{bank}_entropy", default=None)
+    if generic is not None and generic != "":
+        return _safe_float(generic)
+    layer_key = _layer_key(r, None, f"pre_entropy_{bank}")
+    if layer_key is not None:
+        return _safe_float(r.get(layer_key, 0.0))
+    fallback = _get(r, f"pre_entropy_{bank}", default=0.0)
+    return _safe_float(fallback)
 
 
 def _group_value_for_dim(r: Dict[str, Any], gname: str) -> str:
@@ -97,14 +206,15 @@ def write_all_analyses(
     Write analysis CSVs under out_dir. Returns map name -> path.
     """
     os.makedirs(out_dir, exist_ok=True)
-    ne = num_experts or _infer_num_experts(rows)
+    analysis_rows = _ensure_analysis_rows(rows)
+    ne = num_experts or _infer_num_experts(analysis_rows)
     out: Dict[str, str] = {}
 
-    out["entropy_by_group"] = _entropy_by_group(rows, out_dir, file_prefix)
-    out["expert_usage_by_group"] = _expert_usage_by_group(rows, out_dir, file_prefix, ne)
-    out["performance_by_group"] = _performance_by_group(rows, out_dir, file_prefix)
-    out["routing_summary_by_group"] = _routing_summary_by_group(rows, out_dir, file_prefix, ne)
-    out["crosstabs"] = _write_crosstabs(rows, out_dir, file_prefix, ne)
+    out["entropy_by_group"] = _entropy_by_group(analysis_rows, out_dir, file_prefix)
+    out["expert_usage_by_group"] = _expert_usage_by_group(analysis_rows, out_dir, file_prefix, ne)
+    out["performance_by_group"] = _performance_by_group(analysis_rows, out_dir, file_prefix)
+    out["routing_summary_by_group"] = _routing_summary_by_group(analysis_rows, out_dir, file_prefix, ne)
+    out["crosstabs"] = _write_crosstabs(analysis_rows, out_dir, file_prefix, ne)
     return out
 
 
@@ -120,8 +230,8 @@ def _entropy_by_group(rows: List[Dict[str, Any]], out_dir: str, prefix: str) -> 
             bucket[gv].append(r)
         for gval in _sort_group_values(list(bucket.keys()), gname):
             rs = bucket[gval]
-            se = [float(_get(x, "spatial_entropy", default=0)) for x in rs]
-            sc = [float(_get(x, "spectral_entropy", default=0)) for x in rs]
+            se = [_entropy_value(x, "spatial") for x in rs]
+            sc = [_entropy_value(x, "spectral") for x in rs]
             n = len(rs)
             summaries.append(
                 {
@@ -254,8 +364,8 @@ def _routing_summary_by_group(
             acc = sum(_as_int_correct(x) for x in rs) / max(n, 1)
             confs = [float(_get(x, "max_softmax_confidence", "confidence", default=0)) for x in rs]
             mean_conf = statistics.mean(confs) if confs else 0.0
-            se = [float(_get(x, "spatial_entropy", default=0)) for x in rs]
-            sc = [float(_get(x, "spectral_entropy", default=0)) for x in rs]
+            se = [_entropy_value(x, "spatial") for x in rs]
+            sc = [_entropy_value(x, "spectral") for x in rs]
             hsp = [0] * num_e
             hsc = [0] * num_e
             for x in rs:
@@ -378,8 +488,8 @@ def _aggregate_run_group(rows: List[Dict[str, Any]]) -> Dict[str, float]:
             "mean_spectral_entropy": 0.0,
         }
     acc = sum(_as_int_correct(x) for x in rows) / n
-    sp = [float(_get(x, "spatial_entropy", 0)) for x in rows]
-    sc = [float(_get(x, "spectral_entropy", 0)) for x in rows]
+    sp = [_entropy_value(x, "spatial") for x in rows]
+    sc = [_entropy_value(x, "spectral") for x in rows]
     return {
         "n": n,
         "acc": round(acc, 6),
@@ -497,6 +607,19 @@ def main() -> None:
     ap.add_argument("--outdir", type=str, required=True, help="Output directory for analysis CSVs")
     ap.add_argument("--prefix", type=str, default="analysis", help="Filename prefix")
     ap.add_argument(
+        "--expert_mode",
+        type=str,
+        default="assigned",
+        choices=["assigned", "raw"],
+        help="Which expert ids to summarize when reading a per-sample CSV (default: assigned).",
+    )
+    ap.add_argument(
+        "--layer_idx",
+        type=int,
+        default=None,
+        help="Optional MoE layer index to analyze when the CSV contains multiple MoE layers.",
+    )
+    ap.add_argument(
         "--compare",
         nargs=2,
         metavar=("CSV_NO_PSD", "CSV_PSD"),
@@ -542,8 +665,9 @@ def main() -> None:
     rows = load_per_sample_csv(args.csv)
     if not rows:
         raise SystemExit("empty CSV")
-    ne = _infer_num_experts(rows)
-    outs = write_all_analyses(rows, args.outdir, args.prefix, ne)
+    analysis_rows = project_rows_for_analysis(rows, expert_mode=args.expert_mode, layer_idx=args.layer_idx)
+    ne = _infer_num_experts(analysis_rows)
+    outs = write_all_analyses(analysis_rows, args.outdir, args.prefix, ne)
     for k, v in outs.items():
         print(f"[analyze] {k}: {v}", flush=True)
 

@@ -14,6 +14,7 @@ from models.moe import (
     format_moe_diagnostics_lines,
     reset_moe_diagnostic_labels,
     set_moe_diagnostic_labels,
+    set_moe_train_epoch,
 )
 
 try:
@@ -232,6 +233,8 @@ class Trainer(object):
 
         try:
             for epoch in range(self.params.epochs):
+                if getattr(self.params, 'moe', False):
+                    set_moe_train_epoch(epoch + 1)
                 _mem_report(f"epoch_start ep={epoch + 1}/{self.params.epochs}", md)
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
@@ -456,6 +459,8 @@ class Trainer(object):
 
         try:
             for epoch in range(self.params.epochs):
+                if getattr(self.params, 'moe', False):
+                    set_moe_train_epoch(epoch + 1)
                 _mem_report(f"epoch_start_binary ep={epoch + 1}/{self.params.epochs}", md)
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()
@@ -586,6 +591,8 @@ class Trainer(object):
 
         try:
             for epoch in range(self.params.epochs):
+                if getattr(self.params, 'moe', False):
+                    set_moe_train_epoch(epoch + 1)
                 _mem_report(f"epoch_start_regr ep={epoch + 1}/{self.params.epochs}", md)
                 if torch.cuda.is_available():
                     torch.cuda.reset_peak_memory_stats()

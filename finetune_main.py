@@ -155,6 +155,74 @@ def main():
         action='store_true',
         help='Append PSD features to the spectral bank router only.',
     )
+    parser.add_argument(
+        '--moe_router_arch',
+        type=str,
+        default='linear',
+        choices=['linear', 'mlp'],
+        help='Router head architecture for typed MoE.',
+    )
+    parser.add_argument(
+        '--moe_router_mlp_hidden',
+        type=int,
+        default=128,
+        help='Hidden size when --moe_router_arch mlp is used.',
+    )
+    parser.add_argument(
+        '--moe_router_dispatch_mode',
+        type=str,
+        default='hard_capacity',
+        choices=['hard_capacity', 'soft'],
+        help='Router dispatch mode: hard_capacity (top-1 + capacity correction) or soft (weighted experts).',
+    )
+    parser.add_argument(
+        '--moe_router_temperature',
+        type=float,
+        default=1.0,
+        help='Temperature for router logits (logits / temperature). >1.0 softens routing.',
+    )
+    parser.add_argument(
+        '--moe_router_entropy_coef',
+        type=float,
+        default=0.0,
+        help='Entropy regularization coefficient for router probs. Positive encourages higher entropy.',
+    )
+    parser.add_argument(
+        '--moe_router_balance_kl_coef',
+        type=float,
+        default=0.0,
+        help='Batch-level KL(mean_router_probs || uniform) coefficient. Positive discourages one-expert collapse.',
+    )
+    parser.add_argument(
+        '--moe_router_z_loss_coef',
+        type=float,
+        default=0.0,
+        help='Router z-loss coefficient to suppress logit explosion (Switch-style logsumexp penalty).',
+    )
+    parser.add_argument(
+        '--moe_router_jitter_std',
+        type=float,
+        default=0.0,
+        help='Std of Gaussian jitter added to router logits during training only (0 disables).',
+    )
+    parser.add_argument(
+        '--moe_router_jitter_final_std',
+        type=float,
+        default=0.0,
+        help='Final router jitter std after annealing (used with --moe_router_jitter_anneal_epochs).',
+    )
+    parser.add_argument(
+        '--moe_router_jitter_anneal_epochs',
+        type=int,
+        default=0,
+        help='Linear jitter anneal epochs from start std to final std (0 keeps fixed jitter).',
+    )
+    parser.add_argument(
+        '--moe_router_soft_warmup_epochs',
+        type=int,
+        default=0,
+        help='Use soft-routing warmup for first N training epochs (0 disables).',
+    )
 
     parser.add_argument(
         '--tqdm',
@@ -196,6 +264,22 @@ def main():
     )
 
     params = parser.parse_args()
+    if params.moe_router_temperature <= 0:
+        raise ValueError('--moe_router_temperature must be > 0.')
+    if params.moe_router_mlp_hidden <= 0:
+        raise ValueError('--moe_router_mlp_hidden must be > 0.')
+    if params.moe_router_balance_kl_coef < 0:
+        raise ValueError('--moe_router_balance_kl_coef must be >= 0.')
+    if params.moe_router_z_loss_coef < 0:
+        raise ValueError('--moe_router_z_loss_coef must be >= 0.')
+    if params.moe_router_jitter_std < 0:
+        raise ValueError('--moe_router_jitter_std must be >= 0.')
+    if params.moe_router_jitter_final_std < 0:
+        raise ValueError('--moe_router_jitter_final_std must be >= 0.')
+    if params.moe_router_jitter_anneal_epochs < 0:
+        raise ValueError('--moe_router_jitter_anneal_epochs must be >= 0.')
+    if params.moe_router_soft_warmup_epochs < 0:
+        raise ValueError('--moe_router_soft_warmup_epochs must be >= 0.')
     print(params)
 
     setup_seed(params.seed)
