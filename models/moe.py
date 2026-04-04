@@ -375,6 +375,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self._zero_specialist_output_weights()
         self._zero_domain_bias_path()
         self._zero_adapter_cond_path()
+        self._zero_attnres_depth_router_path()
 
         z = torch.zeros((), device=device, dtype=torch.float32)
         self._last_lb_loss = z
@@ -415,6 +416,14 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         if self.adapter_cond_proj_spectral is not None:
             nn.init.zeros_(self.adapter_cond_proj_spectral.weight)
             nn.init.zeros_(self.adapter_cond_proj_spectral.bias)
+
+    def _zero_attnres_depth_router_path(self) -> None:
+        if self.attnres_depth_router_proj_spatial is not None:
+            nn.init.zeros_(self.attnres_depth_router_proj_spatial.weight)
+            nn.init.zeros_(self.attnres_depth_router_proj_spatial.bias)
+        if self.attnres_depth_router_proj_spectral is not None:
+            nn.init.zeros_(self.attnres_depth_router_proj_spectral.weight)
+            nn.init.zeros_(self.attnres_depth_router_proj_spectral.bias)
 
     def _adapter_cond_logit_bias(self, router_context: Optional[Dict[str, Tensor]], batch_size: int, device: torch.device) -> Tuple[Tensor, Tensor]:
         z = torch.zeros(batch_size, self.num_specialists, device=device)
@@ -639,6 +648,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         d = x.shape[-1]
         x_flat = x.reshape(-1, d)
         h_shared = self.shared(x_flat)
+        cur_epoch = int(_MOE_TRAIN_EPOCH.get())
 
         if router_context is None or router_context.get("baseline") is None or router_context.get("attnres") is None:
             raise ValueError(
@@ -653,10 +663,29 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         t = c * s
         batch_idx = torch.arange(b, device=x.device, dtype=torch.long).unsqueeze(1).expand(-1, t).reshape(-1)
 
+        depth_summary_mean = None
+        depth_summary_std = None
+        if self.use_attnres_depth_router_concat and router_context is not None:
+            ds = router_context.get("attnres_depth_summary")
+            if torch.is_tensor(ds):
+                dsf = ds.detach().float()
+                depth_summary_mean = float(dsf.mean().item())
+                depth_summary_std = float(dsf.std(unbiased=False).item())
+
         base_feat = _attnres_base_features(baseline, attnres)
         subj_sp, subj_sc = self._subject_summary_router_features(router_context, b, x.device, base_feat.dtype)
         eeg_sp, eeg_sc = self._eeg_summary_router_features(b, x.device, base_feat.dtype)
         depth_sp, depth_sc = self._attnres_depth_router_features(router_context, b, x.device, base_feat.dtype)
+        depth_path_scale = 1.0
+        if self.use_attnres_depth_router_concat and self.router_soft_warmup_epochs > 0:
+            if cur_epoch <= 0:
+                depth_path_scale = 0.0
+            else:
+                depth_path_scale = min(1.0, float(cur_epoch) / float(self.router_soft_warmup_epochs))
+            if depth_sp is not None:
+                depth_sp = depth_sp * depth_path_scale
+            if depth_sc is not None:
+                depth_sc = depth_sc * depth_path_scale
 
         spatial_parts = [base_feat]
         spectral_parts = [base_feat]
@@ -698,7 +727,6 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         bias_sc = self._domain_logit_bias(b, "spectral", x.device)
         cond_bias_sp, cond_bias_sc = self._adapter_cond_logit_bias(router_context, b, x.device)
 
-        cur_epoch = int(_MOE_TRAIN_EPOCH.get())
         eff_jitter_std = self._effective_router_jitter_std(cur_epoch)
 
         logits_sp_domain = (logits_sp_content + bias_sp) / self.router_temperature
@@ -837,6 +865,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "eeg_summary_router_concat_spatial": bool(self.use_eeg_summary_router_concat_spatial),
             "eeg_summary_router_concat_spectral": bool(self.use_eeg_summary_router_concat_spectral),
             "attnres_depth_router_concat": bool(self.use_attnres_depth_router_concat),
+            "attnres_depth_path_scale": float(depth_path_scale),
+            "attnres_depth_summary_mean": depth_summary_mean,
+            "attnres_depth_summary_std": depth_summary_std,
             "mean_shared_output_norm": float(h_shared.float().norm(dim=-1).mean().item()),
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),
@@ -1027,6 +1058,11 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"eeg_spatial={diag.get('eeg_summary_router_concat_spatial', False)}  "
             f"eeg_spectral={diag.get('eeg_summary_router_concat_spectral', False)}  "
             f"attnres_depth={diag.get('attnres_depth_router_concat', False)}"
+        ),
+        (
+            f"    depth_summary: scale={diag.get('attnres_depth_path_scale', 1.0):.4f}  "
+            f"mean={diag.get('attnres_depth_summary_mean', 0.0) if diag.get('attnres_depth_summary_mean') is not None else 'NA'}  "
+            f"std={diag.get('attnres_depth_summary_std', 0.0) if diag.get('attnres_depth_summary_std') is not None else 'NA'}"
         ),
         (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "
