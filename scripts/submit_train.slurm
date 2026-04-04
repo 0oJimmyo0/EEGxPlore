@@ -3,7 +3,7 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/out/faced_hier_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/err/faced_hier_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -21,7 +21,7 @@ DATASET_DIR=/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/FACED
 FACED_META_CSV=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv
 
 EPOCHS="${EPOCHS:-50}"
-RUN_NAME="${RUN_NAME:-${SLURM_JOB_ID:-manual}_A1_base}"
+RUN_NAME="${RUN_NAME:-${SLURM_JOB_ID:-manual}_A1_depth26_full}"
 MODEL_DIR="${MODEL_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/FACED_typed_moe_A1_A1_base}"
 ROUTING_EXPORT_DIR="${ROUTING_EXPORT_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/routing_record_dir/run_A1_A1_base_${SLURM_JOB_ID:-manual}}"
 
@@ -57,6 +57,8 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/finetune_main.
   --moe_num_experts 4 \
   --moe_router_arch mlp \
   --moe_router_mlp_hidden 128 \
+  --moe_use_attnres_depth_router_features \
+  --moe_attnres_depth_router_dim 26 \
   --moe_router_dispatch_mode hard_capacity \
   --moe_router_temperature 1.2 \
   --moe_router_entropy_coef 0.003 \

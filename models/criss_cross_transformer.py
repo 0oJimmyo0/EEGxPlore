@@ -140,6 +140,122 @@ class TransformerEncoderLayer(nn.Module):
         if not hasattr(self, 'activation'):
             self.activation = F.relu
 
+    @staticmethod
+    def _attnres_alpha_features(alpha: Optional[Tensor]) -> Optional[Tensor]:
+        """Per-sample depth-selection statistics from AttnRes alpha.
+
+        Returns [B, 11]:
+        [
+          entropy,
+          top1_mass,
+          top2_mass,
+          top3_mass,
+          early_mass,
+          middle_mass,
+          late_mass,
+          source0_mass,
+          sink_mass,
+          attn_family_mass,
+          mlp_family_mass,
+        ]
+        """
+        if alpha is None:
+            return None
+        if alpha.dim() != 4:
+            raise ValueError(f"AttnRes alpha must be [N,B,C,S], got {tuple(alpha.shape)}")
+        n, b, _, _ = alpha.shape
+        if n <= 0:
+            return torch.zeros((b, 11), device=alpha.device, dtype=alpha.dtype)
+
+        # Average over channel/patch axes: [B, N], still a depth distribution per sample.
+        p = alpha.mean(dim=(2, 3)).transpose(0, 1)
+        p = p / p.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+
+        top1_mass = p.max(dim=-1).values
+        k2 = min(2, n)
+        k3 = min(3, n)
+        top2_mass = p.topk(k=k2, dim=-1).values.sum(dim=-1)
+        top3_mass = p.topk(k=k3, dim=-1).values.sum(dim=-1)
+        entropy = -(p.clamp_min(1e-8) * p.clamp_min(1e-8).log()).sum(dim=-1)
+        ent_norm = torch.log(torch.tensor(float(max(n, 2)), device=alpha.device, dtype=alpha.dtype)).clamp_min(1e-8)
+        entropy = entropy / ent_norm
+
+        k1 = max(1, n // 3)
+        k2cut = max(k1 + 1, (2 * n) // 3)
+        early_mass = p[:, :k1].sum(dim=-1)
+        middle_mass = p[:, k1:k2cut].sum(dim=-1)
+        late_mass = p[:, k2cut:].sum(dim=-1)
+
+        sink_mass = p[:, -1]
+        source0_mass = p[:, 0]
+
+        # In current source construction: index 0 is embedding; odd indices are pre-attn outputs,
+        # even indices (>0) are post-MLP/block outputs.
+        idx = torch.arange(n, device=alpha.device)
+        attn_mask = ((idx % 2) == 1)
+        mlp_mask = ((idx % 2) == 0) & (idx > 0)
+        attn_family_mass = p[:, attn_mask].sum(dim=-1) if attn_mask.any() else torch.zeros_like(top1_mass)
+        mlp_family_mass = p[:, mlp_mask].sum(dim=-1) if mlp_mask.any() else torch.zeros_like(top1_mass)
+
+        return torch.stack(
+            [
+                entropy,
+                top1_mass,
+                top2_mass,
+                top3_mass,
+                early_mass,
+                middle_mass,
+                late_mass,
+                source0_mass,
+                sink_mass,
+                attn_family_mass,
+                mlp_family_mass,
+            ],
+            dim=-1,
+        )
+
+    @staticmethod
+    def _compose_attnres_depth_summary(
+        attn_alpha: Optional[Tensor],
+        mlp_alpha: Optional[Tensor],
+        out_dim: int,
+        fallback_ref: Tensor,
+    ) -> Optional[Tensor]:
+        """Build depth-summary vector for MoE router_context['attnres_depth_summary'].
+
+        Base feature layout before pad/truncate (26 dims):
+        [attn(11), mlp(11), delta_entropy, delta_late, delta_sink, delta_attn_family].
+        """
+        if out_dim <= 0:
+            return None
+
+        b = fallback_ref.shape[0]
+        dev = fallback_ref.device
+        dtype = fallback_ref.dtype
+
+        attn_f = TransformerEncoderLayer._attnres_alpha_features(attn_alpha)
+        mlp_f = TransformerEncoderLayer._attnres_alpha_features(mlp_alpha)
+
+        if attn_f is None:
+            attn_f = torch.zeros((b, 11), device=dev, dtype=dtype)
+        if mlp_f is None:
+            mlp_f = torch.zeros((b, 11), device=dev, dtype=dtype)
+
+        attn_f = attn_f.to(device=dev, dtype=dtype)
+        mlp_f = mlp_f.to(device=dev, dtype=dtype)
+        delta_entropy = (attn_f[:, 0] - mlp_f[:, 0]).unsqueeze(-1)
+        delta_late = (attn_f[:, 6] - mlp_f[:, 6]).unsqueeze(-1)
+        delta_sink = (attn_f[:, 8] - mlp_f[:, 8]).unsqueeze(-1)
+        delta_attn_family = (attn_f[:, 9] - mlp_f[:, 9]).unsqueeze(-1)
+        raw = torch.cat([attn_f, mlp_f, delta_entropy, delta_late, delta_sink, delta_attn_family], dim=-1)
+
+        if raw.size(-1) > out_dim:
+            return raw[:, :out_dim]
+        if raw.size(-1) < out_dim:
+            pad = torch.zeros((b, out_dim - raw.size(-1)), device=dev, dtype=dtype)
+            return torch.cat([raw, pad], dim=-1)
+        return raw
+
 
     def _forward_baseline(self, src, src_mask=None, src_key_padding_mask=None, is_causal=False):
         x = src
@@ -177,6 +293,7 @@ class TransformerEncoderLayer(nn.Module):
         # Pre-attention input: pure AttnRes agg, or gated blend with residual (x) when attnres_gated, top k layers only
         baseline_in = None
         attnres_in = None
+        attn_alpha = None
         use_pre_attn_here = (
             self.use_pre_attnres and
             self.layer_idx >= self.attnres_start_layer
@@ -184,7 +301,7 @@ class TransformerEncoderLayer(nn.Module):
 
         if use_pre_attn_here:
             baseline_in = x
-            attnres_in = self.pre_attn_res(sources)
+            attnres_in, attn_alpha = self.pre_attn_res(sources, return_alpha=True)
 
             if self.attnres_gated:
                 gate = torch.sigmoid(self.pre_attn_gate)
@@ -204,8 +321,9 @@ class TransformerEncoderLayer(nn.Module):
             self.layer_idx >= self.attnres_start_layer
         )
         mlp_source_pool = sources + new_sources if sources is not None else [x_attn]
+        mlp_alpha = None
         if use_pre_mlp_here:
-            mlpres_agg = self.pre_mlp_res(mlp_source_pool)
+            mlpres_agg, mlp_alpha = self.pre_mlp_res(mlp_source_pool, return_alpha=True)
             if self.attnres_gated:
                 gate_m = torch.sigmoid(self.pre_mlp_gate)
                 mlp_in = x_attn + gate_m * (mlpres_agg - x_attn)
@@ -226,6 +344,16 @@ class TransformerEncoderLayer(nn.Module):
                     "the MoE layer is not above the last layer with pre-attn (see CBraMod typed MoE guard)."
                 )
             router_ctx = {"baseline": baseline_in, "attnres": attnres_in}
+            if getattr(moe, "use_attnres_depth_router_concat", False):
+                depth_dim = int(getattr(moe, "attnres_depth_router_dim", 0))
+                depth_summary = self._compose_attnres_depth_summary(
+                    attn_alpha=attn_alpha,
+                    mlp_alpha=mlp_alpha,
+                    out_dim=depth_dim,
+                    fallback_ref=baseline_in,
+                )
+                if depth_summary is not None:
+                    router_ctx["attnres_depth_summary"] = depth_summary.detach()
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 
         # for final-only, collect only block outputs

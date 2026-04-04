@@ -156,6 +156,17 @@ def main():
         help='Append PSD features to the spectral bank router only.',
     )
     parser.add_argument(
+        '--moe_use_attnres_depth_router_features',
+        action='store_true',
+        help='Append AttnRes depth-selection summary features to both bank routers.',
+    )
+    parser.add_argument(
+        '--moe_attnres_depth_router_dim',
+        type=int,
+        default=26,
+        help='Projected dim for AttnRes depth-summary router features when enabled (26 keeps full feature set).',
+    )
+    parser.add_argument(
         '--moe_router_arch',
         type=str,
         default='linear',
@@ -280,6 +291,8 @@ def main():
         raise ValueError('--moe_router_jitter_anneal_epochs must be >= 0.')
     if params.moe_router_soft_warmup_epochs < 0:
         raise ValueError('--moe_router_soft_warmup_epochs must be >= 0.')
+    if params.moe_attnres_depth_router_dim <= 0:
+        raise ValueError('--moe_attnres_depth_router_dim must be > 0.')
     print(params)
 
     setup_seed(params.seed)

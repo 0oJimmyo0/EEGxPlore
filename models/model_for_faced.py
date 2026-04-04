@@ -29,6 +29,8 @@ class Model(nn.Module):
                 f"route_mode={getattr(param, 'moe_route_mode', 'typed_capacity_domain')}, "
                 f"capacity_factor={getattr(param, 'moe_capacity_factor', 1.0)}, "
                 f"psd_router={getattr(param, 'moe_use_psd_router_features', False)}, "
+                f"attnres_depth_router={getattr(param, 'moe_use_attnres_depth_router_features', False)}, "
+                f"attnres_depth_dim={getattr(param, 'moe_attnres_depth_router_dim', 26)}, "
                 f"domain_bias={getattr(param, 'moe_domain_bias', False)}, "
                 f"domain_emb_dim={getattr(param, 'moe_domain_emb_dim', 16)}, "
                 f"moe_load_balance={getattr(param, 'moe_load_balance', 0.0)}, "
