@@ -167,6 +167,20 @@ def main():
         help='Projected dim for AttnRes depth-summary router features when enabled (26 keeps full feature set).',
     )
     parser.add_argument(
+        '--moe_attnres_depth_summary_mode',
+        type=str,
+        default='auto',
+        choices=['auto', 'attn_delta4', 'attn_mlp_balanced', 'attn_mlp_latemix'],
+        help='How to compose AttnRes depth summary features before projection. '
+             'For dim=15: attn_delta4 (current best-compatible), attn_mlp_balanced, attn_mlp_latemix.',
+    )
+    parser.add_argument(
+        '--moe_attnres_depth_probe_mlp_for_router',
+        action='store_true',
+        help='In pre_attn mode, compute a lightweight pre-MLP AttnRes alpha for routing summary only '
+             '(does not change main forward path).',
+    )
+    parser.add_argument(
         '--moe_router_arch',
         type=str,
         default='linear',

@@ -77,6 +77,8 @@ class TransformerEncoderLayer(nn.Module):
                  bias: bool = True, device=None, dtype=None, use_attnres: bool = False,
                  attnres_variant: str = 'none', attnres_gated: bool = False,
                  attnres_gate_init: float = 0.0, attnres_start_layer: int = 0,
+                 moe_attnres_depth_summary_mode: str = 'auto',
+                 moe_attnres_depth_probe_mlp_for_router: bool = False,
                  moe_ffn: Optional[nn.Module] = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
@@ -110,15 +112,23 @@ class TransformerEncoderLayer(nn.Module):
         self.layer_idx = -1 
         self.use_pre_attnres = attnres_variant in ['pre_attn', 'full']
         self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
+        self.moe_attnres_depth_summary_mode = str(moe_attnres_depth_summary_mode)
+        self.moe_attnres_depth_probe_mlp_for_router = bool(moe_attnres_depth_probe_mlp_for_router)
+        valid_depth_modes = {'auto', 'attn_delta4', 'attn_mlp_balanced', 'attn_mlp_latemix'}
+        if self.moe_attnres_depth_summary_mode not in valid_depth_modes:
+            raise ValueError(
+                f"Unsupported moe_attnres_depth_summary_mode={self.moe_attnres_depth_summary_mode!r}; "
+                f"expected one of {sorted(valid_depth_modes)}"
+            )
 
         if self.use_pre_attnres:
             self.pre_attn_res = FullAttnRes(d_model)
             if self.attnres_gated:
                 self.pre_attn_gate = nn.Parameter(torch.tensor(float(attnres_gate_init)))
 
-        if self.use_pre_mlpres:
+        if self.use_pre_mlpres or self.moe_attnres_depth_probe_mlp_for_router:
             self.pre_mlp_res = FullAttnRes(d_model)
-            if self.attnres_gated:
+            if self.attnres_gated and self.use_pre_mlpres:
                 self.pre_mlp_gate = nn.Parameter(torch.tensor(float(attnres_gate_init)))
 
         # Legacy string support for activation function.
@@ -220,11 +230,18 @@ class TransformerEncoderLayer(nn.Module):
         mlp_alpha: Optional[Tensor],
         out_dim: int,
         fallback_ref: Tensor,
+        summary_mode: str = 'auto',
     ) -> Optional[Tensor]:
         """Build depth-summary vector for MoE router_context['attnres_depth_summary'].
 
         Base feature layout before pad/truncate (26 dims):
         [attn(11), mlp(11), delta_entropy, delta_late, delta_sink, delta_attn_family].
+
+        Explicit supported interfaces:
+        - out_dim == 11: attn-only summary.
+        - out_dim == 15: configurable via summary_mode.
+        - out_dim == 26: full attn+mlp+deltas summary.
+        - out_dim == 13: legacy compat = attn(11) + {delta_entropy, delta_late}.
         """
         if out_dim <= 0:
             return None
@@ -247,7 +264,25 @@ class TransformerEncoderLayer(nn.Module):
         delta_late = (attn_f[:, 6] - mlp_f[:, 6]).unsqueeze(-1)
         delta_sink = (attn_f[:, 8] - mlp_f[:, 8]).unsqueeze(-1)
         delta_attn_family = (attn_f[:, 9] - mlp_f[:, 9]).unsqueeze(-1)
-        raw = torch.cat([attn_f, mlp_f, delta_entropy, delta_late, delta_sink, delta_attn_family], dim=-1)
+        deltas = torch.cat([delta_entropy, delta_late, delta_sink, delta_attn_family], dim=-1)
+        raw = torch.cat([attn_f, mlp_f, deltas], dim=-1)
+
+        # Use explicit semantic packings for common router dimensions.
+        if out_dim == 11:
+            return attn_f
+        if out_dim == 15:
+            mode = str(summary_mode)
+            if mode in ('auto', 'attn_delta4'):
+                return torch.cat([attn_f, deltas], dim=-1)
+            if mode == 'attn_mlp_balanced':
+                return torch.cat([attn_f[:, :7], mlp_f[:, :4], deltas], dim=-1)
+            if mode == 'attn_mlp_latemix':
+                return torch.cat([attn_f[:, :7], mlp_f[:, 4:8], deltas], dim=-1)
+            raise ValueError(f"Unsupported summary_mode for out_dim=15: {mode!r}")
+        if out_dim == 26:
+            return raw
+        if out_dim == 13:
+            return torch.cat([attn_f, delta_entropy, delta_late], dim=-1)
 
         if raw.size(-1) > out_dim:
             return raw[:, :out_dim]
@@ -331,6 +366,8 @@ class TransformerEncoderLayer(nn.Module):
                 mlp_in = mlpres_agg
         else:
             mlp_in = x_attn
+            if self.moe_attnres_depth_probe_mlp_for_router and hasattr(self, 'pre_mlp_res'):
+                _, mlp_alpha = self.pre_mlp_res(mlp_source_pool, return_alpha=True)
         ffn_in = self.norm2(mlp_in)
         # typed_capacity_domain MoE needs pre-attn baseline/attnres [B,C,S,D] (PSD is set from backbone context).
         router_ctx: Optional[Dict[str, Tensor]] = None
@@ -351,9 +388,12 @@ class TransformerEncoderLayer(nn.Module):
                     mlp_alpha=mlp_alpha,
                     out_dim=depth_dim,
                     fallback_ref=baseline_in,
+                    summary_mode=self.moe_attnres_depth_summary_mode,
                 )
                 if depth_summary is not None:
                     router_ctx["attnres_depth_summary"] = depth_summary.detach()
+                    router_ctx["attnres_depth_summary_mode"] = self.moe_attnres_depth_summary_mode
+                    router_ctx["attnres_depth_probe_mlp_for_router"] = bool(self.moe_attnres_depth_probe_mlp_for_router)
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 
         # for final-only, collect only block outputs

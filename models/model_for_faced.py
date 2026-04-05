@@ -31,6 +31,8 @@ class Model(nn.Module):
                 f"psd_router={getattr(param, 'moe_use_psd_router_features', False)}, "
                 f"attnres_depth_router={getattr(param, 'moe_use_attnres_depth_router_features', False)}, "
                 f"attnres_depth_dim={getattr(param, 'moe_attnres_depth_router_dim', 26)}, "
+                f"attnres_depth_summary_mode={getattr(param, 'moe_attnres_depth_summary_mode', 'auto')}, "
+                f"attnres_depth_probe_mlp_for_router={getattr(param, 'moe_attnres_depth_probe_mlp_for_router', False)}, "
                 f"domain_bias={getattr(param, 'moe_domain_bias', False)}, "
                 f"domain_emb_dim={getattr(param, 'moe_domain_emb_dim', 16)}, "
                 f"moe_load_balance={getattr(param, 'moe_load_balance', 0.0)}, "

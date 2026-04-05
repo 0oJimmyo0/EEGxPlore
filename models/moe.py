@@ -665,12 +665,18 @@ class TypedCapacityDomainMoEFFN(nn.Module):
 
         depth_summary_mean = None
         depth_summary_std = None
+        depth_summary_mode = "NA"
+        depth_probe_mlp_for_router = False
         if self.use_attnres_depth_router_concat and router_context is not None:
             ds = router_context.get("attnres_depth_summary")
             if torch.is_tensor(ds):
                 dsf = ds.detach().float()
                 depth_summary_mean = float(dsf.mean().item())
                 depth_summary_std = float(dsf.std(unbiased=False).item())
+                if isinstance(router_context.get("attnres_depth_summary_mode"), str):
+                    depth_summary_mode = str(router_context.get("attnres_depth_summary_mode"))
+                if "attnres_depth_probe_mlp_for_router" in router_context:
+                    depth_probe_mlp_for_router = bool(router_context.get("attnres_depth_probe_mlp_for_router"))
 
         base_feat = _attnres_base_features(baseline, attnres)
         subj_sp, subj_sc = self._subject_summary_router_features(router_context, b, x.device, base_feat.dtype)
@@ -765,6 +771,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             and cur_epoch <= self.router_soft_warmup_epochs
         )
         soft_dispatch_active = (self.router_dispatch_mode == "soft")
+        early_reg_epochs = max(self.router_soft_warmup_epochs, 12)
+        early_reg_boost = 1.0
+        if self.training and cur_epoch > 0 and cur_epoch <= early_reg_epochs:
+            early_reg_boost = 1.5
+        eff_entropy_coef = self.router_entropy_coef * early_reg_boost
+        eff_balance_kl_coef = self.router_balance_kl_coef * early_reg_boost
 
         if soft_warmup_active or soft_dispatch_active:
             assign_sp = raw_top1_sp
@@ -813,8 +825,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             self.load_balance_coef * lb
             + overflow_penalty
             + self.domain_bias_reg_coef * domain_reg
-            + self.router_entropy_coef * entropy_reg
-            + self.router_balance_kl_coef * balance_kl
+            + eff_entropy_coef * entropy_reg
+            + eff_balance_kl_coef * balance_kl
             + self.router_z_loss_coef * z_loss
         )
 
@@ -822,6 +834,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         pre_ent_sc = self._sample_entropy(probs_sc)
         post_ent_sp = self._hist_entropy(counts_sp)
         post_ent_sc = self._hist_entropy(counts_sc)
+        eff_exp_post_sp = float(math.exp(max(post_ent_sp, 0.0)))
+        eff_exp_post_sc = float(math.exp(max(post_ent_sc, 0.0)))
+        pre_max_sp = float((counts_sp_pre.float().max() / max(float(b), 1.0)).item())
+        pre_max_sc = float((counts_sc_pre.float().max() / max(float(b), 1.0)).item())
+        pre_max_gap = abs(pre_max_sp - pre_max_sc)
         dom_norm = float(torch.cat([bias_sp, bias_sc], dim=1).float().norm(dim=-1).mean().item())
         cond_norm = float(torch.cat([cond_bias_sp, cond_bias_sc], dim=1).float().norm(dim=-1).mean().item())
         sp_content_abs = float(logits_sp_content.abs().mean().item())
@@ -855,7 +872,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 else ("soft_warmup" if soft_warmup_active else "hard_capacity")
             ),
             "router_entropy_coef": float(self.router_entropy_coef),
+            "router_entropy_coef_effective": float(eff_entropy_coef),
             "router_balance_kl_coef": float(self.router_balance_kl_coef),
+            "router_balance_kl_coef_effective": float(eff_balance_kl_coef),
+            "router_early_reg_boost": float(early_reg_boost),
+            "router_early_reg_epochs": int(early_reg_epochs),
             "router_z_loss_coef": float(self.router_z_loss_coef),
             "router_jitter_std": float(self.router_jitter_std),
             "router_jitter_std_effective": float(eff_jitter_std),
@@ -868,6 +889,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "attnres_depth_path_scale": float(depth_path_scale),
             "attnres_depth_summary_mean": depth_summary_mean,
             "attnres_depth_summary_std": depth_summary_std,
+            "attnres_depth_summary_mode": depth_summary_mode,
+            "attnres_depth_probe_mlp_for_router": depth_probe_mlp_for_router,
             "mean_shared_output_norm": float(h_shared.float().norm(dim=-1).mean().item()),
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),
@@ -888,9 +911,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "adapter_shift_rate_spectral": float((raw_top1_sc != raw_top1_sc_domain).float().mean().item()),
             "full_shift_rate_spatial": float((raw_top1_sp != raw_top1_sp_content).float().mean().item()),
             "full_shift_rate_spectral": float((raw_top1_sc != raw_top1_sc_content).float().mean().item()),
+            "specialization_effective_experts_post_spatial": eff_exp_post_sp,
+            "specialization_effective_experts_post_spectral": eff_exp_post_sc,
+            "specialization_pre_max_frac_gap": pre_max_gap,
             "spatial": {
                 "pre_top1_histogram": counts_sp_pre.detach().cpu().tolist(),
-                "pre_max_expert_fraction": float((counts_sp_pre.float().max() / max(float(b), 1.0)).item()),
+                "pre_max_expert_fraction": pre_max_sp,
                 "pre_entropy": pre_ent_sp,
                 "pre_margin_logit": float(margin_sp_logit.mean().item()),
                 "pre_margin_prob": float(margin_sp_prob.mean().item()),
@@ -903,7 +929,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             },
             "spectral": {
                 "pre_top1_histogram": counts_sc_pre.detach().cpu().tolist(),
-                "pre_max_expert_fraction": float((counts_sc_pre.float().max() / max(float(b), 1.0)).item()),
+                "pre_max_expert_fraction": pre_max_sc,
                 "pre_entropy": pre_ent_sc,
                 "pre_margin_logit": float(margin_sc_logit.mean().item()),
                 "pre_margin_prob": float(margin_sc_prob.mean().item()),
@@ -1062,13 +1088,18 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
         (
             f"    depth_summary: scale={diag.get('attnres_depth_path_scale', 1.0):.4f}  "
             f"mean={diag.get('attnres_depth_summary_mean', 0.0) if diag.get('attnres_depth_summary_mean') is not None else 'NA'}  "
-            f"std={diag.get('attnres_depth_summary_std', 0.0) if diag.get('attnres_depth_summary_std') is not None else 'NA'}"
+            f"std={diag.get('attnres_depth_summary_std', 0.0) if diag.get('attnres_depth_summary_std') is not None else 'NA'}  "
+            f"mode={diag.get('attnres_depth_summary_mode', 'NA')}  "
+            f"probe_mlp={diag.get('attnres_depth_probe_mlp_for_router', False)}"
         ),
         (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "
             f"overflow={diag.get('aux_overflow', 0.0):.6f}  domain_reg={diag.get('aux_domain_bias_reg', 0.0):.6f}  "
-            f"entropy_reg={diag.get('aux_entropy_reg', 0.0):.6f}  entropy_coef={diag.get('router_entropy_coef', 0.0):.6f}  "
-            f"balance_kl={diag.get('aux_balance_kl', 0.0):.6f}  balance_kl_coef={diag.get('router_balance_kl_coef', 0.0):.6f}  "
+            f"entropy_reg={diag.get('aux_entropy_reg', 0.0):.6f}  entropy_coef(base/eff)=({diag.get('router_entropy_coef', 0.0):.6f}/"
+            f"{diag.get('router_entropy_coef_effective', diag.get('router_entropy_coef', 0.0)):.6f})  "
+            f"balance_kl={diag.get('aux_balance_kl', 0.0):.6f}  balance_kl_coef(base/eff)=({diag.get('router_balance_kl_coef', 0.0):.6f}/"
+            f"{diag.get('router_balance_kl_coef_effective', diag.get('router_balance_kl_coef', 0.0)):.6f})  "
+            f"early_reg_boost={diag.get('router_early_reg_boost', 1.0):.2f}<=ep{diag.get('router_early_reg_epochs', 0)}  "
             f"z_loss={diag.get('aux_z_loss', 0.0):.6f}  z_loss_coef={diag.get('router_z_loss_coef', 0.0):.6f}"
         ),
         (
@@ -1084,6 +1115,11 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"{diag.get('adapter_shift_rate_spectral', 0.0):.4f})  "
             f"full(sp/sc)=({diag.get('full_shift_rate_spatial', 0.0):.4f}/"
             f"{diag.get('full_shift_rate_spectral', 0.0):.4f})"
+        ),
+        (
+            f"    specialization_quality: eff_exp_post(sp/sc)=({diag.get('specialization_effective_experts_post_spatial', 0.0):.3f}/"
+            f"{diag.get('specialization_effective_experts_post_spectral', 0.0):.3f})  "
+            f"pre_max_frac_gap={diag.get('specialization_pre_max_frac_gap', 0.0):.4f}"
         ),
         (
             f"    [spatial] pre_hist={sp.get('pre_top1_histogram')}  pre_max_frac={sp.get('pre_max_expert_fraction', 0.0):.4f}  "
