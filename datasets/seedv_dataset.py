@@ -75,14 +75,31 @@ class LoadDataset(object):
     @staticmethod
     def _parse_key_fields(key):
         k = key.decode() if isinstance(key, bytes) else str(key)
-        parts = k.rsplit('-', 2)
-        trial = parts[1] if len(parts) == 3 else ''
-        prefix = parts[0] if len(parts) == 3 else k
-        seg = parts[2] if len(parts) == 3 else ''
+        subject = ''
+        session = ''
+        trial = ''
+        seg = ''
 
-        fparts = prefix.split('_')
-        subject = fparts[0] if len(fparts) >= 1 else ''
-        session = fparts[1] if len(fparts) >= 2 else ''
+        # New raw-EEG key format: <subject>_<session>_tXX_gXXXXX
+        if '_t' in k and '_g' in k:
+            parts = k.split('_')
+            if len(parts) >= 4:
+                subject = parts[0]
+                session = parts[1]
+                trial_raw = parts[2].replace('t', '')
+                seg_raw = parts[3].replace('g', '')
+                trial = str(int(trial_raw)) if trial_raw.isdigit() else trial_raw
+                seg = str(int(seg_raw)) if seg_raw.isdigit() else seg_raw
+        else:
+            # Backward-compatible parse for legacy key format: <file>-<trial>-<seg>
+            parts = k.rsplit('-', 2)
+            trial = parts[1] if len(parts) == 3 else ''
+            prefix = parts[0] if len(parts) == 3 else k
+            seg = parts[2] if len(parts) == 3 else ''
+            fparts = prefix.split('_')
+            subject = fparts[0] if len(fparts) >= 1 else ''
+            session = fparts[1] if len(fparts) >= 2 else ''
+
         return {
             'subject': subject,
             'session': session,
@@ -136,14 +153,19 @@ class LoadDataset(object):
         x_shape = tuple(x.shape) if hasattr(x, 'shape') else 'unknown'
         x_dtype = getattr(x, 'dtype', type(x))
         print(f"[SEED-V schema] sample_shape={x_shape} sample_dtype={x_dtype} label={int(y)}")
-        if x_shape != (62, 1, 200):
-            print('[SEED-V schema] warning: expected (62, 1, 200); check preprocessing.')
+        if x_shape != (62, 4, 200):
+            print('[SEED-V schema] warning: expected (62, 4, 200); check preprocessing.')
 
     def get_data_loader(self):
         rk = bool(getattr(self.params, 'return_sample_keys', False))
         split_manifest_path = str(getattr(self.params, 'seedv_split_manifest', '') or '')
         if split_manifest_path:
             print(f"[SEED-V split] using external manifest: {split_manifest_path}")
+        else:
+            print(
+                '[SEED-V split][warning] no subject-disjoint manifest provided; '
+                'falling back to LMDB __keys__ may include overlapping subjects.'
+            )
         train_set = CustomDataset(
             self.datasets_dir,
             mode='train',

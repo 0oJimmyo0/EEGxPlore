@@ -1,4 +1,5 @@
 import argparse
+import os
 import random
 
 import numpy as np
@@ -143,7 +144,7 @@ def add_seedv_args(parser: argparse.ArgumentParser) -> None:
         '--seedv_split_manifest',
         type=str,
         default='',
-        help='Optional JSON/PKL split manifest with train/val/test key lists.',
+        help='Subject-disjoint JSON/PKL split manifest for SEED-V train/val/test key lists.',
     )
 
 
@@ -214,8 +215,22 @@ def build_dataset(args: argparse.Namespace):
             print('[SEED-V] warning: --moe_domain_bias enabled without FACED metadata; zero/unknown ids will be used.')
         if args.return_sample_keys:
             print('[SEED-V] routing_export_dir is set; per-sample export is FACED-only and will be skipped.')
-        if args.seedv_split_manifest:
-            print(f"[SEED-V] using external split manifest: {args.seedv_split_manifest}")
+
+        if not args.seedv_split_manifest:
+            default_manifest = os.path.join(args.datasets_dir, 'subject_disjoint_manifest.json')
+            if os.path.isfile(default_manifest):
+                args.seedv_split_manifest = default_manifest
+                print(f"[SEED-V] using default subject-disjoint manifest: {args.seedv_split_manifest}")
+            else:
+                print(
+                    '[SEED-V][warning] no --seedv_split_manifest and no default '
+                    'subject_disjoint_manifest.json under datasets_dir; '
+                    'loader may fall back to overlapping LMDB __keys__. '
+                    'Provide a subject-disjoint manifest for normal use.'
+                )
+        else:
+            print(f"[SEED-V] using provided split manifest: {args.seedv_split_manifest}")
+
         return seedv_dataset.LoadDataset(args).get_data_loader()
 
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')

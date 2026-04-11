@@ -2,8 +2,8 @@
 #SBATCH --job-name=SEEDV_TUNE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
-#SBATCH --partition=gpu_devel
-#SBATCH --gres=gpu:a40:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:a100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -27,9 +27,9 @@ if [[ "$DATASET" != "SEED-V" ]]; then
   exit 2
 fi
 
-DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb}"
+DATASET_DIR="${DATASET_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/processed_raw_eeg_200hz_1to75_4x200_lmdb}"
 NUM_CLASSES="${NUM_CLASSES:-5}"
-SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-}"
+SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-$DATASET_DIR/subject_disjoint_manifest.json}"
 
 MODEL_DIR="${MODEL_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/SEEDV_manual_${SLURM_JOB_ID:-manual}}"
 RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
@@ -48,6 +48,8 @@ CLIP_VALUE="${CLIP_VALUE:-1.0}"
 DROPOUT="${DROPOUT:-0.3}"
 CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
+
+RUN_MODE="${RUN_MODE:-custom}"  # dense | selective | custom
 
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-pre_attn}"
 ATTNRES_START_LAYER="${ATTNRES_START_LAYER:-0}"
@@ -99,6 +101,29 @@ LR_OTHER_MULT="${LR_OTHER_MULT:-1.0}"
 
 # Escape hatch for future flags without editing this script again.
 EXTRA_SEEDV_ARGS="${EXTRA_SEEDV_ARGS:-}"
+
+case "$RUN_MODE" in
+  dense)
+    USE_MOE="0"
+    ATTNRES_VARIANT="none"
+    ;;
+  selective)
+    # Keep defaults above.
+    ;;
+  custom)
+    # Caller controls USE_MOE / ATTNRES_VARIANT and other knobs explicitly.
+    ;;
+  *)
+    echo "[seedv-slurm] invalid RUN_MODE=$RUN_MODE (expected: dense|selective|custom)" >&2
+    exit 2
+    ;;
+esac
+
+if [[ ! -f "$SEEDV_SPLIT_MANIFEST" ]]; then
+  echo "[seedv-slurm] subject-disjoint manifest not found: $SEEDV_SPLIT_MANIFEST" >&2
+  echo "[seedv-slurm] build it with: python preprocessing/build_seedv_subject_manifest.py --lmdb_path $DATASET_DIR --output_json $DATASET_DIR/subject_disjoint_manifest.json --seed 42" >&2
+  exit 2
+fi
 
 if [[ "$NUM_CLASSES" != "5" ]]; then
   echo "[seedv-slurm][warn] NUM_CLASSES is usually 5 for SEED-V (got: $NUM_CLASSES)" >&2
@@ -176,6 +201,7 @@ fi
 mkdir -p "$MODEL_DIR"
 
 echo "[seedv-slurm] dataset=$DATASET dataset_dir=$DATASET_DIR num_classes=$NUM_CLASSES" >&2
+echo "[seedv-slurm] run_mode=$RUN_MODE" >&2
 echo "[seedv-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
 echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers=$MOE_NUM_LAYERS" >&2
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2

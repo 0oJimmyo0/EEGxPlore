@@ -68,6 +68,7 @@ class Model(nn.Module):
             print(f"[SEED-V] Backbone tensors marked pretrained: {len(self.pretrained_param_names)}")
 
         self.backbone.proj_out = nn.Identity()
+        seedv_flat_dim = 62 * 4 * 200
         if param.classifier == 'avgpooling_patch_reps':
             self.classifier = nn.Sequential(
                 Rearrange('b c s d -> b d c s'),
@@ -78,12 +79,12 @@ class Model(nn.Module):
         elif param.classifier == 'all_patch_reps_onelayer':
             self.classifier = nn.Sequential(
                 Rearrange('b c s d -> b (c s d)'),
-                nn.Linear(62 * 1 * 200, param.num_of_classes),
+                nn.Linear(seedv_flat_dim, param.num_of_classes),
             )
         elif param.classifier == 'all_patch_reps_twolayer':
             self.classifier = nn.Sequential(
                 Rearrange('b c s d -> b (c s d)'),
-                nn.Linear(62 * 1 * 200, 200),
+                nn.Linear(seedv_flat_dim, 200),
                 nn.ELU(),
                 nn.Dropout(param.dropout),
                 nn.Linear(200, param.num_of_classes),
@@ -91,7 +92,7 @@ class Model(nn.Module):
         elif param.classifier == 'all_patch_reps':
             self.classifier = nn.Sequential(
                 Rearrange('b c s d -> b (c s d)'),
-                nn.Linear(62 * 1 * 200, 4 * 200),
+                nn.Linear(seedv_flat_dim, 4 * 200),
                 nn.ELU(),
                 nn.Dropout(param.dropout),
                 nn.Linear(4 * 200, 200),
