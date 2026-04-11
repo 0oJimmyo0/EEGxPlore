@@ -8,6 +8,7 @@ import warnings
 from torch import Tensor
 from torch.nn import functional as F
 from models.attn_res import FullAttnRes
+from models.moe import get_moe_train_epoch
 
 
 class TransformerEncoder(nn.Module):
@@ -79,6 +80,8 @@ class TransformerEncoderLayer(nn.Module):
                  attnres_gate_init: float = 0.0, attnres_start_layer: int = 0,
                  moe_attnres_depth_summary_mode: str = 'auto',
                  moe_attnres_depth_probe_mlp_for_router: bool = False,
+                 moe_attnres_depth_summary_grad_mode: str = 'detached',
+                 moe_attnres_depth_summary_unfreeze_epoch: int = 16,
                  moe_ffn: Optional[nn.Module] = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
@@ -114,12 +117,22 @@ class TransformerEncoderLayer(nn.Module):
         self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
         self.moe_attnres_depth_summary_mode = str(moe_attnres_depth_summary_mode)
         self.moe_attnres_depth_probe_mlp_for_router = bool(moe_attnres_depth_probe_mlp_for_router)
+        self.moe_attnres_depth_summary_grad_mode = str(moe_attnres_depth_summary_grad_mode)
+        self.moe_attnres_depth_summary_unfreeze_epoch = int(moe_attnres_depth_summary_unfreeze_epoch)
         valid_depth_modes = {'auto', 'attn_delta4', 'attn_mlp_balanced', 'attn_mlp_latemix'}
+        valid_grad_modes = {'detached', 'delayed_unfreeze', 'trainable'}
         if self.moe_attnres_depth_summary_mode not in valid_depth_modes:
             raise ValueError(
                 f"Unsupported moe_attnres_depth_summary_mode={self.moe_attnres_depth_summary_mode!r}; "
                 f"expected one of {sorted(valid_depth_modes)}"
             )
+        if self.moe_attnres_depth_summary_grad_mode not in valid_grad_modes:
+            raise ValueError(
+                f"Unsupported moe_attnres_depth_summary_grad_mode={self.moe_attnres_depth_summary_grad_mode!r}; "
+                f"expected one of {sorted(valid_grad_modes)}"
+            )
+        if self.moe_attnres_depth_summary_unfreeze_epoch < 1:
+            raise ValueError("moe_attnres_depth_summary_unfreeze_epoch must be >= 1")
 
         if self.use_pre_attnres:
             self.pre_attn_res = FullAttnRes(d_model)
@@ -391,9 +404,19 @@ class TransformerEncoderLayer(nn.Module):
                     summary_mode=self.moe_attnres_depth_summary_mode,
                 )
                 if depth_summary is not None:
-                    router_ctx["attnres_depth_summary"] = depth_summary.detach()
+                    grad_mode = self.moe_attnres_depth_summary_grad_mode
+                    grad_active = False
+                    if grad_mode == 'trainable':
+                        grad_active = True
+                    elif grad_mode == 'delayed_unfreeze':
+                        grad_active = int(get_moe_train_epoch()) >= self.moe_attnres_depth_summary_unfreeze_epoch
+                    depth_summary_for_router = depth_summary if grad_active else depth_summary.detach()
+                    router_ctx["attnres_depth_summary"] = depth_summary_for_router
                     router_ctx["attnres_depth_summary_mode"] = self.moe_attnres_depth_summary_mode
                     router_ctx["attnres_depth_probe_mlp_for_router"] = bool(self.moe_attnres_depth_probe_mlp_for_router)
+                    router_ctx["attnres_depth_summary_grad_mode"] = grad_mode
+                    router_ctx["attnres_depth_summary_grad_active"] = bool(grad_active)
+                    router_ctx["attnres_depth_summary_unfreeze_epoch"] = int(self.moe_attnres_depth_summary_unfreeze_epoch)
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 
         # for final-only, collect only block outputs

@@ -1,7 +1,10 @@
 import gc
+import json
 import os
+import re
 import shutil
 import traceback
+from datetime import datetime
 from timeit import default_timer as timer
 from typing import Any, Dict, Optional
 
@@ -80,6 +83,25 @@ def _forward_with_optional_meta(model, x, batch_meta):
         return model(x, batch_meta=batch_meta)
     except TypeError:
         return model(x)
+
+
+def _safe_tag(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", str(text)).strip("_") or "run"
+
+
+def _to_jsonable(obj):
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, (list, tuple)):
+        return [_to_jsonable(x) for x in obj]
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+    if hasattr(obj, "item"):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+    return str(obj)
 
 
 class Trainer(object):
@@ -215,6 +237,89 @@ class Trainer(object):
         if torch.cuda.is_available():
             print(torch.cuda.memory_summary(), flush=True)
 
+    def _write_run_summary(
+        self,
+        task_type: str,
+        best_epoch: int,
+        best_val_metrics: Dict[str, Any],
+        test_metrics: Dict[str, Any],
+        model_path: str,
+    ) -> None:
+        md = self._model_dir()
+        os.makedirs(md, exist_ok=True)
+
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        dataset = str(getattr(self.params, 'downstream_dataset', 'unknown'))
+        dataset_tag = _safe_tag(dataset).lower()
+        run_name = str(getattr(self.params, 'routing_run_name', '') or '')
+
+        summary_payload = {
+            'timestamp_utc': ts,
+            'dataset': dataset,
+            'task_type': task_type,
+            'run_name': run_name,
+            'best_epoch': int(best_epoch),
+            'model_path': model_path,
+            'best_val_metrics': _to_jsonable(best_val_metrics),
+            'test_metrics': _to_jsonable(test_metrics),
+            'config': _to_jsonable(vars(self.params)),
+        }
+        json_path = os.path.join(md, f"run_summary_{dataset_tag}_{ts}.json")
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(summary_payload, f, indent=2, ensure_ascii=True, sort_keys=True)
+
+        csv_path = os.path.join(md, 'experiment_summary.csv')
+        row = {
+            'timestamp_utc': ts,
+            'dataset': dataset,
+            'task_type': task_type,
+            'run_name': run_name,
+            'model_dir': md,
+            'model_path': model_path,
+            'best_epoch': int(best_epoch),
+            'val_balanced_accuracy': best_val_metrics.get('balanced_accuracy', ''),
+            'val_kappa': best_val_metrics.get('kappa', ''),
+            'val_weighted_f1': best_val_metrics.get('weighted_f1', ''),
+            'test_balanced_accuracy': test_metrics.get('balanced_accuracy', ''),
+            'test_kappa': test_metrics.get('kappa', ''),
+            'test_weighted_f1': test_metrics.get('weighted_f1', ''),
+            'seed': getattr(self.params, 'seed', ''),
+            'epochs': getattr(self.params, 'epochs', ''),
+            'batch_size': getattr(self.params, 'batch_size', ''),
+            'lr': getattr(self.params, 'lr', ''),
+            'weight_decay': getattr(self.params, 'weight_decay', ''),
+            'classifier': getattr(self.params, 'classifier', ''),
+            'attnres_variant': getattr(self.params, 'attnres_variant', ''),
+            'moe': bool(getattr(self.params, 'moe', False)),
+            'moe_num_layers': getattr(self.params, 'moe_num_layers', ''),
+            'moe_router_arch': getattr(self.params, 'moe_router_arch', ''),
+            'moe_use_attnres_depth_router_features': bool(getattr(self.params, 'moe_use_attnres_depth_router_features', False)),
+            'moe_attnres_depth_router_dim': getattr(self.params, 'moe_attnres_depth_router_dim', ''),
+            'moe_attnres_depth_summary_mode': getattr(self.params, 'moe_attnres_depth_summary_mode', ''),
+            'moe_attnres_depth_probe_mlp_for_router': bool(getattr(self.params, 'moe_attnres_depth_probe_mlp_for_router', False)),
+            'moe_router_dispatch_mode': getattr(self.params, 'moe_router_dispatch_mode', ''),
+            'moe_router_temperature': getattr(self.params, 'moe_router_temperature', ''),
+            'moe_router_entropy_coef': getattr(self.params, 'moe_router_entropy_coef', ''),
+            'moe_router_balance_kl_coef': getattr(self.params, 'moe_router_balance_kl_coef', ''),
+            'moe_router_jitter_std': getattr(self.params, 'moe_router_jitter_std', ''),
+            'moe_router_jitter_final_std': getattr(self.params, 'moe_router_jitter_final_std', ''),
+            'moe_router_jitter_anneal_epochs': getattr(self.params, 'moe_router_jitter_anneal_epochs', ''),
+            'moe_router_soft_warmup_epochs': getattr(self.params, 'moe_router_soft_warmup_epochs', ''),
+            'moe_domain_bias': bool(getattr(self.params, 'moe_domain_bias', False)),
+            'moe_use_psd_router_features': bool(getattr(self.params, 'moe_use_psd_router_features', False)),
+        }
+
+        write_header = not os.path.isfile(csv_path)
+        import csv
+        with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+            w = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if write_header:
+                w.writeheader()
+            w.writerow(row)
+
+        print(f"[summary] wrote {json_path}", flush=True)
+        print(f"[summary] appended {csv_path}", flush=True)
+
     def train_for_multiclass(self):
         """Same optimizer/schedule for baseline (--attnres_variant none) and AttnRes variants.
 
@@ -222,11 +327,12 @@ class Trainer(object):
         No staged freeze, no separate pretrained/new LR groups.
         """
         md = self._model_dir()
-        f1_best = 0
-        kappa_best = 0
-        acc_best = 0
+        f1_best = float('-inf')
+        kappa_best = float('-inf')
+        acc_best = float('-inf')
         cm_best = None
         best_f1_epoch = 0
+        best_val_metrics = {}
         train_steps = 0
 
         self._print_slurm_oom_hints()
@@ -337,6 +443,11 @@ class Trainer(object):
                         kappa_best = kappa
                         f1_best = f1
                         cm_best = cm
+                        best_val_metrics = {
+                            'balanced_accuracy': float(acc),
+                            'kappa': float(kappa),
+                            'weighted_f1': float(f1),
+                        }
                         self.best_model_states = _state_dict_to_cpu(self.model)
                         est_b = _estimate_state_dict_cpu_bytes(self.best_model_states)
                         print(
@@ -387,17 +498,18 @@ class Trainer(object):
                     epoch_tag = f"best_ep{best_f1_epoch}"
                     raw_splits = getattr(self.params, "routing_export_splits", "test") or "test"
                     split_list = [s.strip() for s in raw_splits.split(",") if s.strip()]
-                    print(
-                        "[post_test] expected routing per-sample pattern: "
-                        f"faced_routing_<split>_e{epoch_tag}_<checkpoint_tag>_per_sample.csv "
-                        f"(checkpoint_tag={ck_tag!r})",
-                        flush=True,
-                    )
-                    for sp in split_list:
+                    if self.params.downstream_dataset == "FACED" and rd:
                         print(
-                            f"[post_test]   example: faced_routing_{sp}_e{epoch_tag}_{ck_tag}_per_sample.csv",
+                            "[post_test] expected FACED routing per-sample pattern: "
+                            f"faced_routing_<split>_e{epoch_tag}_<checkpoint_tag>_per_sample.csv "
+                            f"(checkpoint_tag={ck_tag!r})",
                             flush=True,
                         )
+                        for sp in split_list:
+                            print(
+                                f"[post_test]   example: faced_routing_{sp}_e{epoch_tag}_{ck_tag}_per_sample.csv",
+                                flush=True,
+                            )
 
                     torch.save(self.model.state_dict(), model_path)
                     print("[post_test] after checkpoint save", flush=True)
@@ -428,7 +540,31 @@ class Trainer(object):
                                 epoch_tag,
                                 ck_tag,
                             )
+                    elif rd:
+                        print(
+                            f"[routing_export] skip: downstream dataset {self.params.downstream_dataset!r} "
+                            "has no routing export implementation yet.",
+                            flush=True,
+                        )
                     print("[post_test] after routing export", flush=True)
+
+                    if not best_val_metrics:
+                        best_val_metrics = {
+                            'balanced_accuracy': float(acc_best),
+                            'kappa': float(kappa_best),
+                            'weighted_f1': float(f1_best),
+                        }
+                    self._write_run_summary(
+                        task_type='multiclass',
+                        best_epoch=best_f1_epoch,
+                        best_val_metrics=best_val_metrics,
+                        test_metrics={
+                            'balanced_accuracy': float(acc),
+                            'kappa': float(kappa),
+                            'weighted_f1': float(f1),
+                        },
+                        model_path=model_path,
+                    )
                 except Exception:
                     print("[post_test] EXCEPTION in checkpoint save / routing export block", flush=True)
                     traceback.print_exc()

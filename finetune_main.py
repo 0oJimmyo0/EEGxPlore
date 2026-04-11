@@ -38,6 +38,9 @@ def main():
     parser.add_argument('--datasets_dir', type=str,
                         default='/data/datasets/BigDownstream/mental-arithmetic/processed',
                         help='datasets_dir')
+    parser.add_argument('--seedv_split_manifest', type=str, default='',
+                        help='SEED-V only: optional JSON/PKL split manifest with train/val/test key lists. '
+                             'If empty, use LMDB __keys__.')
     parser.add_argument('--num_of_classes', type=int, default=2, help='number of classes')
     parser.add_argument('--model_dir', type=str, default='/data/wjq/models_weights/Big/BigFaced', help='model_dir')
     """############ Downstream dataset settings ############"""
@@ -181,6 +184,19 @@ def main():
              '(does not change main forward path).',
     )
     parser.add_argument(
+        '--moe_attnres_depth_summary_grad_mode',
+        type=str,
+        default='detached',
+        choices=['detached', 'delayed_unfreeze', 'trainable'],
+        help='Gradient path for router depth summary: detached, delayed_unfreeze, or trainable.',
+    )
+    parser.add_argument(
+        '--moe_attnres_depth_summary_unfreeze_epoch',
+        type=int,
+        default=16,
+        help='For delayed_unfreeze mode, first epoch index (1-based) where depth-summary gradients are enabled.',
+    )
+    parser.add_argument(
         '--moe_router_arch',
         type=str,
         default='linear',
@@ -267,7 +283,8 @@ def main():
         '--routing_export_dir',
         type=str,
         default='',
-        help='FACED typed MoE: after training, write per-sample routing CSVs under this directory (empty=off).',
+        help='Optional per-sample routing export directory (empty=off). '
+             'Currently implemented for FACED; other datasets are skipped gracefully.',
     )
     parser.add_argument(
         '--routing_export_splits',
@@ -279,7 +296,7 @@ def main():
         '--faced_meta_csv',
         type=str,
         default='/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv',
-        help='Recording_info.csv used for FACED domain ids (routing) and export joins.',
+        help='FACED-only Recording_info.csv for domain ids and routing export joins.',
     )
     parser.add_argument(
         '--routing_run_name',
@@ -305,6 +322,8 @@ def main():
         raise ValueError('--moe_router_jitter_anneal_epochs must be >= 0.')
     if params.moe_router_soft_warmup_epochs < 0:
         raise ValueError('--moe_router_soft_warmup_epochs must be >= 0.')
+    if params.moe_attnres_depth_summary_unfreeze_epoch < 1:
+        raise ValueError('--moe_attnres_depth_summary_unfreeze_epoch must be >= 1.')
     if params.moe_attnres_depth_router_dim <= 0:
         raise ValueError('--moe_attnres_depth_router_dim must be > 0.')
     print(params)
@@ -312,6 +331,9 @@ def main():
     setup_seed(params.seed)
     torch.cuda.set_device(params.cuda)
     print('The downstream dataset is {}'.format(params.downstream_dataset))
+    params.return_sample_keys = False
+    params.return_domain_ids = False
+
     if params.downstream_dataset == 'FACED':
         params.return_sample_keys = bool(getattr(params, 'routing_export_dir', None))
         params.return_domain_ids = bool(getattr(params, 'moe', False) and params.moe_route_mode == 'typed_capacity_domain')
@@ -321,6 +343,15 @@ def main():
         t = Trainer(params, data_loader, model)
         t.train_for_multiclass()
     elif params.downstream_dataset == 'SEED-V':
+        params.return_sample_keys = bool(getattr(params, 'routing_export_dir', None))
+        if params.num_of_classes != 5:
+            print(f"[SEED-V] warning: expected num_of_classes=5, got {params.num_of_classes}")
+        if params.moe_domain_bias:
+            print("[SEED-V] warning: --moe_domain_bias enabled without FACED metadata; routing uses zero/unknown ids.")
+        if params.return_sample_keys:
+            print('[SEED-V] routing_export_dir is set; per-sample export is FACED-only and will be skipped.')
+        if params.seedv_split_manifest:
+            print(f"[SEED-V] using external split manifest: {params.seedv_split_manifest}")
         load_dataset = seedv_dataset.LoadDataset(params)
         data_loader = load_dataset.get_data_loader()
         model = model_for_seedv.Model(params)

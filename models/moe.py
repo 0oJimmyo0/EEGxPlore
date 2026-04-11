@@ -78,6 +78,10 @@ def reset_moe_train_epoch(token: Any) -> None:
     _MOE_TRAIN_EPOCH.reset(token)
 
 
+def get_moe_train_epoch() -> int:
+    return int(_MOE_TRAIN_EPOCH.get())
+
+
 def compact_psd_bandpowers(x: Tensor, n_bands: int = PSD_ROUTER_DIM) -> Tensor:
     """Compact per-sample PSD: mean log1p power in contiguous rfft bins, x=[B,C,S,T]."""
     if x.dim() != 4:
@@ -667,6 +671,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         depth_summary_std = None
         depth_summary_mode = "NA"
         depth_probe_mlp_for_router = False
+        depth_summary_grad_mode = "detached"
+        depth_summary_grad_active = False
+        depth_summary_unfreeze_epoch = 1
         if self.use_attnres_depth_router_concat and router_context is not None:
             ds = router_context.get("attnres_depth_summary")
             if torch.is_tensor(ds):
@@ -677,6 +684,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                     depth_summary_mode = str(router_context.get("attnres_depth_summary_mode"))
                 if "attnres_depth_probe_mlp_for_router" in router_context:
                     depth_probe_mlp_for_router = bool(router_context.get("attnres_depth_probe_mlp_for_router"))
+                if isinstance(router_context.get("attnres_depth_summary_grad_mode"), str):
+                    depth_summary_grad_mode = str(router_context.get("attnres_depth_summary_grad_mode"))
+                if "attnres_depth_summary_grad_active" in router_context:
+                    depth_summary_grad_active = bool(router_context.get("attnres_depth_summary_grad_active"))
+                if "attnres_depth_summary_unfreeze_epoch" in router_context:
+                    depth_summary_unfreeze_epoch = int(router_context.get("attnres_depth_summary_unfreeze_epoch"))
 
         base_feat = _attnres_base_features(baseline, attnres)
         subj_sp, subj_sc = self._subject_summary_router_features(router_context, b, x.device, base_feat.dtype)
@@ -775,8 +788,10 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         early_reg_boost = 1.0
         if self.training and cur_epoch > 0 and cur_epoch <= early_reg_epochs:
             early_reg_boost = 1.5
-        eff_entropy_coef = self.router_entropy_coef * early_reg_boost
-        eff_balance_kl_coef = self.router_balance_kl_coef * early_reg_boost
+        eff_entropy_coef_sp = self.router_entropy_coef * early_reg_boost
+        eff_entropy_coef_sc = self.router_entropy_coef * early_reg_boost
+        eff_balance_kl_coef_sp = self.router_balance_kl_coef * early_reg_boost
+        eff_balance_kl_coef_sc = self.router_balance_kl_coef * early_reg_boost
 
         if soft_warmup_active or soft_dispatch_active:
             assign_sp = raw_top1_sp
@@ -812,7 +827,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         entropy_sp = (-(probs_sp * probs_sp.clamp_min(1e-10).log()).sum(dim=-1)).mean()
         entropy_sc = (-(probs_sc * probs_sc.clamp_min(1e-10).log()).sum(dim=-1)).mean()
         entropy_reg = -(entropy_sp + entropy_sc)
-        balance_kl = self._batch_uniform_kl(probs_sp) + self._batch_uniform_kl(probs_sc)
+        entropy_reg_sp = -entropy_sp
+        entropy_reg_sc = -entropy_sc
+        balance_kl_sp = self._batch_uniform_kl(probs_sp)
+        balance_kl_sc = self._batch_uniform_kl(probs_sc)
+        balance_kl = balance_kl_sp + balance_kl_sc
         z_loss = torch.logsumexp(logits_sp, dim=-1).pow(2).mean() + torch.logsumexp(logits_sc, dim=-1).pow(2).mean()
 
         self._last_lb_loss = lb
@@ -825,8 +844,10 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             self.load_balance_coef * lb
             + overflow_penalty
             + self.domain_bias_reg_coef * domain_reg
-            + eff_entropy_coef * entropy_reg
-            + eff_balance_kl_coef * balance_kl
+            + eff_entropy_coef_sp * entropy_reg_sp
+            + eff_entropy_coef_sc * entropy_reg_sc
+            + eff_balance_kl_coef_sp * balance_kl_sp
+            + eff_balance_kl_coef_sc * balance_kl_sc
             + self.router_z_loss_coef * z_loss
         )
 
@@ -872,9 +893,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 else ("soft_warmup" if soft_warmup_active else "hard_capacity")
             ),
             "router_entropy_coef": float(self.router_entropy_coef),
-            "router_entropy_coef_effective": float(eff_entropy_coef),
+            "router_entropy_coef_effective": float(eff_entropy_coef_sp),
+            "router_entropy_coef_effective_spectral": float(eff_entropy_coef_sc),
             "router_balance_kl_coef": float(self.router_balance_kl_coef),
-            "router_balance_kl_coef_effective": float(eff_balance_kl_coef),
+            "router_balance_kl_coef_effective": float(eff_balance_kl_coef_sp),
+            "router_balance_kl_coef_effective_spectral": float(eff_balance_kl_coef_sc),
             "router_early_reg_boost": float(early_reg_boost),
             "router_early_reg_epochs": int(early_reg_epochs),
             "router_z_loss_coef": float(self.router_z_loss_coef),
@@ -891,6 +914,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "attnres_depth_summary_std": depth_summary_std,
             "attnres_depth_summary_mode": depth_summary_mode,
             "attnres_depth_probe_mlp_for_router": depth_probe_mlp_for_router,
+            "attnres_depth_summary_grad_mode": depth_summary_grad_mode,
+            "attnres_depth_summary_grad_active": depth_summary_grad_active,
+            "attnres_depth_summary_unfreeze_epoch": depth_summary_unfreeze_epoch,
             "mean_shared_output_norm": float(h_shared.float().norm(dim=-1).mean().item()),
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),
@@ -1075,7 +1101,8 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
         (
             f"    route={diag.get('route_strategy', 'hard_capacity')}  "
             f"dispatch_mode={diag.get('router_dispatch_mode', 'hard_capacity')}  "
-            f"temp={diag.get('router_temperature', 1.0):.4f}  "
+            f"temp(sp/sc)=({diag.get('router_temperature', 1.0):.4f}/"
+            f"{diag.get('router_temperature', 1.0):.4f})  "
             f"soft_warmup_active={diag.get('router_soft_warmup_active', False)}  "
             f"soft_warmup_epochs={diag.get('router_soft_warmup_epochs', 0)}"
         ),
@@ -1090,15 +1117,22 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"mean={diag.get('attnres_depth_summary_mean', 0.0) if diag.get('attnres_depth_summary_mean') is not None else 'NA'}  "
             f"std={diag.get('attnres_depth_summary_std', 0.0) if diag.get('attnres_depth_summary_std') is not None else 'NA'}  "
             f"mode={diag.get('attnres_depth_summary_mode', 'NA')}  "
-            f"probe_mlp={diag.get('attnres_depth_probe_mlp_for_router', False)}"
+            f"probe_mlp={diag.get('attnres_depth_probe_mlp_for_router', False)}  "
+            f"grad_mode={diag.get('attnres_depth_summary_grad_mode', 'detached')}  "
+            f"grad_active={diag.get('attnres_depth_summary_grad_active', False)}  "
+            f"unfreeze_epoch={diag.get('attnres_depth_summary_unfreeze_epoch', 1)}"
         ),
         (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "
             f"overflow={diag.get('aux_overflow', 0.0):.6f}  domain_reg={diag.get('aux_domain_bias_reg', 0.0):.6f}  "
-            f"entropy_reg={diag.get('aux_entropy_reg', 0.0):.6f}  entropy_coef(base/eff)=({diag.get('router_entropy_coef', 0.0):.6f}/"
+            f"entropy_reg={diag.get('aux_entropy_reg', 0.0):.6f}  entropy_coef_sp(base/eff)=({diag.get('router_entropy_coef', 0.0):.6f}/"
             f"{diag.get('router_entropy_coef_effective', diag.get('router_entropy_coef', 0.0)):.6f})  "
+            f"entropy_coef_sc(base/eff)=({diag.get('router_entropy_coef', 0.0):.6f}/"
+            f"{diag.get('router_entropy_coef_effective_spectral', diag.get('router_entropy_coef_effective', diag.get('router_entropy_coef', 0.0))):.6f})  "
             f"balance_kl={diag.get('aux_balance_kl', 0.0):.6f}  balance_kl_coef(base/eff)=({diag.get('router_balance_kl_coef', 0.0):.6f}/"
             f"{diag.get('router_balance_kl_coef_effective', diag.get('router_balance_kl_coef', 0.0)):.6f})  "
+            f"balance_kl_coef_sc(base/eff)=({diag.get('router_balance_kl_coef', 0.0):.6f}/"
+            f"{diag.get('router_balance_kl_coef_effective_spectral', diag.get('router_balance_kl_coef_effective', diag.get('router_balance_kl_coef', 0.0))):.6f})  "
             f"early_reg_boost={diag.get('router_early_reg_boost', 1.0):.2f}<=ep{diag.get('router_early_reg_epochs', 0)}  "
             f"z_loss={diag.get('aux_z_loss', 0.0):.6f}  z_loss_coef={diag.get('router_z_loss_coef', 0.0):.6f}"
         ),

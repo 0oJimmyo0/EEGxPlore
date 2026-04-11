@@ -46,6 +46,8 @@ class CBraMod(nn.Module):
         moe_attnres_depth_router_dim: int = 26,
         moe_attnres_depth_summary_mode: str = "auto",
         moe_attnres_depth_probe_mlp_for_router: bool = False,
+        moe_attnres_depth_summary_grad_mode: str = "detached",
+        moe_attnres_depth_summary_unfreeze_epoch: int = 16,
         moe_router_dispatch_mode: str = "hard_capacity",
         moe_router_temperature: float = 1.0,
         moe_router_entropy_coef: float = 0.0,
@@ -126,6 +128,8 @@ class CBraMod(nn.Module):
                         attnres_start_layer=attnres_start_layer,
                         moe_attnres_depth_summary_mode=moe_attnres_depth_summary_mode,
                         moe_attnres_depth_probe_mlp_for_router=moe_attnres_depth_probe_mlp_for_router,
+                        moe_attnres_depth_summary_grad_mode=moe_attnres_depth_summary_grad_mode,
+                        moe_attnres_depth_summary_unfreeze_epoch=moe_attnres_depth_summary_unfreeze_epoch,
                         moe_ffn=moe_mod,
                     )
                 )
@@ -154,6 +158,8 @@ class CBraMod(nn.Module):
                 attnres_start_layer=attnres_start_layer,
                 moe_attnres_depth_summary_mode=moe_attnres_depth_summary_mode,
                 moe_attnres_depth_probe_mlp_for_router=moe_attnres_depth_probe_mlp_for_router,
+                moe_attnres_depth_summary_grad_mode=moe_attnres_depth_summary_grad_mode,
+                moe_attnres_depth_summary_unfreeze_epoch=moe_attnres_depth_summary_unfreeze_epoch,
             )
 
             self.encoder = TransformerEncoder(
@@ -299,6 +305,8 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_attnres_depth_router_dim': getattr(param, 'moe_attnres_depth_router_dim', 26),
         'moe_attnres_depth_summary_mode': getattr(param, 'moe_attnres_depth_summary_mode', 'auto'),
         'moe_attnres_depth_probe_mlp_for_router': getattr(param, 'moe_attnres_depth_probe_mlp_for_router', False),
+        'moe_attnres_depth_summary_grad_mode': getattr(param, 'moe_attnres_depth_summary_grad_mode', 'detached'),
+        'moe_attnres_depth_summary_unfreeze_epoch': getattr(param, 'moe_attnres_depth_summary_unfreeze_epoch', 16),
         'moe_router_dispatch_mode': getattr(param, 'moe_router_dispatch_mode', 'hard_capacity'),
         'moe_router_temperature': getattr(param, 'moe_router_temperature', 1.0),
         'moe_router_entropy_coef': getattr(param, 'moe_router_entropy_coef', 0.0),
