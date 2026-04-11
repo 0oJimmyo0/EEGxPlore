@@ -1,4 +1,4 @@
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 
 import torch
 import torch.nn as nn
@@ -8,12 +8,25 @@ from models.criss_cross_transformer import TransformerEncoderLayer, TransformerE
 from models.moe import (
     TypedCapacityDomainMoEFFN,
     compact_psd_bandpowers,
+    reset_moe_eeg_router_summary,
     reset_moe_faced_metadata,
     reset_moe_psd_router_features,
+    set_moe_eeg_router_summary,
     set_moe_faced_metadata,
     set_moe_psd_router_features,
     warm_start_moe_from_dense_ckpt,
 )
+
+
+def _compact_eeg_summary(x: torch.Tensor, out_dim: int) -> torch.Tensor:
+    """Compact per-sample EEG summary [B, out_dim] from raw [B,C,S,T]."""
+    if x.dim() != 4:
+        raise ValueError(f"Expected raw EEG [B,C,S,T], got {tuple(x.shape)}")
+    if out_dim <= 0:
+        raise ValueError("out_dim must be > 0")
+    # Mean over sequence/time, keep compact channel profile, then pool to out_dim.
+    v = x.mean(dim=(2, 3))
+    return F.adaptive_avg_pool1d(v.unsqueeze(1), out_dim).squeeze(1)
 
 
 class CBraMod(nn.Module):
@@ -57,6 +70,18 @@ class CBraMod(nn.Module):
         moe_router_jitter_final_std: float = 0.0,
         moe_router_jitter_anneal_epochs: int = 0,
         moe_router_soft_warmup_epochs: int = 0,
+        moe_uniform_dispatch_warmup_epochs: int = 0,
+        moe_shared_blend_warmup_epochs: int = 0,
+        moe_shared_blend_start: float = 1.0,
+        moe_shared_blend_end: float = 0.0,
+        moe_router_entropy_coef_spatial: Optional[float] = None,
+        moe_router_entropy_coef_spectral: Optional[float] = None,
+        moe_router_balance_kl_coef_spatial: Optional[float] = None,
+        moe_router_balance_kl_coef_spectral: Optional[float] = None,
+        moe_specialist_branch_mode: str = "both",
+        moe_router_compact_feature_mode: str = "none",
+        moe_router_compact_feature_dim: int = 8,
+        moe_expert_init_noise_std: float = 0.0,
         moe_load_balance: float = 0.0,
         moe_domain_bias_reg: float = 0.0,
     ):
@@ -65,6 +90,16 @@ class CBraMod(nn.Module):
         self.use_moe = use_moe
         self.moe_use_psd_router_features = bool(moe_use_psd_router_features)
         self.moe_route_mode = moe_route_mode
+        self.moe_router_compact_feature_mode = str(moe_router_compact_feature_mode)
+        self.moe_router_compact_feature_dim = int(moe_router_compact_feature_dim)
+        valid_compact = {"none", "eeg_summary", "psd_summary"}
+        if self.moe_router_compact_feature_mode not in valid_compact:
+            raise ValueError(
+                f"moe_router_compact_feature_mode must be one of {sorted(valid_compact)}, "
+                f"got {self.moe_router_compact_feature_mode!r}"
+            )
+        if self.moe_router_compact_feature_mode != "none" and self.moe_router_compact_feature_dim <= 0:
+            raise ValueError("moe_router_compact_feature_dim must be > 0 when compact router features are enabled")
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         if use_moe:
@@ -86,6 +121,19 @@ class CBraMod(nn.Module):
             for idx in range(n_layer):
                 moe_mod = None
                 if idx >= moe_start:
+                    use_spatial_specialists = True
+                    use_spectral_specialists = True
+                    if moe_specialist_branch_mode == "spatial_only":
+                        use_spectral_specialists = False
+                    elif moe_specialist_branch_mode == "spectral_only":
+                        use_spatial_specialists = False
+                    elif moe_specialist_branch_mode != "both":
+                        raise ValueError(
+                            f"moe_specialist_branch_mode must be one of ['both','spatial_only','spectral_only'], "
+                            f"got {moe_specialist_branch_mode!r}"
+                        )
+
+                    use_compact_router_summary = self.moe_router_compact_feature_mode != "none"
                     moe_mod = TypedCapacityDomainMoEFFN(
                         d_model=d_model,
                         dim_feedforward=dim_feedforward,
@@ -110,6 +158,20 @@ class CBraMod(nn.Module):
                         router_jitter_final_std=moe_router_jitter_final_std,
                         router_jitter_anneal_epochs=moe_router_jitter_anneal_epochs,
                         router_soft_warmup_epochs=moe_router_soft_warmup_epochs,
+                        uniform_dispatch_warmup_epochs=moe_uniform_dispatch_warmup_epochs,
+                        shared_blend_warmup_epochs=moe_shared_blend_warmup_epochs,
+                        shared_blend_start=moe_shared_blend_start,
+                        shared_blend_end=moe_shared_blend_end,
+                        router_entropy_coef_spatial=moe_router_entropy_coef_spatial,
+                        router_entropy_coef_spectral=moe_router_entropy_coef_spectral,
+                        router_balance_kl_coef_spatial=moe_router_balance_kl_coef_spatial,
+                        router_balance_kl_coef_spectral=moe_router_balance_kl_coef_spectral,
+                        use_spatial_specialists=use_spatial_specialists,
+                        use_spectral_specialists=use_spectral_specialists,
+                        use_eeg_summary_router_concat_spatial=use_compact_router_summary,
+                        use_eeg_summary_router_concat_spectral=use_compact_router_summary,
+                        eeg_summary_router_dim=self.moe_router_compact_feature_dim,
+                        expert_init_noise_std=moe_expert_init_noise_std,
                         load_balance_coef=moe_load_balance,
                         domain_bias_reg_coef=moe_domain_bias_reg,
                     )
@@ -182,8 +244,17 @@ class CBraMod(nn.Module):
     def forward(self, x, mask=None, batch_meta=None):
         tok_psd = None
         tok_meta = None
+        tok_eeg = None
         if self.use_moe and self.moe_use_psd_router_features:
             tok_psd = set_moe_psd_router_features(compact_psd_bandpowers(x))
+        if self.use_moe and self.moe_router_compact_feature_mode != "none":
+            if self.moe_router_compact_feature_mode == "eeg_summary":
+                compact = _compact_eeg_summary(x, self.moe_router_compact_feature_dim)
+            elif self.moe_router_compact_feature_mode == "psd_summary":
+                compact = compact_psd_bandpowers(x, n_bands=self.moe_router_compact_feature_dim)
+            else:
+                raise ValueError(f"Unsupported compact router mode: {self.moe_router_compact_feature_mode!r}")
+            tok_eeg = set_moe_eeg_router_summary(compact)
         if self.use_moe and self.moe_route_mode == "typed_capacity_domain":
             tok_meta = set_moe_faced_metadata(batch_meta)
         try:
@@ -194,6 +265,8 @@ class CBraMod(nn.Module):
         finally:
             if tok_psd is not None:
                 reset_moe_psd_router_features(tok_psd)
+            if tok_eeg is not None:
+                reset_moe_eeg_router_summary(tok_eeg)
             if tok_meta is not None:
                 reset_moe_faced_metadata(tok_meta)
 
@@ -316,6 +389,30 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_router_jitter_final_std': getattr(param, 'moe_router_jitter_final_std', 0.0),
         'moe_router_jitter_anneal_epochs': getattr(param, 'moe_router_jitter_anneal_epochs', 0),
         'moe_router_soft_warmup_epochs': getattr(param, 'moe_router_soft_warmup_epochs', 0),
+        'moe_uniform_dispatch_warmup_epochs': getattr(param, 'moe_uniform_dispatch_warmup_epochs', 0),
+        'moe_shared_blend_warmup_epochs': getattr(param, 'moe_shared_blend_warmup_epochs', 0),
+        'moe_shared_blend_start': getattr(param, 'moe_shared_blend_start', 1.0),
+        'moe_shared_blend_end': getattr(param, 'moe_shared_blend_end', 0.0),
+        'moe_router_entropy_coef_spatial': (
+            None if getattr(param, 'moe_router_entropy_coef_spatial', -1.0) < 0
+            else getattr(param, 'moe_router_entropy_coef_spatial', -1.0)
+        ),
+        'moe_router_entropy_coef_spectral': (
+            None if getattr(param, 'moe_router_entropy_coef_spectral', -1.0) < 0
+            else getattr(param, 'moe_router_entropy_coef_spectral', -1.0)
+        ),
+        'moe_router_balance_kl_coef_spatial': (
+            None if getattr(param, 'moe_router_balance_kl_coef_spatial', -1.0) < 0
+            else getattr(param, 'moe_router_balance_kl_coef_spatial', -1.0)
+        ),
+        'moe_router_balance_kl_coef_spectral': (
+            None if getattr(param, 'moe_router_balance_kl_coef_spectral', -1.0) < 0
+            else getattr(param, 'moe_router_balance_kl_coef_spectral', -1.0)
+        ),
+        'moe_specialist_branch_mode': getattr(param, 'moe_specialist_branch_mode', 'both'),
+        'moe_router_compact_feature_mode': getattr(param, 'moe_router_compact_feature_mode', 'none'),
+        'moe_router_compact_feature_dim': getattr(param, 'moe_router_compact_feature_dim', 8),
+        'moe_expert_init_noise_std': getattr(param, 'moe_expert_init_noise_std', 0.0),
         'moe_load_balance': getattr(param, 'moe_load_balance', 0.0),
         'moe_domain_bias_reg': getattr(param, 'moe_domain_bias_reg', 0.0),
     }
@@ -368,6 +465,7 @@ def load_foundation_into_backbone(backbone: nn.Module, param, ckpt_state: Dict[s
                 ckpt_state,
                 idx,
                 copy_specialist_linear1_from_dense=spec_l1,
+                expert_init_noise_std=getattr(param, 'moe_expert_init_noise_std', 0.0),
             )
 
     if attnres == 'none' and not use_moe:

@@ -6,7 +6,7 @@ import shutil
 import traceback
 from datetime import datetime
 from timeit import default_timer as timer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -122,35 +122,50 @@ class Trainer(object):
 
         self.best_model_states = None
 
-        backbone_params = []
-        other_params = []
+        self._named_trainable_params: List = []
+        grouped = {
+            'backbone': [],
+            'router': [],
+            'experts': [],
+            'classifier': [],
+            'other': [],
+        }
         for name, param in self.model.named_parameters():
             if "backbone" in name:
-                backbone_params.append(param)
-
                 if params.frozen:
                     param.requires_grad = False
                 else:
                     param.requires_grad = True
-            else:
-                other_params.append(param)
+            if not param.requires_grad:
+                continue
+            self._named_trainable_params.append((name, param))
+            grouped[self._component_name_for_param(name)].append(param)
 
         self.data_length = len(self.data_loader['train'])
+        if getattr(self.params, 'use_component_lr', False) and getattr(self.params, 'multi_lr', False):
+            print('[opt] use_component_lr=True overrides multi_lr=True.', flush=True)
+
         if self.params.optimizer == 'AdamW':
-            if self.params.multi_lr:
+            if getattr(self.params, 'use_component_lr', False):
+                self.optimizer = self._build_component_optimizer(grouped, kind='adamw')
+            elif self.params.multi_lr:
                 self.optimizer = torch.optim.AdamW([
-                    {'params': backbone_params, 'lr': self.params.lr},
-                    {'params': other_params, 'lr': 0.001 * (self.params.batch_size / 256) ** 0.5}
+                    {'params': grouped['backbone'], 'lr': self.params.lr},
+                    {'params': grouped['other'] + grouped['router'] + grouped['experts'] + grouped['classifier'],
+                     'lr': 0.001 * (self.params.batch_size / 256) ** 0.5}
                 ], weight_decay=self.params.weight_decay)
             else:
                 self.optimizer = torch.optim.AdamW(
                     self.model.parameters(), lr=self.params.lr,
                     weight_decay=self.params.weight_decay)
         else:
-            if self.params.multi_lr:
+            if getattr(self.params, 'use_component_lr', False):
+                self.optimizer = self._build_component_optimizer(grouped, kind='sgd')
+            elif self.params.multi_lr:
                 self.optimizer = torch.optim.SGD([
-                    {'params': backbone_params, 'lr': self.params.lr},
-                    {'params': other_params, 'lr': self.params.lr * 5}
+                    {'params': grouped['backbone'], 'lr': self.params.lr},
+                    {'params': grouped['other'] + grouped['router'] + grouped['experts'] + grouped['classifier'],
+                     'lr': self.params.lr * 5}
                 ], momentum=0.9, weight_decay=self.params.weight_decay)
             else:
                 self.optimizer = torch.optim.SGD(
@@ -162,7 +177,77 @@ class Trainer(object):
             self.optimizer, T_max=self.params.epochs * self.data_length, eta_min=1e-6
         )
 
+        if getattr(self.params, 'use_component_lr', False):
+            for i, g in enumerate(self.optimizer.param_groups):
+                print(
+                    f"[opt] group={i} name={g.get('name', 'unnamed')} lr={g.get('lr', 0.0):.6g} "
+                    f"num_params={len(g.get('params', []))}",
+                    flush=True,
+                )
+
         print(self.model)
+
+    @staticmethod
+    def _component_name_for_param(name: str) -> str:
+        if name.startswith('classifier') or '.classifier.' in name:
+            return 'classifier'
+        if 'backbone' not in name:
+            return 'other'
+        if 'moe_ffn.' not in name:
+            return 'backbone'
+        router_keys = (
+            'spatial_router',
+            'spectral_router',
+            'router_input_norm',
+            'domain_embeddings',
+            'domain_bias_mlp',
+            'adapter_cond_',
+            'subject_summary_proj',
+            'eeg_summary_proj',
+            'depth_summary_proj',
+        )
+        expert_keys = (
+            'shared.',
+            'spatial_specialists',
+            'spectral_specialists',
+        )
+        if any(k in name for k in router_keys):
+            return 'router'
+        if any(k in name for k in expert_keys):
+            return 'experts'
+        return 'backbone'
+
+    def _build_component_optimizer(self, grouped: Dict[str, List[torch.nn.Parameter]], kind: str):
+        base_lr = float(self.params.lr)
+        groups = []
+
+        def _add(name: str, params: List[torch.nn.Parameter], mult: float):
+            if not params:
+                return
+            groups.append({
+                'params': params,
+                'lr': base_lr * float(mult),
+                'name': name,
+            })
+
+        _add('backbone', grouped['backbone'], getattr(self.params, 'lr_backbone_mult', 1.0))
+        _add('router', grouped['router'], getattr(self.params, 'lr_router_mult', 1.0))
+        _add('experts', grouped['experts'], getattr(self.params, 'lr_expert_mult', 1.0))
+        _add('classifier', grouped['classifier'], getattr(self.params, 'lr_classifier_mult', 1.0))
+        _add('other', grouped['other'], getattr(self.params, 'lr_other_mult', 1.0))
+
+        if not groups:
+            raise RuntimeError('No trainable parameters found for component-wise optimizer.')
+        if kind == 'adamw':
+            return torch.optim.AdamW(groups, weight_decay=self.params.weight_decay)
+        return torch.optim.SGD(groups, momentum=0.9, weight_decay=self.params.weight_decay)
+
+    def _current_lr_by_group(self) -> Dict[str, float]:
+        out = {}
+        for i, g in enumerate(self.optimizer.param_groups):
+            name = str(g.get('name', f'group_{i}'))
+            out[name] = float(g.get('lr', 0.0))
+        return out
 
     def _add_moe_auxiliary_loss(self, loss):
         if not getattr(self.params, 'moe', False):
@@ -213,6 +298,113 @@ class Trainer(object):
                 print(line)
         if was_training:
             self.model.train()
+
+    def _collect_grad_norms(self) -> Dict[str, float]:
+        accum = {
+            'backbone': 0.0,
+            'router': 0.0,
+            'experts': 0.0,
+            'classifier': 0.0,
+            'other': 0.0,
+            'depth_summary_path': 0.0,
+        }
+        for name, p in self._named_trainable_params:
+            if p.grad is None:
+                continue
+            g2 = float(p.grad.detach().pow(2).sum().item())
+            accum[self._component_name_for_param(name)] += g2
+            if ('pre_attn_res' in name) or ('pre_mlp_res' in name) or ('depth_summary_proj' in name):
+                accum['depth_summary_path'] += g2
+        return {k: float(v ** 0.5) for k, v in accum.items()}
+
+    @staticmethod
+    def _classwise_recall_from_cm(cm: np.ndarray) -> List[float]:
+        if cm is None:
+            return []
+        row_sum = cm.sum(axis=1)
+        out = []
+        for i in range(cm.shape[0]):
+            denom = float(row_sum[i])
+            out.append(float(cm[i, i] / denom) if denom > 0 else 0.0)
+        return out
+
+    def _collect_layer_moe_diagnostics(self) -> List[Dict[str, Any]]:
+        out = []
+        if not getattr(self.params, 'moe', False):
+            return out
+        bb = getattr(self.model, 'backbone', None)
+        if bb is None or not hasattr(bb, 'encoder'):
+            return out
+        for i, layer in enumerate(bb.encoder.layers):
+            m = getattr(layer, 'moe_ffn', None)
+            diag = getattr(m, 'last_diagnostics', None) if m is not None else None
+            if diag is None:
+                continue
+            out.append({'layer': int(i), 'diag': _to_jsonable(diag)})
+        return out
+
+    def _warn_depth_summary_flow(self, epoch_one_based: int, grad_norms: Dict[str, float]) -> None:
+        if not getattr(self.params, 'moe', False):
+            return
+        if not getattr(self.params, 'moe_use_attnres_depth_router_features', False):
+            return
+        grad_mode = str(getattr(self.params, 'moe_attnres_depth_summary_grad_mode', 'detached'))
+        if grad_mode != 'delayed_unfreeze':
+            return
+        unfreeze_epoch = int(getattr(self.params, 'moe_attnres_depth_summary_unfreeze_epoch', 1))
+        if epoch_one_based < unfreeze_epoch:
+            return
+
+        layers = self._collect_layer_moe_diagnostics()
+        detached_layers = []
+        inactive_layers = []
+        for entry in layers:
+            d = entry.get('diag', {}) or {}
+            if bool(d.get('attnres_depth_summary_detached', False)):
+                detached_layers.append(int(entry['layer']))
+            if not bool(d.get('attnres_depth_summary_grad_active', False)):
+                inactive_layers.append(int(entry['layer']))
+
+        if detached_layers:
+            print(
+                f"[warn][depth_unfreeze] epoch={epoch_one_based} detached depth-summary still present in layers={detached_layers}",
+                flush=True,
+            )
+        if inactive_layers:
+            print(
+                f"[warn][depth_unfreeze] epoch={epoch_one_based} grad_active=False for depth-summary in layers={inactive_layers}",
+                flush=True,
+            )
+        if float(grad_norms.get('depth_summary_path', 0.0)) <= 0.0:
+            print(
+                f"[warn][depth_unfreeze] epoch={epoch_one_based} depth-summary path grad norm is zero after unfreeze",
+                flush=True,
+            )
+
+    def _append_machine_readable_epoch_diag(
+        self,
+        epoch_one_based: int,
+        split: str,
+        metrics: Dict[str, float],
+        grad_norms: Dict[str, float],
+        cm: Optional[np.ndarray] = None,
+    ) -> None:
+        md = self._model_dir()
+        os.makedirs(md, exist_ok=True)
+        path = os.path.join(md, 'epoch_diagnostics.jsonl')
+        payload = {
+            'epoch': int(epoch_one_based),
+            'split': str(split),
+            'timestamp_utc': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+            'metrics': _to_jsonable(metrics),
+            'grad_norms': _to_jsonable(grad_norms),
+            'moe_layers': self._collect_layer_moe_diagnostics(),
+        }
+        if cm is not None:
+            payload['confusion_matrix'] = np.asarray(cm).tolist()
+            payload['classwise_recall'] = self._classwise_recall_from_cm(np.asarray(cm))
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + '\n')
 
     def _model_dir(self) -> str:
         return getattr(self.params, "model_dir", ".") or "."
@@ -297,16 +489,36 @@ class Trainer(object):
             'moe_attnres_depth_router_dim': getattr(self.params, 'moe_attnres_depth_router_dim', ''),
             'moe_attnres_depth_summary_mode': getattr(self.params, 'moe_attnres_depth_summary_mode', ''),
             'moe_attnres_depth_probe_mlp_for_router': bool(getattr(self.params, 'moe_attnres_depth_probe_mlp_for_router', False)),
+            'moe_attnres_depth_summary_grad_mode': getattr(self.params, 'moe_attnres_depth_summary_grad_mode', ''),
+            'moe_attnres_depth_summary_unfreeze_epoch': getattr(self.params, 'moe_attnres_depth_summary_unfreeze_epoch', ''),
             'moe_router_dispatch_mode': getattr(self.params, 'moe_router_dispatch_mode', ''),
             'moe_router_temperature': getattr(self.params, 'moe_router_temperature', ''),
             'moe_router_entropy_coef': getattr(self.params, 'moe_router_entropy_coef', ''),
+            'moe_router_entropy_coef_spatial': getattr(self.params, 'moe_router_entropy_coef_spatial', ''),
+            'moe_router_entropy_coef_spectral': getattr(self.params, 'moe_router_entropy_coef_spectral', ''),
             'moe_router_balance_kl_coef': getattr(self.params, 'moe_router_balance_kl_coef', ''),
+            'moe_router_balance_kl_coef_spatial': getattr(self.params, 'moe_router_balance_kl_coef_spatial', ''),
+            'moe_router_balance_kl_coef_spectral': getattr(self.params, 'moe_router_balance_kl_coef_spectral', ''),
             'moe_router_jitter_std': getattr(self.params, 'moe_router_jitter_std', ''),
             'moe_router_jitter_final_std': getattr(self.params, 'moe_router_jitter_final_std', ''),
             'moe_router_jitter_anneal_epochs': getattr(self.params, 'moe_router_jitter_anneal_epochs', ''),
             'moe_router_soft_warmup_epochs': getattr(self.params, 'moe_router_soft_warmup_epochs', ''),
+            'moe_uniform_dispatch_warmup_epochs': getattr(self.params, 'moe_uniform_dispatch_warmup_epochs', ''),
+            'moe_shared_blend_warmup_epochs': getattr(self.params, 'moe_shared_blend_warmup_epochs', ''),
+            'moe_shared_blend_start': getattr(self.params, 'moe_shared_blend_start', ''),
+            'moe_shared_blend_end': getattr(self.params, 'moe_shared_blend_end', ''),
+            'moe_specialist_branch_mode': getattr(self.params, 'moe_specialist_branch_mode', ''),
+            'moe_router_compact_feature_mode': getattr(self.params, 'moe_router_compact_feature_mode', ''),
+            'moe_router_compact_feature_dim': getattr(self.params, 'moe_router_compact_feature_dim', ''),
+            'moe_expert_init_noise_std': getattr(self.params, 'moe_expert_init_noise_std', ''),
             'moe_domain_bias': bool(getattr(self.params, 'moe_domain_bias', False)),
             'moe_use_psd_router_features': bool(getattr(self.params, 'moe_use_psd_router_features', False)),
+            'use_component_lr': bool(getattr(self.params, 'use_component_lr', False)),
+            'lr_backbone_mult': getattr(self.params, 'lr_backbone_mult', ''),
+            'lr_router_mult': getattr(self.params, 'lr_router_mult', ''),
+            'lr_expert_mult': getattr(self.params, 'lr_expert_mult', ''),
+            'lr_classifier_mult': getattr(self.params, 'lr_classifier_mult', ''),
+            'lr_other_mult': getattr(self.params, 'lr_other_mult', ''),
         }
 
         write_header = not os.path.isfile(csv_path)
@@ -391,7 +603,18 @@ class Trainer(object):
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}", md)
 
+                grad_norms = self._collect_grad_norms()
+                lr_by_group = self._current_lr_by_group()
                 lr_cur = self.optimizer.param_groups[0]["lr"]
+                print(
+                    f"[diag] ep={epoch + 1} grad_norms={json.dumps(_to_jsonable(grad_norms), ensure_ascii=True)}",
+                    flush=True,
+                )
+                if getattr(self.params, 'use_component_lr', False):
+                    print(
+                        f"[diag] ep={epoch + 1} lr_groups={json.dumps(_to_jsonable(lr_by_group), ensure_ascii=True)}",
+                        flush=True,
+                    )
 
                 print(f"starting validation for epoch {epoch + 1}", flush=True)
                 _mem_report(f"starting_val_epoch_{epoch + 1}", md)
@@ -429,6 +652,26 @@ class Trainer(object):
                         if len(gate_vals) > 0:
                             print("[Gate values] " + " | ".join(gate_vals))
                     print(cm)
+                    classwise_recall = self._classwise_recall_from_cm(np.asarray(cm))
+                    print(
+                        f"[diag] ep={epoch + 1} classwise_recall={json.dumps(classwise_recall)}",
+                        flush=True,
+                    )
+                    self._append_machine_readable_epoch_diag(
+                        epoch_one_based=epoch + 1,
+                        split='val',
+                        metrics={
+                            'balanced_accuracy': float(acc),
+                            'kappa': float(kappa),
+                            'weighted_f1': float(f1),
+                            'lr': float(lr_cur),
+                            'loss_mean': float(np.mean(losses) if losses else float('nan')),
+                            'lr_groups': lr_by_group,
+                        },
+                        grad_norms=grad_norms,
+                        cm=np.asarray(cm),
+                    )
+                    self._warn_depth_summary_flow(epoch + 1, grad_norms)
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
                     if kappa > kappa_best:
@@ -631,7 +874,13 @@ class Trainer(object):
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}_binary", md)
 
+                grad_norms = self._collect_grad_norms()
+                lr_by_group = self._current_lr_by_group()
                 lr_cur = self.optimizer.param_groups[0]["lr"]
+                print(
+                    f"[diag] ep={epoch + 1} grad_norms={json.dumps(_to_jsonable(grad_norms), ensure_ascii=True)}",
+                    flush=True,
+                )
 
                 print(f"starting validation for epoch {epoch + 1}", flush=True)
                 _mem_report(f"starting_val_epoch_{epoch + 1}_binary", md)
@@ -654,6 +903,20 @@ class Trainer(object):
                         )
                     )
                     print(cm)
+                    self._append_machine_readable_epoch_diag(
+                        epoch_one_based=epoch + 1,
+                        split='val',
+                        metrics={
+                            'balanced_accuracy': float(acc),
+                            'pr_auc': float(pr_auc),
+                            'roc_auc': float(roc_auc),
+                            'lr': float(lr_cur),
+                            'loss_mean': float(np.mean(losses) if losses else float('nan')),
+                            'lr_groups': lr_by_group,
+                        },
+                        grad_norms=grad_norms,
+                        cm=np.asarray(cm),
+                    )
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
                     if roc_auc > roc_auc_best:
@@ -762,7 +1025,13 @@ class Trainer(object):
                 print(f"finished train loop for epoch {epoch + 1}", flush=True)
                 _mem_report(f"finished_train_epoch_{epoch + 1}_regr", md)
 
+                grad_norms = self._collect_grad_norms()
+                lr_by_group = self._current_lr_by_group()
                 lr_cur = self.optimizer.param_groups[0]["lr"]
+                print(
+                    f"[diag] ep={epoch + 1} grad_norms={json.dumps(_to_jsonable(grad_norms), ensure_ascii=True)}",
+                    flush=True,
+                )
 
                 print(f"starting validation for epoch {epoch + 1}", flush=True)
                 _mem_report(f"starting_val_epoch_{epoch + 1}_regr", md)
@@ -783,6 +1052,20 @@ class Trainer(object):
                             lr_cur,
                             (timer() - start_time) / 60
                         )
+                    )
+                    self._append_machine_readable_epoch_diag(
+                        epoch_one_based=epoch + 1,
+                        split='val',
+                        metrics={
+                            'corrcoef': float(corrcoef),
+                            'r2': float(r2),
+                            'rmse': float(rmse),
+                            'lr': float(lr_cur),
+                            'loss_mean': float(np.mean(losses) if losses else float('nan')),
+                            'lr_groups': lr_by_group,
+                        },
+                        grad_norms=grad_norms,
+                        cm=None,
                     )
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()

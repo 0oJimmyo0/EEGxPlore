@@ -215,6 +215,17 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         router_jitter_final_std: float = 0.0,
         router_jitter_anneal_epochs: int = 0,
         router_soft_warmup_epochs: int = 0,
+        uniform_dispatch_warmup_epochs: int = 0,
+        shared_blend_warmup_epochs: int = 0,
+        shared_blend_start: float = 1.0,
+        shared_blend_end: float = 0.0,
+        router_entropy_coef_spatial: Optional[float] = None,
+        router_entropy_coef_spectral: Optional[float] = None,
+        router_balance_kl_coef_spatial: Optional[float] = None,
+        router_balance_kl_coef_spectral: Optional[float] = None,
+        use_spatial_specialists: bool = True,
+        use_spectral_specialists: bool = True,
+        expert_init_noise_std: float = 0.0,
         load_balance_coef: float = 0.0,
         domain_bias_reg_coef: float = 0.0,
         device=None,
@@ -270,6 +281,29 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.router_jitter_final_std = float(max(0.0, router_jitter_final_std))
         self.router_jitter_anneal_epochs = int(max(0, router_jitter_anneal_epochs))
         self.router_soft_warmup_epochs = int(max(0, router_soft_warmup_epochs))
+        self.uniform_dispatch_warmup_epochs = int(max(0, uniform_dispatch_warmup_epochs))
+        self.shared_blend_warmup_epochs = int(max(0, shared_blend_warmup_epochs))
+        self.shared_blend_start = float(shared_blend_start)
+        self.shared_blend_end = float(shared_blend_end)
+        if not (0.0 <= self.shared_blend_start <= 1.0 and 0.0 <= self.shared_blend_end <= 1.0):
+            raise ValueError("shared_blend_start/end must be in [0, 1]")
+        self.router_entropy_coef_spatial = (
+            None if router_entropy_coef_spatial is None else float(router_entropy_coef_spatial)
+        )
+        self.router_entropy_coef_spectral = (
+            None if router_entropy_coef_spectral is None else float(router_entropy_coef_spectral)
+        )
+        self.router_balance_kl_coef_spatial = (
+            None if router_balance_kl_coef_spatial is None else float(router_balance_kl_coef_spatial)
+        )
+        self.router_balance_kl_coef_spectral = (
+            None if router_balance_kl_coef_spectral is None else float(router_balance_kl_coef_spectral)
+        )
+        self.use_spatial_specialists = bool(use_spatial_specialists)
+        self.use_spectral_specialists = bool(use_spectral_specialists)
+        if not self.use_spatial_specialists and not self.use_spectral_specialists:
+            raise ValueError("At least one specialist bank must be enabled.")
+        self.expert_init_noise_std = float(max(0.0, expert_init_noise_std))
         if self.use_subject_summary_router_concat and self.subject_summary_router_dim <= 0:
             raise ValueError("use_subject_summary_router_concat=True requires subject_summary_router_dim > 0")
         if (
@@ -392,6 +426,27 @@ class TypedCapacityDomainMoEFFN(nn.Module):
 
         self.last_diagnostics: Optional[Dict[str, Any]] = None
         self._routing_export_cache: Dict[str, Tensor] = {}
+
+    def _shared_blend_value(self, cur_epoch: int) -> float:
+        if self.shared_blend_warmup_epochs <= 0:
+            return self.shared_blend_end
+        if cur_epoch <= 0:
+            return self.shared_blend_start
+        if cur_epoch >= self.shared_blend_warmup_epochs:
+            return self.shared_blend_end
+        denom = float(max(1, self.shared_blend_warmup_epochs - 1))
+        t = float(cur_epoch - 1) / denom
+        return (1.0 - t) * self.shared_blend_start + t * self.shared_blend_end
+
+    def apply_expert_init_noise_(self, std: float) -> None:
+        std = float(max(0.0, std))
+        if std <= 0.0:
+            return
+        for bank in (self.spatial_specialists, self.spectral_specialists):
+            for spec in bank:
+                spec.linear1.weight.add_(torch.randn_like(spec.linear1.weight) * std)
+                if spec.linear1.bias is not None:
+                    spec.linear1.bias.add_(torch.randn_like(spec.linear1.bias) * std)
 
     def _zero_specialist_output_weights(self) -> None:
         for bank in (self.spatial_specialists, self.spectral_specialists):
@@ -673,6 +728,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         depth_probe_mlp_for_router = False
         depth_summary_grad_mode = "detached"
         depth_summary_grad_active = False
+        depth_summary_detached = True
         depth_summary_unfreeze_epoch = 1
         if self.use_attnres_depth_router_concat and router_context is not None:
             ds = router_context.get("attnres_depth_summary")
@@ -688,6 +744,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                     depth_summary_grad_mode = str(router_context.get("attnres_depth_summary_grad_mode"))
                 if "attnres_depth_summary_grad_active" in router_context:
                     depth_summary_grad_active = bool(router_context.get("attnres_depth_summary_grad_active"))
+                if "attnres_depth_summary_detached" in router_context:
+                    depth_summary_detached = bool(router_context.get("attnres_depth_summary_detached"))
                 if "attnres_depth_summary_unfreeze_epoch" in router_context:
                     depth_summary_unfreeze_epoch = int(router_context.get("attnres_depth_summary_unfreeze_epoch"))
 
@@ -705,6 +763,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 depth_sp = depth_sp * depth_path_scale
             if depth_sc is not None:
                 depth_sc = depth_sc * depth_path_scale
+
+        shared_blend = self._shared_blend_value(cur_epoch)
+        expert_residual_scale = 1.0 - shared_blend
 
         spatial_parts = [base_feat]
         spectral_parts = [base_feat]
@@ -759,6 +820,13 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         probs_sp = F.softmax(logits_sp, dim=-1)
         probs_sc = F.softmax(logits_sc, dim=-1)
 
+        uniform_dispatch_active = (
+            self.training
+            and self.uniform_dispatch_warmup_epochs > 0
+            and cur_epoch > 0
+            and cur_epoch <= self.uniform_dispatch_warmup_epochs
+        )
+
         raw_top1_sp = logits_sp.argmax(dim=-1)
         raw_top1_sc = logits_sc.argmax(dim=-1)
         raw_top1_sp_domain = logits_sp_domain.argmax(dim=-1)
@@ -777,23 +845,77 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         margin_sc_prob = top2_sc_p[:, 0] - (top2_sc_p[:, 1] if top2_sc_p.size(1) > 1 else 0.0)
 
         capacity = max(1, int(math.ceil(self.capacity_factor * b / float(self.num_specialists))))
-        soft_warmup_active = (
-            self.training
-            and self.router_soft_warmup_epochs > 0
+        soft_warmup_applicable = (
+            self.router_soft_warmup_epochs > 0
             and cur_epoch > 0
             and cur_epoch <= self.router_soft_warmup_epochs
+        )
+        soft_warmup_active = (
+            self.training
+            and self.router_dispatch_mode == "hard_capacity"
+            and soft_warmup_applicable
         )
         soft_dispatch_active = (self.router_dispatch_mode == "soft")
         early_reg_epochs = max(self.router_soft_warmup_epochs, 12)
         early_reg_boost = 1.0
         if self.training and cur_epoch > 0 and cur_epoch <= early_reg_epochs:
             early_reg_boost = 1.5
-        eff_entropy_coef_sp = self.router_entropy_coef * early_reg_boost
-        eff_entropy_coef_sc = self.router_entropy_coef * early_reg_boost
-        eff_balance_kl_coef_sp = self.router_balance_kl_coef * early_reg_boost
-        eff_balance_kl_coef_sc = self.router_balance_kl_coef * early_reg_boost
+        base_entropy_coef_sp = (
+            self.router_entropy_coef
+            if self.router_entropy_coef_spatial is None
+            else self.router_entropy_coef_spatial
+        )
+        base_entropy_coef_sc = (
+            self.router_entropy_coef
+            if self.router_entropy_coef_spectral is None
+            else self.router_entropy_coef_spectral
+        )
+        base_balance_kl_coef_sp = (
+            self.router_balance_kl_coef
+            if self.router_balance_kl_coef_spatial is None
+            else self.router_balance_kl_coef_spatial
+        )
+        base_balance_kl_coef_sc = (
+            self.router_balance_kl_coef
+            if self.router_balance_kl_coef_spectral is None
+            else self.router_balance_kl_coef_spectral
+        )
+        if not self.use_spatial_specialists:
+            base_entropy_coef_sp = 0.0
+            base_balance_kl_coef_sp = 0.0
+        if not self.use_spectral_specialists:
+            base_entropy_coef_sc = 0.0
+            base_balance_kl_coef_sc = 0.0
 
-        if soft_warmup_active or soft_dispatch_active:
+        eff_entropy_coef_sp = base_entropy_coef_sp * early_reg_boost
+        eff_entropy_coef_sc = base_entropy_coef_sc * early_reg_boost
+        eff_balance_kl_coef_sp = base_balance_kl_coef_sp * early_reg_boost
+        eff_balance_kl_coef_sc = base_balance_kl_coef_sc * early_reg_boost
+
+        if uniform_dispatch_active:
+            probs_sp_dispatch = torch.full_like(probs_sp, 1.0 / float(self.num_specialists))
+            probs_sc_dispatch = torch.full_like(probs_sc, 1.0 / float(self.num_specialists))
+            assign_sp = raw_top1_sp
+            assign_sc = raw_top1_sc
+            rerouted_sp = torch.zeros_like(assign_sp, dtype=torch.bool)
+            rerouted_sc = torch.zeros_like(assign_sc, dtype=torch.bool)
+            fallback_sp = torch.zeros_like(assign_sp, dtype=torch.bool)
+            fallback_sc = torch.zeros_like(assign_sc, dtype=torch.bool)
+            counts_sp_pre = torch.bincount(raw_top1_sp, minlength=self.num_specialists).to(dtype=torch.long)
+            counts_sc_pre = torch.bincount(raw_top1_sc, minlength=self.num_specialists).to(dtype=torch.long)
+            counts_sp = torch.round(probs_sp_dispatch.sum(dim=0)).to(dtype=torch.long)
+            counts_sc = torch.round(probs_sc_dispatch.sum(dim=0)).to(dtype=torch.long)
+            if self.use_spatial_specialists:
+                res_sp = self._bank_residual_soft(x_flat, probs_sp_dispatch, batch_idx, self.spatial_specialists)
+            else:
+                res_sp = torch.zeros_like(x_flat)
+            if self.use_spectral_specialists:
+                res_sc = self._bank_residual_soft(x_flat, probs_sc_dispatch, batch_idx, self.spectral_specialists)
+            else:
+                res_sc = torch.zeros_like(x_flat)
+        elif soft_warmup_active or soft_dispatch_active:
+            probs_sp_dispatch = probs_sp
+            probs_sc_dispatch = probs_sc
             assign_sp = raw_top1_sp
             assign_sc = raw_top1_sc
             rerouted_sp = torch.zeros_like(assign_sp, dtype=torch.bool)
@@ -804,18 +926,30 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             counts_sc_pre = torch.bincount(raw_top1_sc, minlength=self.num_specialists).to(dtype=torch.long)
             counts_sp = counts_sp_pre.clone()
             counts_sc = counts_sc_pre.clone()
-            res_sp = self._bank_residual_soft(x_flat, probs_sp, batch_idx, self.spatial_specialists)
-            res_sc = self._bank_residual_soft(x_flat, probs_sc, batch_idx, self.spectral_specialists)
+            if self.use_spatial_specialists:
+                res_sp = self._bank_residual_soft(x_flat, probs_sp_dispatch, batch_idx, self.spatial_specialists)
+            else:
+                res_sp = torch.zeros_like(x_flat)
+            if self.use_spectral_specialists:
+                res_sc = self._bank_residual_soft(x_flat, probs_sc_dispatch, batch_idx, self.spectral_specialists)
+            else:
+                res_sc = torch.zeros_like(x_flat)
         else:
             assign_sp, rerouted_sp, fallback_sp, counts_sp_pre, counts_sp = self._capacity_assign_top1(logits_sp, capacity)
             assign_sc, rerouted_sc, fallback_sc, counts_sc_pre, counts_sc = self._capacity_assign_top1(logits_sc, capacity)
-            res_sp = self._bank_residual(x_flat, assign_sp, batch_idx, self.spatial_specialists)
-            res_sc = self._bank_residual(x_flat, assign_sc, batch_idx, self.spectral_specialists)
+            if self.use_spatial_specialists:
+                res_sp = self._bank_residual(x_flat, assign_sp, batch_idx, self.spatial_specialists)
+            else:
+                res_sp = torch.zeros_like(x_flat)
+            if self.use_spectral_specialists:
+                res_sc = self._bank_residual(x_flat, assign_sc, batch_idx, self.spectral_specialists)
+            else:
+                res_sc = torch.zeros_like(x_flat)
 
-        out = h_shared + res_sp + res_sc
+        out = h_shared + expert_residual_scale * (res_sp + res_sc)
 
-        lb_sp = self._bank_load_balance(probs_sp, raw_top1_sp)
-        lb_sc = self._bank_load_balance(probs_sc, raw_top1_sc)
+        lb_sp = self._bank_load_balance(probs_sp, raw_top1_sp) if self.use_spatial_specialists else probs_sp.new_zeros(())
+        lb_sc = self._bank_load_balance(probs_sc, raw_top1_sc) if self.use_spectral_specialists else probs_sc.new_zeros(())
         lb = lb_sp + lb_sc
 
         reroute_frac = rerouted_sp.float().mean() + rerouted_sc.float().mean()
@@ -829,8 +963,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         entropy_reg = -(entropy_sp + entropy_sc)
         entropy_reg_sp = -entropy_sp
         entropy_reg_sc = -entropy_sc
-        balance_kl_sp = self._batch_uniform_kl(probs_sp)
-        balance_kl_sc = self._batch_uniform_kl(probs_sc)
+        balance_kl_sp = self._batch_uniform_kl(probs_sp) if self.use_spatial_specialists else probs_sp.new_zeros(())
+        balance_kl_sc = self._batch_uniform_kl(probs_sc) if self.use_spectral_specialists else probs_sc.new_zeros(())
         balance_kl = balance_kl_sp + balance_kl_sc
         z_loss = torch.logsumexp(logits_sp, dim=-1).pow(2).mean() + torch.logsumexp(logits_sc, dim=-1).pow(2).mean()
 
@@ -886,16 +1020,25 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "router_temperature": float(self.router_temperature),
             "router_soft_warmup_epochs": int(self.router_soft_warmup_epochs),
             "router_soft_warmup_active": bool(soft_warmup_active),
+            "router_soft_warmup_applicable_epoch": bool(soft_warmup_applicable),
             "router_dispatch_mode": str(self.router_dispatch_mode),
             "route_strategy": (
+                "uniform_dispatch_warmup"
+                if uniform_dispatch_active
+                else (
                 "soft_dispatch"
                 if soft_dispatch_active
                 else ("soft_warmup" if soft_warmup_active else "hard_capacity")
+                )
             ),
             "router_entropy_coef": float(self.router_entropy_coef),
+            "router_entropy_coef_spatial": float(base_entropy_coef_sp),
+            "router_entropy_coef_spectral": float(base_entropy_coef_sc),
             "router_entropy_coef_effective": float(eff_entropy_coef_sp),
             "router_entropy_coef_effective_spectral": float(eff_entropy_coef_sc),
             "router_balance_kl_coef": float(self.router_balance_kl_coef),
+            "router_balance_kl_coef_spatial": float(base_balance_kl_coef_sp),
+            "router_balance_kl_coef_spectral": float(base_balance_kl_coef_sc),
             "router_balance_kl_coef_effective": float(eff_balance_kl_coef_sp),
             "router_balance_kl_coef_effective_spectral": float(eff_balance_kl_coef_sc),
             "router_early_reg_boost": float(early_reg_boost),
@@ -916,7 +1059,14 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "attnres_depth_probe_mlp_for_router": depth_probe_mlp_for_router,
             "attnres_depth_summary_grad_mode": depth_summary_grad_mode,
             "attnres_depth_summary_grad_active": depth_summary_grad_active,
+            "attnres_depth_summary_detached": bool(depth_summary_detached),
             "attnres_depth_summary_unfreeze_epoch": depth_summary_unfreeze_epoch,
+            "spatial_bank_enabled": bool(self.use_spatial_specialists),
+            "spectral_bank_enabled": bool(self.use_spectral_specialists),
+            "uniform_dispatch_warmup_epochs": int(self.uniform_dispatch_warmup_epochs),
+            "uniform_dispatch_warmup_active": bool(uniform_dispatch_active),
+            "shared_blend": float(shared_blend),
+            "expert_residual_scale": float(expert_residual_scale),
             "mean_shared_output_norm": float(h_shared.float().norm(dim=-1).mean().item()),
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),
@@ -1024,6 +1174,7 @@ def warm_start_typed_capacity_domain_from_dense_ckpt(
     ckpt: Dict[str, Any],
     layer_idx: int,
     copy_dense_into_specialist_linear1: bool,
+    expert_init_noise_std: float = 0.0,
 ) -> None:
     p1w = f"encoder.layers.{layer_idx}.linear1.weight"
     p1b = f"encoder.layers.{layer_idx}.linear1.bias"
@@ -1043,17 +1194,14 @@ def warm_start_typed_capacity_domain_from_dense_ckpt(
     if b2 is not None and moe.shared.linear2.bias is not None:
         moe.shared.linear2.bias.copy_(b2)
 
-    sym_eps = 1e-4
     if copy_dense_into_specialist_linear1:
         for bank in (moe.spatial_specialists, moe.spectral_specialists):
             for spec in bank:
                 spec.linear1.weight.copy_(w1)
                 if b1 is not None and spec.linear1.bias is not None:
                     spec.linear1.bias.copy_(b1)
-                spec.linear1.weight.add_(torch.randn_like(spec.linear1.weight) * sym_eps)
-                if spec.linear1.bias is not None:
-                    spec.linear1.bias.add_(torch.randn_like(spec.linear1.bias) * sym_eps)
 
+    moe.apply_expert_init_noise_(expert_init_noise_std)
     moe._zero_specialist_output_weights()
 
 
@@ -1062,6 +1210,7 @@ def warm_start_moe_from_dense_ckpt(
     ckpt: Dict[str, Any],
     layer_idx: int,
     copy_specialist_linear1_from_dense: bool = True,
+    expert_init_noise_std: float = 0.0,
 ) -> None:
     if not isinstance(moe, TypedCapacityDomainMoEFFN):
         raise TypeError(f"Expected TypedCapacityDomainMoEFFN, got {type(moe)}")
@@ -1070,6 +1219,7 @@ def warm_start_moe_from_dense_ckpt(
         ckpt,
         layer_idx,
         copy_dense_into_specialist_linear1=copy_specialist_linear1_from_dense,
+        expert_init_noise_std=expert_init_noise_std,
     )
 
 
@@ -1104,7 +1254,16 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"temp(sp/sc)=({diag.get('router_temperature', 1.0):.4f}/"
             f"{diag.get('router_temperature', 1.0):.4f})  "
             f"soft_warmup_active={diag.get('router_soft_warmup_active', False)}  "
+            f"soft_warmup_applicable_epoch={diag.get('router_soft_warmup_applicable_epoch', False)}  "
             f"soft_warmup_epochs={diag.get('router_soft_warmup_epochs', 0)}"
+        ),
+        (
+            f"    banks_enabled(sp/sc)=({diag.get('spatial_bank_enabled', True)}/"
+            f"{diag.get('spectral_bank_enabled', True)})  "
+            f"uniform_warmup(active/epochs)=({diag.get('uniform_dispatch_warmup_active', False)}/"
+            f"{diag.get('uniform_dispatch_warmup_epochs', 0)})  "
+            f"shared_blend={diag.get('shared_blend', 0.0):.4f}  "
+            f"expert_residual_scale={diag.get('expert_residual_scale', 1.0):.4f}"
         ),
         (
             f"    router_concat: subject_summary={diag.get('subject_summary_router_concat', False)}  "
@@ -1120,6 +1279,7 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"probe_mlp={diag.get('attnres_depth_probe_mlp_for_router', False)}  "
             f"grad_mode={diag.get('attnres_depth_summary_grad_mode', 'detached')}  "
             f"grad_active={diag.get('attnres_depth_summary_grad_active', False)}  "
+            f"detached={diag.get('attnres_depth_summary_detached', True)}  "
             f"unfreeze_epoch={diag.get('attnres_depth_summary_unfreeze_epoch', 1)}"
         ),
         (
@@ -1127,12 +1287,16 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"overflow={diag.get('aux_overflow', 0.0):.6f}  domain_reg={diag.get('aux_domain_bias_reg', 0.0):.6f}  "
             f"entropy_reg={diag.get('aux_entropy_reg', 0.0):.6f}  entropy_coef_sp(base/eff)=({diag.get('router_entropy_coef', 0.0):.6f}/"
             f"{diag.get('router_entropy_coef_effective', diag.get('router_entropy_coef', 0.0)):.6f})  "
+            f"entropy_coef_spatial={diag.get('router_entropy_coef_spatial', diag.get('router_entropy_coef', 0.0)):.6f}  "
             f"entropy_coef_sc(base/eff)=({diag.get('router_entropy_coef', 0.0):.6f}/"
             f"{diag.get('router_entropy_coef_effective_spectral', diag.get('router_entropy_coef_effective', diag.get('router_entropy_coef', 0.0))):.6f})  "
+            f"entropy_coef_spectral={diag.get('router_entropy_coef_spectral', diag.get('router_entropy_coef', 0.0)):.6f}  "
             f"balance_kl={diag.get('aux_balance_kl', 0.0):.6f}  balance_kl_coef(base/eff)=({diag.get('router_balance_kl_coef', 0.0):.6f}/"
             f"{diag.get('router_balance_kl_coef_effective', diag.get('router_balance_kl_coef', 0.0)):.6f})  "
+            f"balance_kl_coef_spatial={diag.get('router_balance_kl_coef_spatial', diag.get('router_balance_kl_coef', 0.0)):.6f}  "
             f"balance_kl_coef_sc(base/eff)=({diag.get('router_balance_kl_coef', 0.0):.6f}/"
             f"{diag.get('router_balance_kl_coef_effective_spectral', diag.get('router_balance_kl_coef_effective', diag.get('router_balance_kl_coef', 0.0))):.6f})  "
+            f"balance_kl_coef_spectral={diag.get('router_balance_kl_coef_spectral', diag.get('router_balance_kl_coef', 0.0)):.6f}  "
             f"early_reg_boost={diag.get('router_early_reg_boost', 1.0):.2f}<=ep{diag.get('router_early_reg_epochs', 0)}  "
             f"z_loss={diag.get('aux_z_loss', 0.0):.6f}  z_loss_coef={diag.get('router_z_loss_coef', 0.0):.6f}"
         ),

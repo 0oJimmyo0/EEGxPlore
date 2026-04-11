@@ -35,6 +35,11 @@ mkdir -p "$REPO_DIR/logs/SEED-V/out" "$REPO_DIR/logs/SEED-V/err"
 #   depth_dim     : 15 | 26
 #   depth_summary : attn_delta4 | attn_mlp_balanced | attn_mlp_latemix | auto
 #   grad          : detached | delayed_unfreeze | trainable
+#   branch        : both | spatial_only | spectral_only
+#   compact       : none | eeg_summary | psd_summary
+#   uniform_warmup: <int>=0
+#   shared_blend  : <int>=0 (warmup epochs)
+#   component_lr  : off | tuned
 #
 # Backward compatibility:
 #   CASE_NAME supports legacy values:
@@ -44,8 +49,8 @@ mkdir -p "$REPO_DIR/logs/SEED-V/out" "$REPO_DIR/logs/SEED-V/err"
 
 CASE_NAME="${CASE_NAME:-}"
 PROFILE="${PROFILE:-best}"
-ABLATION_GROUP="${ABLATION_GROUP:-attnres}"
-ABLATION_VALUE="${ABLATION_VALUE:-full}"
+ABLATION_GROUP="${ABLATION_GROUP:-none}"
+ABLATION_VALUE="${ABLATION_VALUE:-}"
 
 DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb}"
 MODEL_ROOT="${MODEL_ROOT:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/SEEDV_sparse_adaptation}"
@@ -53,7 +58,7 @@ FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_r
 SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-}"
 
 CUDA_ID="${CUDA_ID:-0}"
-EPOCHS="${EPOCHS:-50}"
+EPOCHS="${EPOCHS:-40}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
@@ -128,6 +133,31 @@ ROUTER_JITTER_STD="0.02"
 ROUTER_JITTER_FINAL_STD="0.005"
 ROUTER_JITTER_ANNEAL_EPOCHS="30"
 ROUTER_SOFT_WARMUP_EPOCHS="15"
+
+# New selective/compact knobs (no-op defaults preserve previous behavior).
+MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS="${MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS:-0}"
+MOE_SHARED_BLEND_WARMUP_EPOCHS="${MOE_SHARED_BLEND_WARMUP_EPOCHS:-0}"
+MOE_SHARED_BLEND_START="${MOE_SHARED_BLEND_START:-1.0}"
+MOE_SHARED_BLEND_END="${MOE_SHARED_BLEND_END:-0.0}"
+MOE_ROUTER_ENTROPY_COEF_SPATIAL="${MOE_ROUTER_ENTROPY_COEF_SPATIAL:--1.0}"
+MOE_ROUTER_ENTROPY_COEF_SPECTRAL="${MOE_ROUTER_ENTROPY_COEF_SPECTRAL:--1.0}"
+MOE_ROUTER_BALANCE_KL_COEF_SPATIAL="${MOE_ROUTER_BALANCE_KL_COEF_SPATIAL:--1.0}"
+MOE_ROUTER_BALANCE_KL_COEF_SPECTRAL="${MOE_ROUTER_BALANCE_KL_COEF_SPECTRAL:--1.0}"
+MOE_SPECIALIST_BRANCH_MODE="${MOE_SPECIALIST_BRANCH_MODE:-both}"
+MOE_ROUTER_COMPACT_FEATURE_MODE="${MOE_ROUTER_COMPACT_FEATURE_MODE:-none}"
+MOE_ROUTER_COMPACT_FEATURE_DIM="${MOE_ROUTER_COMPACT_FEATURE_DIM:-8}"
+MOE_EXPERT_INIT_NOISE_STD="${MOE_EXPERT_INIT_NOISE_STD:-0.0}"
+
+# Optional component-wise LR controls.
+USE_COMPONENT_LR="${USE_COMPONENT_LR:-0}"
+LR_BACKBONE_MULT="${LR_BACKBONE_MULT:-1.0}"
+LR_ROUTER_MULT="${LR_ROUTER_MULT:-1.0}"
+LR_EXPERT_MULT="${LR_EXPERT_MULT:-1.0}"
+LR_CLASSIFIER_MULT="${LR_CLASSIFIER_MULT:-1.0}"
+LR_OTHER_MULT="${LR_OTHER_MULT:-1.0}"
+
+# Escape hatch for future args without editing this script again.
+EXTRA_SEEDV_ARGS="${EXTRA_SEEDV_ARGS:-}"
 
 case "$PROFILE" in
   baseline)
@@ -220,6 +250,63 @@ if [[ "$ABLATION_GROUP" != "none" ]]; then
           ;;
       esac
       ;;
+    branch)
+      case "$ABLATION_VALUE" in
+        both|spatial_only|spectral_only)
+          MOE_SPECIALIST_BRANCH_MODE="$ABLATION_VALUE"
+          ;;
+        *)
+          echo "[seedv-slurm] invalid ABLATION_VALUE for branch: $ABLATION_VALUE" >&2
+          exit 2
+          ;;
+      esac
+      ;;
+    compact)
+      case "$ABLATION_VALUE" in
+        none|eeg_summary|psd_summary)
+          MOE_ROUTER_COMPACT_FEATURE_MODE="$ABLATION_VALUE"
+          ;;
+        *)
+          echo "[seedv-slurm] invalid ABLATION_VALUE for compact: $ABLATION_VALUE" >&2
+          exit 2
+          ;;
+      esac
+      ;;
+    uniform_warmup)
+      if [[ "$ABLATION_VALUE" =~ ^[0-9]+$ ]]; then
+        MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS="$ABLATION_VALUE"
+      else
+        echo "[seedv-slurm] invalid ABLATION_VALUE for uniform_warmup: $ABLATION_VALUE" >&2
+        exit 2
+      fi
+      ;;
+    shared_blend)
+      if [[ "$ABLATION_VALUE" =~ ^[0-9]+$ ]]; then
+        MOE_SHARED_BLEND_WARMUP_EPOCHS="$ABLATION_VALUE"
+      else
+        echo "[seedv-slurm] invalid ABLATION_VALUE for shared_blend: $ABLATION_VALUE" >&2
+        exit 2
+      fi
+      ;;
+    component_lr)
+      case "$ABLATION_VALUE" in
+        off)
+          USE_COMPONENT_LR="0"
+          ;;
+        tuned)
+          USE_COMPONENT_LR="1"
+          LR_BACKBONE_MULT="0.6"
+          LR_ROUTER_MULT="1.8"
+          LR_EXPERT_MULT="1.4"
+          LR_CLASSIFIER_MULT="1.2"
+          LR_OTHER_MULT="1.0"
+          ;;
+        *)
+          echo "[seedv-slurm] invalid ABLATION_VALUE for component_lr: $ABLATION_VALUE" >&2
+          exit 2
+          ;;
+      esac
+      ;;
     *)
       echo "[seedv-slurm] invalid ABLATION_GROUP=$ABLATION_GROUP" >&2
       exit 2
@@ -284,6 +371,18 @@ if [[ "$USE_MOE" == "1" ]]; then
     --moe_router_jitter_final_std "$ROUTER_JITTER_FINAL_STD"
     --moe_router_jitter_anneal_epochs "$ROUTER_JITTER_ANNEAL_EPOCHS"
     --moe_router_soft_warmup_epochs "$ROUTER_SOFT_WARMUP_EPOCHS"
+    --moe_uniform_dispatch_warmup_epochs "$MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS"
+    --moe_shared_blend_warmup_epochs "$MOE_SHARED_BLEND_WARMUP_EPOCHS"
+    --moe_shared_blend_start "$MOE_SHARED_BLEND_START"
+    --moe_shared_blend_end "$MOE_SHARED_BLEND_END"
+    --moe_router_entropy_coef_spatial "$MOE_ROUTER_ENTROPY_COEF_SPATIAL"
+    --moe_router_entropy_coef_spectral "$MOE_ROUTER_ENTROPY_COEF_SPECTRAL"
+    --moe_router_balance_kl_coef_spatial "$MOE_ROUTER_BALANCE_KL_COEF_SPATIAL"
+    --moe_router_balance_kl_coef_spectral "$MOE_ROUTER_BALANCE_KL_COEF_SPECTRAL"
+    --moe_specialist_branch_mode "$MOE_SPECIALIST_BRANCH_MODE"
+    --moe_router_compact_feature_mode "$MOE_ROUTER_COMPACT_FEATURE_MODE"
+    --moe_router_compact_feature_dim "$MOE_ROUTER_COMPACT_FEATURE_DIM"
+    --moe_expert_init_noise_std "$MOE_EXPERT_INIT_NOISE_STD"
   )
 
   if [[ "$ROUTER_ARCH" == "mlp" ]]; then
@@ -302,6 +401,23 @@ if [[ "$USE_MOE" == "1" ]]; then
       EXTRA_ARGS+=(--moe_attnres_depth_probe_mlp_for_router)
     fi
   fi
+
+  if [[ "$USE_COMPONENT_LR" == "1" ]]; then
+    EXTRA_ARGS+=(
+      --use_component_lr
+      --lr_backbone_mult "$LR_BACKBONE_MULT"
+      --lr_router_mult "$LR_ROUTER_MULT"
+      --lr_expert_mult "$LR_EXPERT_MULT"
+      --lr_classifier_mult "$LR_CLASSIFIER_MULT"
+      --lr_other_mult "$LR_OTHER_MULT"
+    )
+  fi
+fi
+
+if [[ -n "$EXTRA_SEEDV_ARGS" ]]; then
+  # shellcheck disable=SC2206
+  EXTRA_SEEDV_ARR=($EXTRA_SEEDV_ARGS)
+  EXTRA_ARGS+=("${EXTRA_SEEDV_ARR[@]}")
 fi
 
 mkdir -p "$MODEL_DIR"
@@ -312,6 +428,9 @@ echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2
 echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM depth_summary=$DEPTH_SUMMARY_MODE" >&2
 echo "[seedv-slurm] depth_grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
+echo "[seedv-slurm] branch_mode=$MOE_SPECIALIST_BRANCH_MODE compact_mode=$MOE_ROUTER_COMPACT_FEATURE_MODE compact_dim=$MOE_ROUTER_COMPACT_FEATURE_DIM" >&2
+echo "[seedv-slurm] uniform_warmup=$MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS shared_blend_warmup=$MOE_SHARED_BLEND_WARMUP_EPOCHS blend=($MOE_SHARED_BLEND_START->$MOE_SHARED_BLEND_END)" >&2
+echo "[seedv-slurm] expert_init_noise_std=$MOE_EXPERT_INIT_NOISE_STD component_lr=$USE_COMPONENT_LR" >&2
 echo "[seedv-slurm] dataset_dir=$DATASET_DIR split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>}" >&2
 
 time python "$REPO_DIR/finetune_main.py" \

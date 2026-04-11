@@ -264,6 +264,97 @@ def main():
         default=0,
         help='Use soft-routing warmup for first N training epochs (0 disables).',
     )
+    parser.add_argument(
+        '--moe_uniform_dispatch_warmup_epochs',
+        type=int,
+        default=0,
+        help='For first N epochs, dispatch uniformly across experts to avoid early lock-in.',
+    )
+    parser.add_argument(
+        '--moe_shared_blend_warmup_epochs',
+        type=int,
+        default=0,
+        help='Warmup epochs for shared-vs-expert blending ramp (0 disables).',
+    )
+    parser.add_argument(
+        '--moe_shared_blend_start',
+        type=float,
+        default=1.0,
+        help='Shared blend value at warmup start (1=shared-only, 0=full expert residual).',
+    )
+    parser.add_argument(
+        '--moe_shared_blend_end',
+        type=float,
+        default=0.0,
+        help='Shared blend value after warmup (typically 0 for full expert residual).',
+    )
+    parser.add_argument(
+        '--moe_router_entropy_coef_spatial',
+        type=float,
+        default=-1.0,
+        help='Spatial branch entropy coef; negative means fallback to --moe_router_entropy_coef.',
+    )
+    parser.add_argument(
+        '--moe_router_entropy_coef_spectral',
+        type=float,
+        default=-1.0,
+        help='Spectral branch entropy coef; negative means fallback to --moe_router_entropy_coef.',
+    )
+    parser.add_argument(
+        '--moe_router_balance_kl_coef_spatial',
+        type=float,
+        default=-1.0,
+        help='Spatial branch KL balance coef; negative means fallback to --moe_router_balance_kl_coef.',
+    )
+    parser.add_argument(
+        '--moe_router_balance_kl_coef_spectral',
+        type=float,
+        default=-1.0,
+        help='Spectral branch KL balance coef; negative means fallback to --moe_router_balance_kl_coef.',
+    )
+    parser.add_argument(
+        '--moe_specialist_branch_mode',
+        type=str,
+        default='both',
+        choices=['both', 'spatial_only', 'spectral_only'],
+        help='Enable both specialist banks, or only spatial/spectral specialists with the other branch shared-only.',
+    )
+    parser.add_argument(
+        '--moe_router_compact_feature_mode',
+        type=str,
+        default='none',
+        choices=['none', 'eeg_summary', 'psd_summary'],
+        help='Optional compact extra router signal added to both banks (small pooled summary only).',
+    )
+    parser.add_argument(
+        '--moe_router_compact_feature_dim',
+        type=int,
+        default=8,
+        help='Dimension of compact extra router signal (recommended 8-16).',
+    )
+    parser.add_argument(
+        '--moe_expert_init_noise_std',
+        type=float,
+        default=0.0,
+        help='Tiny Gaussian noise std applied to expert linear1 after dense warm-start for symmetry breaking.',
+    )
+
+    parser.add_argument(
+        '--use_component_lr',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Use component-wise LR multipliers (backbone/router/experts/classifier/other).',
+    )
+    parser.add_argument('--lr_backbone_mult', type=float, default=1.0,
+                        help='LR multiplier for backbone parameters.')
+    parser.add_argument('--lr_router_mult', type=float, default=1.0,
+                        help='LR multiplier for MoE router parameters.')
+    parser.add_argument('--lr_expert_mult', type=float, default=1.0,
+                        help='LR multiplier for MoE expert/shared FFN parameters.')
+    parser.add_argument('--lr_classifier_mult', type=float, default=1.0,
+                        help='LR multiplier for classifier head parameters.')
+    parser.add_argument('--lr_other_mult', type=float, default=1.0,
+                        help='LR multiplier for non-classifier/non-backbone parameters.')
 
     parser.add_argument(
         '--tqdm',
@@ -322,10 +413,33 @@ def main():
         raise ValueError('--moe_router_jitter_anneal_epochs must be >= 0.')
     if params.moe_router_soft_warmup_epochs < 0:
         raise ValueError('--moe_router_soft_warmup_epochs must be >= 0.')
+    if params.moe_uniform_dispatch_warmup_epochs < 0:
+        raise ValueError('--moe_uniform_dispatch_warmup_epochs must be >= 0.')
+    if params.moe_shared_blend_warmup_epochs < 0:
+        raise ValueError('--moe_shared_blend_warmup_epochs must be >= 0.')
+    if not (0.0 <= params.moe_shared_blend_start <= 1.0):
+        raise ValueError('--moe_shared_blend_start must be in [0, 1].')
+    if not (0.0 <= params.moe_shared_blend_end <= 1.0):
+        raise ValueError('--moe_shared_blend_end must be in [0, 1].')
     if params.moe_attnres_depth_summary_unfreeze_epoch < 1:
         raise ValueError('--moe_attnres_depth_summary_unfreeze_epoch must be >= 1.')
     if params.moe_attnres_depth_router_dim <= 0:
         raise ValueError('--moe_attnres_depth_router_dim must be > 0.')
+    if params.moe_router_compact_feature_dim <= 0:
+        raise ValueError('--moe_router_compact_feature_dim must be > 0.')
+    if params.moe_expert_init_noise_std < 0:
+        raise ValueError('--moe_expert_init_noise_std must be >= 0.')
+    if params.moe_router_entropy_coef_spatial < 0 and params.moe_router_entropy_coef_spatial != -1.0:
+        raise ValueError('--moe_router_entropy_coef_spatial must be >= 0 or -1 for fallback.')
+    if params.moe_router_entropy_coef_spectral < 0 and params.moe_router_entropy_coef_spectral != -1.0:
+        raise ValueError('--moe_router_entropy_coef_spectral must be >= 0 or -1 for fallback.')
+    if params.moe_router_balance_kl_coef_spatial < 0 and params.moe_router_balance_kl_coef_spatial != -1.0:
+        raise ValueError('--moe_router_balance_kl_coef_spatial must be >= 0 or -1 for fallback.')
+    if params.moe_router_balance_kl_coef_spectral < 0 and params.moe_router_balance_kl_coef_spectral != -1.0:
+        raise ValueError('--moe_router_balance_kl_coef_spectral must be >= 0 or -1 for fallback.')
+    for k in ['lr_backbone_mult', 'lr_router_mult', 'lr_expert_mult', 'lr_classifier_mult', 'lr_other_mult']:
+        if getattr(params, k) <= 0:
+            raise ValueError(f'--{k} must be > 0.')
     print(params)
 
     setup_seed(params.seed)
