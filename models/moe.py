@@ -729,7 +729,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         depth_summary_grad_mode = "detached"
         depth_summary_grad_active = False
         depth_summary_detached = True
+        depth_summary_cur_epoch = int(cur_epoch)
         depth_summary_unfreeze_epoch = 1
+        depth_summary_unfreeze_reached = False
         if self.use_attnres_depth_router_concat and router_context is not None:
             ds = router_context.get("attnres_depth_summary")
             if torch.is_tensor(ds):
@@ -746,8 +748,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                     depth_summary_grad_active = bool(router_context.get("attnres_depth_summary_grad_active"))
                 if "attnres_depth_summary_detached" in router_context:
                     depth_summary_detached = bool(router_context.get("attnres_depth_summary_detached"))
+                if "attnres_depth_summary_cur_epoch" in router_context:
+                    depth_summary_cur_epoch = int(router_context.get("attnres_depth_summary_cur_epoch"))
                 if "attnres_depth_summary_unfreeze_epoch" in router_context:
                     depth_summary_unfreeze_epoch = int(router_context.get("attnres_depth_summary_unfreeze_epoch"))
+                depth_summary_unfreeze_reached = depth_summary_cur_epoch >= depth_summary_unfreeze_epoch
 
         base_feat = _attnres_base_features(baseline, attnres)
         subj_sp, subj_sc = self._subject_summary_router_features(router_context, b, x.device, base_feat.dtype)
@@ -1060,7 +1065,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "attnres_depth_summary_grad_mode": depth_summary_grad_mode,
             "attnres_depth_summary_grad_active": depth_summary_grad_active,
             "attnres_depth_summary_detached": bool(depth_summary_detached),
+            "attnres_depth_summary_cur_epoch": int(depth_summary_cur_epoch),
             "attnres_depth_summary_unfreeze_epoch": depth_summary_unfreeze_epoch,
+            "attnres_depth_summary_unfreeze_reached": bool(depth_summary_unfreeze_reached),
             "spatial_bank_enabled": bool(self.use_spatial_specialists),
             "spectral_bank_enabled": bool(self.use_spectral_specialists),
             "uniform_dispatch_warmup_epochs": int(self.uniform_dispatch_warmup_epochs),
@@ -1280,7 +1287,9 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"grad_mode={diag.get('attnres_depth_summary_grad_mode', 'detached')}  "
             f"grad_active={diag.get('attnres_depth_summary_grad_active', False)}  "
             f"detached={diag.get('attnres_depth_summary_detached', True)}  "
-            f"unfreeze_epoch={diag.get('attnres_depth_summary_unfreeze_epoch', 1)}"
+            f"cur_epoch={diag.get('attnres_depth_summary_cur_epoch', 0)}  "
+            f"unfreeze_epoch={diag.get('attnres_depth_summary_unfreeze_epoch', 1)}  "
+            f"unfreeze_reached={diag.get('attnres_depth_summary_unfreeze_reached', False)}"
         ),
         (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "

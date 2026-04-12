@@ -115,9 +115,9 @@ class TransformerEncoderLayer(nn.Module):
         self.layer_idx = -1 
         self.use_pre_attnres = attnres_variant in ['pre_attn', 'full']
         self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
-        self.moe_attnres_depth_summary_mode = str(moe_attnres_depth_summary_mode)
+        self.moe_attnres_depth_summary_mode = str(moe_attnres_depth_summary_mode).strip().lower()
         self.moe_attnres_depth_probe_mlp_for_router = bool(moe_attnres_depth_probe_mlp_for_router)
-        self.moe_attnres_depth_summary_grad_mode = str(moe_attnres_depth_summary_grad_mode)
+        self.moe_attnres_depth_summary_grad_mode = str(moe_attnres_depth_summary_grad_mode).strip().lower()
         self.moe_attnres_depth_summary_unfreeze_epoch = int(moe_attnres_depth_summary_unfreeze_epoch)
         valid_depth_modes = {'auto', 'attn_delta4', 'attn_mlp_balanced', 'attn_mlp_latemix'}
         valid_grad_modes = {'detached', 'delayed_unfreeze', 'trainable'}
@@ -404,12 +404,15 @@ class TransformerEncoderLayer(nn.Module):
                     summary_mode=self.moe_attnres_depth_summary_mode,
                 )
                 if depth_summary is not None:
-                    grad_mode = self.moe_attnres_depth_summary_grad_mode
-                    grad_active = False
+                    grad_mode = str(self.moe_attnres_depth_summary_grad_mode).strip().lower()
+                    cur_epoch = int(get_moe_train_epoch())
+                    unfreeze_epoch = int(self.moe_attnres_depth_summary_unfreeze_epoch)
                     if grad_mode == 'trainable':
                         grad_active = True
                     elif grad_mode == 'delayed_unfreeze':
-                        grad_active = int(get_moe_train_epoch()) >= self.moe_attnres_depth_summary_unfreeze_epoch
+                        grad_active = cur_epoch >= unfreeze_epoch
+                    else:
+                        grad_active = False
                     depth_summary_detached = not grad_active
                     depth_summary_for_router = depth_summary if grad_active else depth_summary.detach()
                     router_ctx["attnres_depth_summary"] = depth_summary_for_router
@@ -418,7 +421,8 @@ class TransformerEncoderLayer(nn.Module):
                     router_ctx["attnres_depth_summary_grad_mode"] = grad_mode
                     router_ctx["attnres_depth_summary_grad_active"] = bool(grad_active)
                     router_ctx["attnres_depth_summary_detached"] = bool(depth_summary_detached)
-                    router_ctx["attnres_depth_summary_unfreeze_epoch"] = int(self.moe_attnres_depth_summary_unfreeze_epoch)
+                    router_ctx["attnres_depth_summary_unfreeze_epoch"] = unfreeze_epoch
+                    router_ctx["attnres_depth_summary_cur_epoch"] = cur_epoch
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 
         # for final-only, collect only block outputs

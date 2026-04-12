@@ -15,6 +15,7 @@ from finetune_evaluator import Evaluator
 from utils.tqdm_auto import tqdm_auto
 from models.moe import (
     format_moe_diagnostics_lines,
+    get_moe_train_epoch,
     reset_moe_diagnostic_labels,
     set_moe_diagnostic_labels,
     set_moe_train_epoch,
@@ -308,14 +309,26 @@ class Trainer(object):
             'classifier': 0.0,
             'other': 0.0,
             'depth_summary_path': 0.0,
+            'depth_router_proj_spatial': 0.0,
+            'depth_router_proj_spectral': 0.0,
         }
         for name, p in self._named_trainable_params:
             if p.grad is None:
                 continue
             g2 = float(p.grad.detach().pow(2).sum().item())
             accum[self._component_name_for_param(name)] += g2
-            if ('pre_attn_res' in name) or ('pre_mlp_res' in name) or ('depth_summary_proj' in name):
+            if (
+                ('pre_attn_res' in name)
+                or ('pre_mlp_res' in name)
+                or ('depth_summary_proj' in name)
+                or ('attnres_depth_router_proj_spatial' in name)
+                or ('attnres_depth_router_proj_spectral' in name)
+            ):
                 accum['depth_summary_path'] += g2
+            if 'attnres_depth_router_proj_spatial' in name:
+                accum['depth_router_proj_spatial'] += g2
+            if 'attnres_depth_router_proj_spectral' in name:
+                accum['depth_router_proj_spectral'] += g2
         return {k: float(v ** 0.5) for k, v in accum.items()}
 
     @staticmethod
@@ -353,6 +366,15 @@ class Trainer(object):
         if grad_mode != 'delayed_unfreeze':
             return
         unfreeze_epoch = int(getattr(self.params, 'moe_attnres_depth_summary_unfreeze_epoch', 1))
+        moe_epoch = int(get_moe_train_epoch())
+        print(
+            f"[diag][depth_unfreeze] epoch={epoch_one_based} moe_train_epoch={moe_epoch} "
+            f"unfreeze_epoch={unfreeze_epoch} grad_mode={grad_mode} "
+            f"depth_summary_path_grad={float(grad_norms.get('depth_summary_path', 0.0)):.6g} "
+            f"router_proj_spatial_grad={float(grad_norms.get('depth_router_proj_spatial', 0.0)):.6g} "
+            f"router_proj_spectral_grad={float(grad_norms.get('depth_router_proj_spectral', 0.0)):.6g}",
+            flush=True,
+        )
         if epoch_one_based < unfreeze_epoch:
             return
 

@@ -42,7 +42,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         '--multi_lr',
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help='Backbone/head dual-LR mode used by prior FACED runs.',
     )
     parser.add_argument('--frozen', action='store_true')
@@ -87,10 +87,10 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         '--moe_attnres_depth_summary_grad_mode',
         type=str,
-        default='detached',
+        default='delayed_unfreeze',
         choices=['detached', 'delayed_unfreeze', 'trainable'],
     )
-    parser.add_argument('--moe_attnres_depth_summary_unfreeze_epoch', type=int, default=16)
+    parser.add_argument('--moe_attnres_depth_summary_unfreeze_epoch', type=int, default=8)
     parser.add_argument('--moe_router_arch', type=str, default='linear', choices=['linear', 'mlp'])
     parser.add_argument('--moe_router_mlp_hidden', type=int, default=128)
     parser.add_argument('--moe_router_dispatch_mode', type=str, default='hard_capacity', choices=['hard_capacity', 'soft'])
@@ -175,6 +175,15 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError('--moe_shared_blend_end must be in [0, 1].')
     if args.moe_attnres_depth_summary_unfreeze_epoch < 1:
         raise ValueError('--moe_attnres_depth_summary_unfreeze_epoch must be >= 1.')
+    if (
+        args.moe_attnres_depth_summary_grad_mode == 'delayed_unfreeze'
+        and args.moe_attnres_depth_summary_unfreeze_epoch > args.epochs
+    ):
+        print(
+            '[warn] delayed_unfreeze is enabled but '
+            f'--moe_attnres_depth_summary_unfreeze_epoch={args.moe_attnres_depth_summary_unfreeze_epoch} '
+            f'exceeds --epochs={args.epochs}; depth summary will remain detached for this run.'
+        )
     if args.moe_attnres_depth_router_dim <= 0:
         raise ValueError('--moe_attnres_depth_router_dim must be > 0.')
     if args.moe_router_compact_feature_dim <= 0:
