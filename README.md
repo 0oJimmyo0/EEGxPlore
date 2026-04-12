@@ -24,6 +24,7 @@ _A Criss-Cross Brain Foundation Model for EEG Decoding_
     | 🔨&nbsp;<a href="#-setup">Setup</a>
     | 🚢&nbsp;<a href="#-pretrain">Pretrain</a>
     | ⛵&nbsp;<a href="#-finetune">Finetune</a>
+    | 🧭&nbsp;<a href="#-current-workflow-eegxplore-branch">Workflow</a>
     | 🚀&nbsp;<a href="#-quick-start">Quick Start</a>
     | 🔗&nbsp;<a href="#-citation">Citation</a>
 </p>
@@ -63,6 +64,74 @@ We have released a pretrained checkpoint on [Hugginface🤗](https://huggingface
 You can finetune CBraMod on our selected downstream datasets using the following code:
 ```commandline
 python finetune_main.py
+```
+
+## 🧭 Current Workflow (EEGxPlore Branch)
+
+This branch is currently centered on FACED + SEED-V finetuning with selective adaptation (AttnRes + typed MoE).
+
+### Script Surface (Reviewed)
+
+- `scripts/run_seedv.sh`: local single-node SEED-V run (defaults to strict A1 block-summary setup).
+- `scripts/SEED-V/submit_seedv_train.slurm`: cluster launcher for SEED-V experiments.
+- `scripts/SEED-V/audit_seedv_lmdb_split.py`: checks split schema and subject overlap.
+- `scripts/SEED-V/build_seedv_subject_disjoint_manifest.py`: wrapper for canonical manifest builder.
+- `scripts/SEED-V/verify_block_context_diagnostics.py`: validates that block-depth diagnostics are present and non-trivial.
+- `scripts/run_faced.sh` and `scripts/FACED/*`: FACED launch/analysis utilities.
+
+### Current A1 Definition
+
+`A1` now means the SEED-V block-summary depth-context ablation with a strict one-change contract:
+
+1. `moe_attnres_depth_context_mode=block_shared_typed_proj`
+2. fixed `moe_attnres_depth_block_count=4`
+3. fixed `moe_attnres_depth_router_dim=15`
+4. compact-summary-only knobs are not mixed into this run
+5. CBraMod SEED-V cohort: `/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb` with LMDB `__keys__` split
+
+`scripts/SEED-V/submit_seedv_train.slurm` enforces this by default with `A1_STRICT_BLOCK_ABLATION=1`.
+
+### Start A New SEED-V Slurm Run
+
+```bash
+cd scripts/SEED-V
+sbatch --export=ALL,SEEDV_PROTOCOL=cbramod_benchmark,RUN_NAME=seedv_a1_block_$(date +%Y%m%d_%H%M%S) submit_seedv_train.slurm
+```
+
+Useful overrides:
+
+- `MODEL_DIR=/path/to/output_dir`
+- `DATASET_DIR=/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb`
+- `EPOCHS=40`
+
+For strict CBraMod-comparable cohort, keep `SEEDV_SPLIT_MANIFEST` unset.
+
+Example:
+
+```bash
+cd scripts/SEED-V
+sbatch --export=ALL,SEEDV_PROTOCOL=cbramod_benchmark,DATASET_DIR=/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb,MODEL_DIR=/scratch/$USER/seedv_a1_run01,RUN_NAME=seedv_a1_run01,EPOCHS=40 submit_seedv_train.slurm
+```
+
+### Progress Snapshot
+
+- Done: SEED-V launcher passes depth context mode and block count end-to-end.
+- Done: strict A1 launcher mode now keeps the experiment surface clean.
+- Done: diagnostics export includes block stats, router context norms, and routing stats.
+- In progress: replacing fixed block mean pooling with a richer learned block selector/readout.
+
+### Verify Block Context Is Actually Used
+
+After training, verify exported diagnostics:
+
+```bash
+python scripts/SEED-V/verify_block_context_diagnostics.py --run_dir <MODEL_DIR>
+```
+
+Compare two runs:
+
+```bash
+python scripts/SEED-V/verify_block_context_diagnostics.py --run_dir <MODEL_DIR_RUN1> --run_dir <MODEL_DIR_RUN2>
 ```
 
 

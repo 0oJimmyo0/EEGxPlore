@@ -24,6 +24,12 @@ class Model(nn.Module):
         print(f"[SEED-V] attnres_gate_init = {param.attnres_gate_init}")
         print(f"[SEED-V] attnres_start_layer = {param.attnres_start_layer}")
         if getattr(param, 'moe', False):
+            depth_context_mode = getattr(param, 'moe_attnres_depth_context_mode', 'compact_shared')
+            depth_summary_mode = getattr(param, 'moe_attnres_depth_summary_mode', 'auto')
+            depth_probe_mlp = getattr(param, 'moe_attnres_depth_probe_mlp_for_router', False)
+            if str(depth_context_mode) == 'block_shared_typed_proj':
+                depth_summary_mode = 'block_shared_meanpool'
+                depth_probe_mlp = False
             print(
                 f"[SEED-V] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "
                 f"experts/bank={param.moe_num_experts}, "
@@ -32,13 +38,13 @@ class Model(nn.Module):
                 f"psd_router={getattr(param, 'moe_use_psd_router_features', False)}, "
                 f"attnres_depth_router={getattr(param, 'moe_use_attnres_depth_router_features', False)}, "
                 f"attnres_depth_dim={getattr(param, 'moe_attnres_depth_router_dim', 26)}, "
-                                f"attnres_depth_context_mode={getattr(param, 'moe_attnres_depth_context_mode', 'compact_shared')}, "
-                                f"attnres_depth_block_count={getattr(param, 'moe_attnres_depth_block_count', 4)}, "
-                f"attnres_depth_summary_mode={getattr(param, 'moe_attnres_depth_summary_mode', 'auto')}, "
-                f"attnres_depth_probe_mlp_for_router={getattr(param, 'moe_attnres_depth_probe_mlp_for_router', False)}, "
-                                f"attnres_depth_router_init={getattr(param, 'moe_attnres_depth_router_init', 'xavier')}, "
-                                f"attnres_depth_grad_mode={getattr(param, 'moe_attnres_depth_summary_grad_mode', 'delayed_unfreeze')}, "
-                                f"attnres_depth_unfreeze_epoch={getattr(param, 'moe_attnres_depth_summary_unfreeze_epoch', 8)}, "
+                f"attnres_depth_context_mode={depth_context_mode}, "
+                f"attnres_depth_block_count={getattr(param, 'moe_attnres_depth_block_count', 4)}, "
+                f"attnres_depth_summary_mode={depth_summary_mode}, "
+                f"attnres_depth_probe_mlp_for_router={depth_probe_mlp}, "
+                f"attnres_depth_router_init={getattr(param, 'moe_attnres_depth_router_init', 'xavier')}, "
+                f"attnres_depth_grad_mode={getattr(param, 'moe_attnres_depth_summary_grad_mode', 'delayed_unfreeze')}, "
+                f"attnres_depth_unfreeze_epoch={getattr(param, 'moe_attnres_depth_summary_unfreeze_epoch', 8)}, "
                 f"uniform_warmup_epochs={getattr(param, 'moe_uniform_dispatch_warmup_epochs', 0)}, "
                 f"shared_blend_warmup_epochs={getattr(param, 'moe_shared_blend_warmup_epochs', 0)}, "
                 f"shared_blend_start={getattr(param, 'moe_shared_blend_start', 1.0)}, "

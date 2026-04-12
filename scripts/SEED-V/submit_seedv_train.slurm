@@ -64,6 +64,7 @@ CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
 
 RUN_MODE="${RUN_MODE:-selective}"  # dense | selective | custom
+A1_STRICT_BLOCK_ABLATION="${A1_STRICT_BLOCK_ABLATION:-1}"  # 1 => keep A1 as one clean block-summary change
 
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-pre_attn}"
 ATTNRES_START_LAYER="${ATTNRES_START_LAYER:-0}"
@@ -136,6 +137,28 @@ case "$RUN_MODE" in
     ;;
 esac
 
+if [[ "$A1_STRICT_BLOCK_ABLATION" == "1" ]]; then
+  if [[ "$SEEDV_PROTOCOL" != "cbramod_benchmark" ]]; then
+    echo "[seedv-slurm][warn] A1_STRICT_BLOCK_ABLATION=1 expects CBraMod cohort; forcing SEEDV_PROTOCOL=cbramod_benchmark" >&2
+    SEEDV_PROTOCOL="cbramod_benchmark"
+    DATASET_DIR="/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb"
+    SEEDV_SPLIT_MANIFEST=""
+  fi
+  if [[ -n "$SEEDV_SPLIT_MANIFEST" ]]; then
+    echo "[seedv-slurm][warn] A1_STRICT_BLOCK_ABLATION=1 uses LMDB __keys__ cohort; ignoring SEEDV_SPLIT_MANIFEST override" >&2
+    SEEDV_SPLIT_MANIFEST=""
+  fi
+  if [[ "$USE_MOE" == "1" && "$DEPTH_ROUTER" == "on" ]]; then
+    DEPTH_CONTEXT_MODE="block_shared_typed_proj"
+    DEPTH_BLOCK_COUNT="4"
+    DEPTH_ROUTER_DIM="15"
+    DEPTH_SUMMARY_MODE="auto"
+    DEPTH_PROBE_MLP_FOR_ROUTER="off"
+  else
+    echo "[seedv-slurm][warn] A1_STRICT_BLOCK_ABLATION=1 is active, but USE_MOE=$USE_MOE DEPTH_ROUTER=$DEPTH_ROUTER; strict block context is not applied." >&2
+  fi
+fi
+
 if [[ -n "$SEEDV_SPLIT_MANIFEST" && ! -f "$SEEDV_SPLIT_MANIFEST" ]]; then
   echo "[seedv-slurm] subject-disjoint manifest not found: $SEEDV_SPLIT_MANIFEST" >&2
   echo "[seedv-slurm] build it with: python preprocessing/build_seedv_subject_manifest.py --lmdb_path $DATASET_DIR --output_json $DATASET_DIR/subject_disjoint_manifest.json --seed 42 (or scripts/SEED-V/build_seedv_subject_disjoint_manifest.py)" >&2
@@ -152,11 +175,15 @@ if [[ "$DEPTH_ROUTER" == "on" ]]; then
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_dim "$DEPTH_ROUTER_DIM")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_context_mode "$DEPTH_CONTEXT_MODE")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_block_count "$DEPTH_BLOCK_COUNT")
-  DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode "$DEPTH_SUMMARY_MODE")
+  if [[ "$DEPTH_CONTEXT_MODE" == "block_shared_typed_proj" ]]; then
+    DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode auto)
+  else
+    DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode "$DEPTH_SUMMARY_MODE")
+  fi
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_init "$DEPTH_ROUTER_INIT")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_grad_mode "$DEPTH_SUMMARY_GRAD_MODE")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_unfreeze_epoch "$DEPTH_SUMMARY_UNFREEZE_EPOCH")
-  if [[ "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
+  if [[ "$DEPTH_CONTEXT_MODE" != "block_shared_typed_proj" && "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
     DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_probe_mlp_for_router)
   fi
 fi
@@ -220,13 +247,19 @@ fi
 
 mkdir -p "$MODEL_DIR"
 
+DEPTH_SUMMARY_LABEL="$DEPTH_SUMMARY_MODE"
+if [[ "$DEPTH_CONTEXT_MODE" == "block_shared_typed_proj" ]]; then
+  DEPTH_SUMMARY_LABEL="block_shared_meanpool"
+fi
+
 echo "[seedv-slurm] dataset=$DATASET dataset_dir=$DATASET_DIR num_classes=$NUM_CLASSES" >&2
 echo "[seedv-slurm] seedv_protocol=$SEEDV_PROTOCOL" >&2
 echo "[seedv-slurm] run_mode=$RUN_MODE" >&2
+echo "[seedv-slurm] a1_strict_block_ablation=$A1_STRICT_BLOCK_ABLATION" >&2
 echo "[seedv-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
 echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers=$MOE_NUM_LAYERS" >&2
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2
-echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_MODE depth_proj_init=$DEPTH_ROUTER_INIT" >&2
+echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_LABEL depth_proj_init=$DEPTH_ROUTER_INIT" >&2
 echo "[seedv-slurm] depth_grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
 echo "[seedv-slurm] split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>} component_lr=$USE_COMPONENT_LR" >&2
 

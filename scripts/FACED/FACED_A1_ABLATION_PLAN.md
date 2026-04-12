@@ -1,65 +1,57 @@
-# FACED A1 Ablation Plan
+# A1 Ablation Plan (Current Meaning)
 
-This plan starts from the current best stable setting:
+`A1` now refers to the SEED-V block-summary depth-context ablation, not the older FACED no-multi-lr/warmup/gated sweep.
 
-- Base config: conservative router profile
-- PSD: off
-- Backbone path: AttnRes pre_attn
-- MoE: top-1 typed MoE on the last encoder layer
+## One-Change Contract
 
-The immediate goal is not just to beat the current score. It is to separate three failure modes that can all look like a plateau in the logs:
+Approach 1 must keep exactly one depth-context change active:
 
-1. The raw spatial router is collapsing, while capacity correction makes the assigned histogram look healthy.
-2. The MoE modules are learning too slowly relative to the pretrained backbone and classifier.
-3. AttnRes is feeding the router a signal that is too strong too early, so specialization never stabilizes.
+1. `moe_attnres_depth_context_mode=block_shared_typed_proj`
+2. fixed `moe_attnres_depth_block_count=4`
+3. fixed `moe_attnres_depth_router_dim=15`
+4. no compact-summary-only toggles mixed in (summary-mode/probe-MLP knobs)
+5. CBraMod SEED-V cohort path and split source: `/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb` + LMDB `__keys__`
 
-## A1 Sweep
+The launcher `scripts/SEED-V/submit_seedv_train.slurm` enforces this when:
 
-Use ABLATION_TAG=A1 in [scripts/FACED/submit_train.slurm](scripts/FACED/submit_train.slurm). The script will run these cases sequentially:
+- `A1_STRICT_BLOCK_ABLATION=1` (default)
 
-1. A1_base
-   - Exact conservative no-PSD baseline.
-   - Purpose: anchor the sweep to the known stable regime.
+## Submit
 
-2. A1_nomultilr
-   - Same as baseline, but with --no-multi_lr.
-   - Hypothesis: routers, experts, and classifier are currently under-trained because new modules are below the backbone LR.
+```bash
+cd scripts/SEED-V
+sbatch --export=ALL,SEEDV_PROTOCOL=cbramod_benchmark,DATASET_DIR=/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb,RUN_NAME=seedv_a1_block_strict submit_seedv_train.slurm
+```
 
-3. A1_warmup4
-   - Same as baseline, but longer soft-routing warmup and slower jitter anneal.
-   - Hypothesis: raw spatial routing is locking too early and never recovers.
+Leave `SEEDV_SPLIT_MANIFEST` unset for CBraMod-cohort parity.
 
-4. A1_gated
-   - Same as baseline, but enable --attnres_gated --attnres_gate_init -1.0.
-   - Hypothesis: the raw baseline stream needs to remain more visible early so the router can learn a cleaner specialization signal.
+Optional compact-baseline comparator (explicitly opt out of strict A1):
 
-## What To Read In The Outputs
+```bash
+cd scripts/SEED-V
+sbatch --export=ALL,SEEDV_PROTOCOL=cbramod_benchmark,DATASET_DIR=/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb,A1_STRICT_BLOCK_ABLATION=0,DEPTH_CONTEXT_MODE=compact_shared,DEPTH_SUMMARY_MODE=attn_delta4,DEPTH_PROBE_MLP_FOR_ROUTER=on,RUN_NAME=seedv_compact_baseline submit_seedv_train.slurm
+```
 
-For each run, compare the default routing summary files against the _raw_top1_ analysis files in the routing export directory:
+## Required Diagnostics Checks
 
-- If assigned usage is balanced but raw_top1 still collapses, capacity correction is rescuing the MoE more than the router itself.
-- If raw_top1 becomes less collapsed and validation/test improve, the spatial router was the main bottleneck.
-- If raw_top1 improves but accuracy stays flat, routing is healthier but the experts are not yet adding useful specialization.
-- If train/val improve but test drops, the bottleneck is shifting toward generalization rather than routing.
+After a run, inspect these files under `model_dir`:
 
-The most important fields in the epoch logs are:
+1. `block_summary_stats.json`
+2. `router_context_stats.json`
+3. `routing_diagnostics.json`
+4. `epoch_diagnostics.jsonl`
 
-- pre_hist
-- pre_H
-- pre_margin
-- reroute_rate
-- validation/test kappa
+Quick verifier:
 
-## Decision Rule After A1
+```bash
+python scripts/SEED-V/verify_block_context_diagnostics.py \
+  --run_dir <MODEL_DIR_RUN1> \
+  --run_dir <MODEL_DIR_RUN2>
+```
 
-1. If A1_nomultilr wins:
-   - Keep the higher effective LR for new modules and then retest mild router regularization changes.
+Pass criteria:
 
-2. If A1_warmup4 wins:
-   - Keep the longer warmup and test one small increase in balance/entropy regularization next.
-
-3. If A1_gated wins:
-   - Keep gated AttnRes and test whether the same benefit holds with a small LR change.
-
-4. If none of the three beat A1_base, but raw routing still collapses:
-   - The next target should be the spatial router inputs or the MoE placement itself, not broader regularization.
+1. block rows exist with `depth_context_mode=block_shared_typed_proj`
+2. block metadata fields are populated (`block_count`, `block_layer_counts`, norms)
+3. projected depth context norms are non-empty
+4. values vary within run and/or across runs

@@ -511,8 +511,12 @@ class TransformerEncoderLayer(nn.Module):
                     router_ctx["attnres_depth_summary"] = depth_summary_for_router
                     router_ctx["attnres_depth_context_mode"] = self.moe_attnres_depth_context_mode
                     router_ctx["attnres_depth_block_count"] = int(self.moe_attnres_depth_block_count)
-                    router_ctx["attnres_depth_summary_mode"] = self.moe_attnres_depth_summary_mode
-                    router_ctx["attnres_depth_probe_mlp_for_router"] = bool(self.moe_attnres_depth_probe_mlp_for_router)
+                    if block_diag is not None:
+                        router_ctx["attnres_depth_summary_mode"] = "block_shared_meanpool"
+                        router_ctx["attnres_depth_probe_mlp_for_router"] = False
+                    else:
+                        router_ctx["attnres_depth_summary_mode"] = self.moe_attnres_depth_summary_mode
+                        router_ctx["attnres_depth_probe_mlp_for_router"] = bool(self.moe_attnres_depth_probe_mlp_for_router)
                     router_ctx["attnres_depth_summary_grad_mode"] = grad_mode
                     router_ctx["attnres_depth_summary_grad_active"] = bool(grad_active)
                     router_ctx["attnres_depth_summary_detached"] = bool(depth_summary_detached)

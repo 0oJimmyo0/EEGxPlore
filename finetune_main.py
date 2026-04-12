@@ -89,8 +89,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default='auto',
         choices=['auto', 'attn_delta4', 'attn_mlp_balanced', 'attn_mlp_latemix'],
+        help='Compact depth-summary composition mode (ignored by block_shared_typed_proj).',
     )
-    parser.add_argument('--moe_attnres_depth_probe_mlp_for_router', action='store_true')
+    parser.add_argument(
+        '--moe_attnres_depth_probe_mlp_for_router',
+        action='store_true',
+        help='Use pre-MLP AttnRes alpha in compact summary mode (ignored by block_shared_typed_proj).',
+    )
     parser.add_argument(
         '--moe_attnres_depth_router_init',
         type=str,
@@ -158,7 +163,7 @@ def add_seedv_args(parser: argparse.ArgumentParser) -> None:
         '--seedv_split_manifest',
         type=str,
         default='',
-        help='Subject-disjoint JSON/PKL split manifest for SEED-V train/val/test key lists.',
+        help='Optional JSON/PKL split manifest override for SEED-V keys. Empty means use LMDB __keys__ (CBraMod cohort).',
     )
 
 
@@ -210,6 +215,19 @@ def validate_args(args: argparse.Namespace) -> None:
             '[warn] block_shared_typed_proj selected but --moe_use_attnres_depth_router_features is off; '
             'depth block context will not be used by routers in this run.'
         )
+    if args.moe_attnres_depth_context_mode == 'block_shared_typed_proj':
+        if args.moe_attnres_depth_summary_mode != 'auto':
+            print(
+                '[warn] --moe_attnres_depth_summary_mode is ignored for '
+                'block_shared_typed_proj; forcing auto.'
+            )
+            args.moe_attnres_depth_summary_mode = 'auto'
+        if args.moe_attnres_depth_probe_mlp_for_router:
+            print(
+                '[warn] --moe_attnres_depth_probe_mlp_for_router is compact-summary-only; '
+                'disabling it for block_shared_typed_proj.'
+            )
+            args.moe_attnres_depth_probe_mlp_for_router = False
     if args.moe_router_compact_feature_dim <= 0:
         raise ValueError('--moe_router_compact_feature_dim must be > 0.')
     if args.moe_expert_init_noise_std < 0:
@@ -249,20 +267,13 @@ def build_dataset(args: argparse.Namespace):
         if args.return_sample_keys:
             print('[SEED-V] routing_export_dir is set; per-sample export is FACED-only and will be skipped.')
 
-        if not args.seedv_split_manifest:
-            default_manifest = os.path.join(args.datasets_dir, 'subject_disjoint_manifest.json')
-            if os.path.isfile(default_manifest):
-                args.seedv_split_manifest = default_manifest
-                print(f"[SEED-V] using default subject-disjoint manifest: {args.seedv_split_manifest}")
-            else:
-                print(
-                    '[SEED-V][warning] no --seedv_split_manifest and no default '
-                    'subject_disjoint_manifest.json under datasets_dir; '
-                    'loader may fall back to overlapping LMDB __keys__. '
-                    'Provide a subject-disjoint manifest for normal use.'
-                )
+        if args.seedv_split_manifest:
+            print(
+                f"[SEED-V] using split manifest override: {args.seedv_split_manifest} "
+                '(this differs from CBraMod LMDB __keys__ cohort)'
+            )
         else:
-            print(f"[SEED-V] using provided split manifest: {args.seedv_split_manifest}")
+            print('[SEED-V] using LMDB __keys__ train/val/test split (CBraMod cohort).')
 
         return seedv_dataset.LoadDataset(args).get_data_loader()
 
