@@ -28,7 +28,7 @@ class Model(nn.Module):
             depth_summary_mode = getattr(param, 'moe_attnres_depth_summary_mode', 'auto')
             depth_probe_mlp = getattr(param, 'moe_attnres_depth_probe_mlp_for_router', False)
             if str(depth_context_mode) == 'block_shared_typed_proj':
-                depth_summary_mode = 'block_shared_meanpool'
+                depth_summary_mode = 'block_typed_learned'
                 depth_probe_mlp = False
             print(
                 f"[SEED-V] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "

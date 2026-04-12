@@ -558,13 +558,36 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             return None, None
         z = torch.zeros(batch_size, self.attnres_depth_router_dim, device=device, dtype=dtype)
         ds = z
+        ds_sp = z
+        ds_sc = z
         if router_context is not None and torch.is_tensor(router_context.get("attnres_depth_summary")):
             raw = router_context.get("attnres_depth_summary")
             if raw.dim() == 1:
                 raw = raw.unsqueeze(0)
             if raw.dim() == 2 and raw.shape[0] == batch_size and raw.shape[1] == self.attnres_depth_router_dim:
                 ds = raw.to(device=device, dtype=dtype)
-        return self.attnres_depth_router_proj_spatial(ds), self.attnres_depth_router_proj_spectral(ds)
+        if router_context is not None and torch.is_tensor(router_context.get("attnres_depth_summary_spatial")):
+            raw_sp = router_context.get("attnres_depth_summary_spatial")
+            if raw_sp.dim() == 1:
+                raw_sp = raw_sp.unsqueeze(0)
+            if raw_sp.dim() == 2 and raw_sp.shape[0] == batch_size and raw_sp.shape[1] == self.attnres_depth_router_dim:
+                ds_sp = raw_sp.to(device=device, dtype=dtype)
+            else:
+                ds_sp = ds
+        else:
+            ds_sp = ds
+
+        if router_context is not None and torch.is_tensor(router_context.get("attnres_depth_summary_spectral")):
+            raw_sc = router_context.get("attnres_depth_summary_spectral")
+            if raw_sc.dim() == 1:
+                raw_sc = raw_sc.unsqueeze(0)
+            if raw_sc.dim() == 2 and raw_sc.shape[0] == batch_size and raw_sc.shape[1] == self.attnres_depth_router_dim:
+                ds_sc = raw_sc.to(device=device, dtype=dtype)
+            else:
+                ds_sc = ds
+        else:
+            ds_sc = ds
+        return self.attnres_depth_router_proj_spatial(ds_sp), self.attnres_depth_router_proj_spectral(ds_sc)
 
     def _domain_logit_bias(self, batch_size: int, bank: str, device: torch.device) -> Tensor:
         if not self.domain_bias:
@@ -742,7 +765,14 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         depth_block_summary_norms = None
         depth_block_layer_counts = None
         depth_block_pooling = None
+        depth_family_mode = None
         depth_shared_context_norm = None
+        depth_spatial_context_norm = None
+        depth_spectral_context_norm = None
+        depth_block_layer_counts_pre_attn = None
+        depth_block_layer_counts_pre_mlp = None
+        depth_block_peak_weight_pre_attn = None
+        depth_block_peak_weight_pre_mlp = None
         depth_probe_mlp_for_router = False
         depth_proj_spatial_norm = None
         depth_proj_spectral_norm = None
@@ -776,8 +806,22 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                     depth_block_layer_counts = list(router_context.get("attnres_depth_block_layer_counts"))
                 if "attnres_depth_block_pooling" in router_context:
                     depth_block_pooling = str(router_context.get("attnres_depth_block_pooling"))
+                if "attnres_depth_family_mode" in router_context:
+                    depth_family_mode = str(router_context.get("attnres_depth_family_mode"))
                 if "attnres_depth_shared_context_norm" in router_context:
                     depth_shared_context_norm = float(router_context.get("attnres_depth_shared_context_norm"))
+                if "attnres_depth_spatial_context_norm" in router_context:
+                    depth_spatial_context_norm = float(router_context.get("attnres_depth_spatial_context_norm"))
+                if "attnres_depth_spectral_context_norm" in router_context:
+                    depth_spectral_context_norm = float(router_context.get("attnres_depth_spectral_context_norm"))
+                if "attnres_depth_block_layer_counts_pre_attn" in router_context:
+                    depth_block_layer_counts_pre_attn = list(router_context.get("attnres_depth_block_layer_counts_pre_attn"))
+                if "attnres_depth_block_layer_counts_pre_mlp" in router_context:
+                    depth_block_layer_counts_pre_mlp = list(router_context.get("attnres_depth_block_layer_counts_pre_mlp"))
+                if "attnres_depth_block_peak_weight_pre_attn" in router_context:
+                    depth_block_peak_weight_pre_attn = list(router_context.get("attnres_depth_block_peak_weight_pre_attn"))
+                if "attnres_depth_block_peak_weight_pre_mlp" in router_context:
+                    depth_block_peak_weight_pre_mlp = list(router_context.get("attnres_depth_block_peak_weight_pre_mlp"))
                 if "attnres_depth_probe_mlp_for_router" in router_context:
                     depth_probe_mlp_for_router = bool(router_context.get("attnres_depth_probe_mlp_for_router"))
                 if isinstance(router_context.get("attnres_depth_summary_grad_mode"), str):
@@ -1110,8 +1154,15 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "attnres_depth_block_std": depth_block_std,
             "attnres_depth_block_summary_norms": depth_block_summary_norms,
             "attnres_depth_block_layer_counts": depth_block_layer_counts,
+            "attnres_depth_block_layer_counts_pre_attn": depth_block_layer_counts_pre_attn,
+            "attnres_depth_block_layer_counts_pre_mlp": depth_block_layer_counts_pre_mlp,
             "attnres_depth_block_pooling": depth_block_pooling,
+            "attnres_depth_family_mode": depth_family_mode,
+            "attnres_depth_block_peak_weight_pre_attn": depth_block_peak_weight_pre_attn,
+            "attnres_depth_block_peak_weight_pre_mlp": depth_block_peak_weight_pre_mlp,
             "attnres_depth_shared_context_norm": depth_shared_context_norm,
+            "attnres_depth_spatial_context_norm": depth_spatial_context_norm,
+            "attnres_depth_spectral_context_norm": depth_spectral_context_norm,
             "attnres_depth_summary_mean": depth_summary_mean,
             "attnres_depth_summary_std": depth_summary_std,
             "attnres_depth_summary_mode": depth_summary_mode,

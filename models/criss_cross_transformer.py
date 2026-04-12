@@ -80,6 +80,7 @@ class TransformerEncoderLayer(nn.Module):
                  attnres_gate_init: float = 0.0, attnres_start_layer: int = 0,
                   moe_attnres_depth_context_mode: str = 'compact_shared',
                   moe_attnres_depth_block_count: int = 4,
+                 moe_attnres_depth_router_dim: int = 26,
                  moe_attnres_depth_summary_mode: str = 'auto',
                  moe_attnres_depth_probe_mlp_for_router: bool = False,
                   moe_attnres_depth_summary_grad_mode: str = 'delayed_unfreeze',
@@ -119,6 +120,7 @@ class TransformerEncoderLayer(nn.Module):
         self.use_pre_mlpres = attnres_variant in ['pre_mlp', 'full']
         self.moe_attnres_depth_context_mode = str(moe_attnres_depth_context_mode).strip().lower()
         self.moe_attnres_depth_block_count = int(moe_attnres_depth_block_count)
+        self.moe_attnres_depth_router_dim = int(moe_attnres_depth_router_dim)
         self.moe_attnres_depth_summary_mode = str(moe_attnres_depth_summary_mode).strip().lower()
         self.moe_attnres_depth_probe_mlp_for_router = bool(moe_attnres_depth_probe_mlp_for_router)
         self.moe_attnres_depth_summary_grad_mode = str(moe_attnres_depth_summary_grad_mode).strip().lower()
@@ -133,6 +135,8 @@ class TransformerEncoderLayer(nn.Module):
             )
         if self.moe_attnres_depth_block_count < 1:
             raise ValueError("moe_attnres_depth_block_count must be >= 1")
+        if self.moe_attnres_depth_router_dim <= 0:
+            raise ValueError("moe_attnres_depth_router_dim must be > 0")
         if self.moe_attnres_depth_summary_mode not in valid_depth_modes:
             raise ValueError(
                 f"Unsupported moe_attnres_depth_summary_mode={self.moe_attnres_depth_summary_mode!r}; "
@@ -155,6 +159,27 @@ class TransformerEncoderLayer(nn.Module):
             self.pre_mlp_res = FullAttnRes(d_model)
             if self.attnres_gated and self.use_pre_mlpres:
                 self.pre_mlp_gate = nn.Parameter(torch.tensor(float(attnres_gate_init)))
+
+        self.depth_block_score_pre_attn = None
+        self.depth_block_score_pre_mlp = None
+        self.depth_block_readout_spatial = None
+        self.depth_block_readout_spectral = None
+        if self.moe_attnres_depth_context_mode == 'block_shared_typed_proj':
+            self.depth_block_score_pre_attn = nn.Linear(d_model, 1, bias=True, **factory_kwargs)
+            self.depth_block_score_pre_mlp = nn.Linear(d_model, 1, bias=True, **factory_kwargs)
+            readout_in_dim = 2 * self.moe_attnres_depth_block_count * d_model
+            self.depth_block_readout_spatial = nn.Linear(
+                readout_in_dim,
+                self.moe_attnres_depth_router_dim,
+                bias=True,
+                **factory_kwargs,
+            )
+            self.depth_block_readout_spectral = nn.Linear(
+                readout_in_dim,
+                self.moe_attnres_depth_router_dim,
+                bias=True,
+                **factory_kwargs,
+            )
 
         # Legacy string support for activation function.
         if isinstance(activation, str):
@@ -317,16 +342,54 @@ class TransformerEncoderLayer(nn.Module):
         return raw
 
     @staticmethod
-    def _compose_block_shared_depth_summary(
+    def _split_depth_family_sources(valid_sources):
+        pre_attn_sources = []
+        pre_mlp_sources = []
+        # Current source ordering: index 0 is embedding, odd indices are pre-attn outputs,
+        # even indices (>0) are post-MLP/block outputs.
+        for i, src in enumerate(valid_sources):
+            if i == 0:
+                continue
+            if i % 2 == 1:
+                pre_attn_sources.append(src)
+            else:
+                pre_mlp_sources.append(src)
+        return pre_attn_sources, pre_mlp_sources
+
+    def _learned_block_weighted_vectors(self, depth_hidden: Tensor, scorer: nn.Linear, block_count: int):
+        b, _, d = depth_hidden.shape
+        dev = depth_hidden.device
+        dtype = depth_hidden.dtype
+        idx_blocks = torch.tensor_split(torch.arange(depth_hidden.shape[1], device=dev), block_count)
+
+        block_vecs = []
+        block_layer_counts = []
+        block_weight_mass = []
+        for ids in idx_blocks:
+            block_layer_counts.append(int(ids.numel()))
+            if ids.numel() == 0:
+                block_vecs.append(torch.zeros((b, d), device=dev, dtype=dtype))
+                block_weight_mass.append(torch.zeros((b,), device=dev, dtype=dtype))
+                continue
+            blk = depth_hidden.index_select(1, ids)
+            logits = scorer(blk).squeeze(-1)
+            weights = F.softmax(logits, dim=-1)
+            vec = torch.einsum('bl,bld->bd', weights, blk)
+            block_vecs.append(vec)
+            block_weight_mass.append(weights.max(dim=-1).values)
+
+        block_stack = torch.stack(block_vecs, dim=1)
+        block_weight_peak = torch.stack(block_weight_mass, dim=1)
+        return block_stack, block_layer_counts, block_weight_peak
+
+    def _compose_block_typed_depth_summary(
+        self,
         source_pool,
         out_dim: int,
         fallback_ref: Tensor,
         block_count: int,
     ) -> Dict[str, Any]:
-        """Approach 1: block-wise summary over depth hidden states, then compact shared context.
-
-        Input source_pool is a list of [B, C, S, D] tensors ordered by depth/source index.
-        """
+        """Learned block summary with typed readouts and pre-attn/pre-MLP family separation."""
         b = fallback_ref.shape[0]
         dev = fallback_ref.device
         dtype = fallback_ref.dtype
@@ -341,50 +404,73 @@ class TransformerEncoderLayer(nn.Module):
             valid_sources.append(src.to(device=dev, dtype=dtype))
 
         d = int(fallback_ref.shape[-1])
+        z_blocks = torch.zeros((b, n_blocks), device=dev, dtype=dtype)
+        z_summary = torch.zeros((b, max(0, int(out_dim))), device=dev, dtype=dtype)
         if not valid_sources:
-            z_blocks = torch.zeros((b, n_blocks), device=dev, dtype=dtype)
-            z_summary = torch.zeros((b, max(0, int(out_dim))), device=dev, dtype=dtype)
             return {
                 'summary': z_summary,
+                'summary_spatial': z_summary,
+                'summary_spectral': z_summary,
                 'block_means': z_blocks,
                 'block_stds': z_blocks,
                 'block_norms': z_blocks,
                 'block_layer_counts': [0 for _ in range(n_blocks)],
-                'block_pooling': 'mean',
+                'block_layer_counts_pre_attn': [0 for _ in range(n_blocks)],
+                'block_layer_counts_pre_mlp': [0 for _ in range(n_blocks)],
+                'block_pooling': 'learned_softmax',
+                'depth_family_mode': 'pre_attn_pre_mlp',
+                'block_peak_weight_pre_attn': z_blocks,
+                'block_peak_weight_pre_mlp': z_blocks,
             }
 
-        depth_hidden = torch.stack([src.mean(dim=(1, 2)) for src in valid_sources], dim=1)  # [B, L, D]
-        l = int(depth_hidden.shape[1])
-        idx_blocks = torch.tensor_split(torch.arange(l, device=dev), n_blocks)
+        all_hidden = torch.stack([src.mean(dim=(1, 2)) for src in valid_sources], dim=1)
+        all_counts = [int(x.numel()) for x in torch.tensor_split(torch.arange(all_hidden.shape[1], device=dev), n_blocks)]
 
-        block_vecs = []
-        block_layer_counts = []
-        for ids in idx_blocks:
-            block_layer_counts.append(int(ids.numel()))
-            if ids.numel() == 0:
-                block_vecs.append(torch.zeros((b, d), device=dev, dtype=dtype))
-            else:
-                block_vecs.append(depth_hidden.index_select(1, ids).mean(dim=1))
+        pre_attn_sources, pre_mlp_sources = self._split_depth_family_sources(valid_sources)
+        if not pre_attn_sources:
+            pre_attn_sources = valid_sources
+        if not pre_mlp_sources:
+            pre_mlp_sources = valid_sources
 
-        block_stack = torch.stack(block_vecs, dim=1)  # [B, blocks, D]
-        shared = block_stack.reshape(b, -1)
-        if out_dim <= 0:
-            summary = torch.zeros((b, 0), device=dev, dtype=dtype)
-        elif shared.size(-1) > out_dim:
-            summary = F.adaptive_avg_pool1d(shared.unsqueeze(1), out_dim).squeeze(1)
-        elif shared.size(-1) < out_dim:
-            pad = torch.zeros((b, out_dim - shared.size(-1)), device=dev, dtype=dtype)
-            summary = torch.cat([shared, pad], dim=-1)
-        else:
-            summary = shared
+        pre_attn_hidden = torch.stack([src.mean(dim=(1, 2)) for src in pre_attn_sources], dim=1)
+        pre_mlp_hidden = torch.stack([src.mean(dim=(1, 2)) for src in pre_mlp_sources], dim=1)
 
+        attn_stack, attn_counts, attn_peak = self._learned_block_weighted_vectors(
+            pre_attn_hidden,
+            self.depth_block_score_pre_attn,
+            n_blocks,
+        )
+        mlp_stack, mlp_counts, mlp_peak = self._learned_block_weighted_vectors(
+            pre_mlp_hidden,
+            self.depth_block_score_pre_mlp,
+            n_blocks,
+        )
+
+        fused = torch.cat([attn_stack, mlp_stack], dim=1).reshape(b, -1)
+        if fused.shape[1] != (2 * n_blocks * d):
+            raise ValueError(
+                f'Unexpected fused block summary shape={tuple(fused.shape)}; expected last dim={2 * n_blocks * d}'
+            )
+
+        summary_spatial = self.depth_block_readout_spatial(fused)
+        summary_spectral = self.depth_block_readout_spectral(fused)
+        summary = 0.5 * (summary_spatial + summary_spectral)
+
+        shared_block = 0.5 * (attn_stack + mlp_stack)
         return {
             'summary': summary,
-            'block_means': block_stack.mean(dim=-1),
-            'block_stds': block_stack.std(dim=-1, unbiased=False),
-            'block_norms': torch.linalg.vector_norm(block_stack, ord=2, dim=-1),
-            'block_layer_counts': block_layer_counts,
-            'block_pooling': 'mean',
+            'summary_spatial': summary_spatial,
+            'summary_spectral': summary_spectral,
+            'block_means': shared_block.mean(dim=-1),
+            'block_stds': shared_block.std(dim=-1, unbiased=False),
+            'block_norms': torch.linalg.vector_norm(shared_block, ord=2, dim=-1),
+            'block_layer_counts': all_counts,
+            'block_layer_counts_pre_attn': attn_counts,
+            'block_layer_counts_pre_mlp': mlp_counts,
+            'block_pooling': 'learned_softmax',
+            'depth_family_mode': 'pre_attn_pre_mlp',
+            'block_peak_weight_pre_attn': attn_peak,
+            'block_peak_weight_pre_mlp': mlp_peak,
         }
 
 
@@ -481,13 +567,15 @@ class TransformerEncoderLayer(nn.Module):
                 depth_dim = int(getattr(moe, "attnres_depth_router_dim", 0))
                 block_diag = None
                 if self.moe_attnres_depth_context_mode == 'block_shared_typed_proj':
-                    block_diag = self._compose_block_shared_depth_summary(
+                    block_diag = self._compose_block_typed_depth_summary(
                         source_pool=mlp_source_pool,
                         out_dim=depth_dim,
                         fallback_ref=baseline_in,
                         block_count=self.moe_attnres_depth_block_count,
                     )
                     depth_summary = block_diag['summary']
+                    depth_summary_spatial = block_diag['summary_spatial']
+                    depth_summary_spectral = block_diag['summary_spectral']
                 else:
                     depth_summary = self._compose_attnres_depth_summary(
                         attn_alpha=attn_alpha,
@@ -496,6 +584,8 @@ class TransformerEncoderLayer(nn.Module):
                         fallback_ref=baseline_in,
                         summary_mode=self.moe_attnres_depth_summary_mode,
                     )
+                    depth_summary_spatial = depth_summary
+                    depth_summary_spectral = depth_summary
                 if depth_summary is not None:
                     grad_mode = str(self.moe_attnres_depth_summary_grad_mode).strip().lower()
                     cur_epoch = int(get_moe_train_epoch())
@@ -508,11 +598,19 @@ class TransformerEncoderLayer(nn.Module):
                         grad_active = False
                     depth_summary_detached = not grad_active
                     depth_summary_for_router = depth_summary if grad_active else depth_summary.detach()
+                    depth_summary_spatial_for_router = (
+                        depth_summary_spatial if grad_active else depth_summary_spatial.detach()
+                    )
+                    depth_summary_spectral_for_router = (
+                        depth_summary_spectral if grad_active else depth_summary_spectral.detach()
+                    )
                     router_ctx["attnres_depth_summary"] = depth_summary_for_router
+                    router_ctx["attnres_depth_summary_spatial"] = depth_summary_spatial_for_router
+                    router_ctx["attnres_depth_summary_spectral"] = depth_summary_spectral_for_router
                     router_ctx["attnres_depth_context_mode"] = self.moe_attnres_depth_context_mode
                     router_ctx["attnres_depth_block_count"] = int(self.moe_attnres_depth_block_count)
                     if block_diag is not None:
-                        router_ctx["attnres_depth_summary_mode"] = "block_shared_meanpool"
+                        router_ctx["attnres_depth_summary_mode"] = "block_typed_learned"
                         router_ctx["attnres_depth_probe_mlp_for_router"] = False
                     else:
                         router_ctx["attnres_depth_summary_mode"] = self.moe_attnres_depth_summary_mode
@@ -525,9 +623,18 @@ class TransformerEncoderLayer(nn.Module):
                     router_ctx["attnres_depth_shared_context_norm"] = float(
                         depth_summary_for_router.detach().float().norm(dim=-1).mean().item()
                     )
+                    router_ctx["attnres_depth_spatial_context_norm"] = float(
+                        depth_summary_spatial_for_router.detach().float().norm(dim=-1).mean().item()
+                    )
+                    router_ctx["attnres_depth_spectral_context_norm"] = float(
+                        depth_summary_spectral_for_router.detach().float().norm(dim=-1).mean().item()
+                    )
                     if block_diag is not None:
                         router_ctx["attnres_depth_block_layer_counts"] = list(block_diag['block_layer_counts'])
+                        router_ctx["attnres_depth_block_layer_counts_pre_attn"] = list(block_diag['block_layer_counts_pre_attn'])
+                        router_ctx["attnres_depth_block_layer_counts_pre_mlp"] = list(block_diag['block_layer_counts_pre_mlp'])
                         router_ctx["attnres_depth_block_pooling"] = str(block_diag['block_pooling'])
+                        router_ctx["attnres_depth_family_mode"] = str(block_diag['depth_family_mode'])
                         router_ctx["attnres_depth_block_mean"] = (
                             block_diag['block_means'].detach().float().mean(dim=0).cpu().tolist()
                         )
@@ -536,6 +643,12 @@ class TransformerEncoderLayer(nn.Module):
                         )
                         router_ctx["attnres_depth_block_summary_norms"] = (
                             block_diag['block_norms'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_peak_weight_pre_attn"] = (
+                            block_diag['block_peak_weight_pre_attn'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_peak_weight_pre_mlp"] = (
+                            block_diag['block_peak_weight_pre_mlp'].detach().float().mean(dim=0).cpu().tolist()
                         )
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 

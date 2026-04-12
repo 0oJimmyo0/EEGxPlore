@@ -51,19 +51,19 @@ RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
 
 CUDA_ID="${CUDA_ID:-0}"
-EPOCHS="${EPOCHS:-30}"
-BATCH_SIZE="${BATCH_SIZE:-64}"
+EPOCHS="${EPOCHS:-40}"
+BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
 LR="${LR:-2e-4}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-2e-2}"
 OPTIMIZER="${OPTIMIZER:-AdamW}"
 CLIP_VALUE="${CLIP_VALUE:-1.0}"
-DROPOUT="${DROPOUT:-0.1}"
+DROPOUT="${DROPOUT:-0.3}"
 CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
 
-RUN_MODE="${RUN_MODE:-selective}"  # dense | selective | custom
+RUN_MODE="${RUN_MODE:-custom}"  # dense | selective | custom
 A1_STRICT_BLOCK_ABLATION="${A1_STRICT_BLOCK_ABLATION:-1}"  # 1 => keep A1 as one clean block-summary change
 
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-pre_attn}"
@@ -249,7 +249,7 @@ mkdir -p "$MODEL_DIR"
 
 DEPTH_SUMMARY_LABEL="$DEPTH_SUMMARY_MODE"
 if [[ "$DEPTH_CONTEXT_MODE" == "block_shared_typed_proj" ]]; then
-  DEPTH_SUMMARY_LABEL="block_shared_meanpool"
+  DEPTH_SUMMARY_LABEL="block_typed_learned"
 fi
 
 echo "[seedv-slurm] dataset=$DATASET dataset_dir=$DATASET_DIR num_classes=$NUM_CLASSES" >&2

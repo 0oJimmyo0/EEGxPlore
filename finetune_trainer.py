@@ -467,10 +467,15 @@ class Trainer(object):
                 'depth_context_mode': d.get('attnres_depth_context_mode', 'compact_shared'),
                 'block_count': int(d.get('attnres_depth_block_count', 0) or 0),
                 'block_pooling': d.get('attnres_depth_block_pooling'),
+                'depth_family_mode': d.get('attnres_depth_family_mode'),
                 'block_layer_counts': d.get('attnres_depth_block_layer_counts'),
+                'block_layer_counts_pre_attn': d.get('attnres_depth_block_layer_counts_pre_attn'),
+                'block_layer_counts_pre_mlp': d.get('attnres_depth_block_layer_counts_pre_mlp'),
                 'block_mean': d.get('attnres_depth_block_mean'),
                 'block_std': d.get('attnres_depth_block_std'),
                 'block_summary_norms': d.get('attnres_depth_block_summary_norms'),
+                'block_peak_weight_pre_attn': d.get('attnres_depth_block_peak_weight_pre_attn'),
+                'block_peak_weight_pre_mlp': d.get('attnres_depth_block_peak_weight_pre_mlp'),
             }
             self._append_json_record(block_path, _to_jsonable(block_payload))
 
@@ -479,6 +484,8 @@ class Trainer(object):
                 'split': str(split),
                 'layer': layer,
                 'shared_context_norm': d.get('attnres_depth_shared_context_norm'),
+                'spatial_context_norm': d.get('attnres_depth_spatial_context_norm'),
+                'spectral_context_norm': d.get('attnres_depth_spectral_context_norm'),
                 'spatial_projected_context_norm': d.get('attnres_depth_proj_spatial_norm'),
                 'spectral_projected_context_norm': d.get('attnres_depth_proj_spectral_norm'),
                 'spatial_spectral_proj_cosine': d.get('attnres_depth_proj_cosine'),
@@ -776,7 +783,7 @@ class Trainer(object):
                         grad_norms=grad_norms,
                         cm=np.asarray(cm),
                     )
-                      self._export_depth_context_diagnostics(epoch + 1, 'val')
+                    self._export_depth_context_diagnostics(epoch + 1, 'val')
                     self._warn_depth_summary_flow(epoch + 1, grad_norms)
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
@@ -1023,7 +1030,7 @@ class Trainer(object):
                         grad_norms=grad_norms,
                         cm=np.asarray(cm),
                     )
-                      self._export_depth_context_diagnostics(epoch + 1, 'val')
+                    self._export_depth_context_diagnostics(epoch + 1, 'val')
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
                     if roc_auc > roc_auc_best:
@@ -1174,7 +1181,7 @@ class Trainer(object):
                         grad_norms=grad_norms,
                         cm=None,
                     )
-                      self._export_depth_context_diagnostics(epoch + 1, 'val')
+                    self._export_depth_context_diagnostics(epoch + 1, 'val')
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
                     if r2 > r2_best:
