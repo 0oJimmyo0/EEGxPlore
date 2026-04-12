@@ -78,6 +78,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--moe_use_attnres_depth_router_features', action='store_true')
     parser.add_argument('--moe_attnres_depth_router_dim', type=int, default=26)
     parser.add_argument(
+        '--moe_attnres_depth_context_mode',
+        type=str,
+        default='compact_shared',
+        choices=['compact_shared', 'block_shared_typed_proj'],
+    )
+    parser.add_argument('--moe_attnres_depth_block_count', type=int, default=4)
+    parser.add_argument(
         '--moe_attnres_depth_summary_mode',
         type=str,
         default='auto',
@@ -186,6 +193,16 @@ def validate_args(args: argparse.Namespace) -> None:
         )
     if args.moe_attnres_depth_router_dim <= 0:
         raise ValueError('--moe_attnres_depth_router_dim must be > 0.')
+    if args.moe_attnres_depth_block_count < 1:
+        raise ValueError('--moe_attnres_depth_block_count must be >= 1.')
+    if (
+        args.moe_attnres_depth_context_mode == 'block_shared_typed_proj'
+        and not args.moe_use_attnres_depth_router_features
+    ):
+        print(
+            '[warn] block_shared_typed_proj selected but --moe_use_attnres_depth_router_features is off; '
+            'depth block context will not be used by routers in this run.'
+        )
     if args.moe_router_compact_feature_dim <= 0:
         raise ValueError('--moe_router_compact_feature_dim must be > 0.')
     if args.moe_expert_init_noise_std < 0:

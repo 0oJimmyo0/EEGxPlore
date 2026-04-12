@@ -429,6 +429,85 @@ class Trainer(object):
         with open(path, 'a', encoding='utf-8') as f:
             f.write(json.dumps(payload, ensure_ascii=True) + '\n')
 
+      @staticmethod
+      def _append_json_record(path: str, payload: Dict[str, Any]) -> None:
+          rows: List[Dict[str, Any]] = []
+          if os.path.isfile(path):
+              try:
+                  with open(path, 'r', encoding='utf-8') as f:
+                      loaded = json.load(f)
+                  if isinstance(loaded, list):
+                      rows = loaded
+              except Exception:
+                  rows = []
+          rows.append(payload)
+          with open(path, 'w', encoding='utf-8') as f:
+              json.dump(rows, f, indent=2, ensure_ascii=True)
+
+      def _export_depth_context_diagnostics(self, epoch_one_based: int, split: str) -> None:
+          layers = self._collect_layer_moe_diagnostics()
+          if not layers:
+              return
+          md = self._model_dir()
+          os.makedirs(md, exist_ok=True)
+          block_path = os.path.join(md, 'block_summary_stats.json')
+          router_path = os.path.join(md, 'router_context_stats.json')
+          routing_path = os.path.join(md, 'routing_diagnostics.json')
+
+          for entry in layers:
+              layer = int(entry.get('layer', -1))
+              d = entry.get('diag', {}) or {}
+              spatial_diag = d.get('spatial', {}) or {}
+              spectral_diag = d.get('spectral', {}) or {}
+
+              block_payload = {
+                  'epoch': int(epoch_one_based),
+                  'split': str(split),
+                  'layer': layer,
+                  'depth_context_mode': d.get('attnres_depth_context_mode', 'compact_shared'),
+                  'block_count': int(d.get('attnres_depth_block_count', 0) or 0),
+                  'block_attn_mass_mean': d.get('attnres_depth_block_attn_mass_mean'),
+                  'block_mlp_mass_mean': d.get('attnres_depth_block_mlp_mass_mean'),
+                  'block_delta_mass_mean': d.get('attnres_depth_block_delta_mass_mean'),
+                  'block_summary_norms': d.get('attnres_depth_block_summary_norms'),
+              }
+              self._append_json_record(block_path, _to_jsonable(block_payload))
+
+              router_payload = {
+                  'epoch': int(epoch_one_based),
+                  'split': str(split),
+                  'layer': layer,
+                  'shared_context_norm': d.get('attnres_depth_shared_context_norm'),
+                  'spatial_projected_context_norm': d.get('attnres_depth_proj_spatial_norm'),
+                  'spectral_projected_context_norm': d.get('attnres_depth_proj_spectral_norm'),
+                  'spatial_spectral_proj_cosine': d.get('attnres_depth_proj_cosine'),
+                  'spatial_spectral_proj_l2': d.get('attnres_depth_proj_l2'),
+              }
+              self._append_json_record(router_path, _to_jsonable(router_payload))
+
+              sp_hist = spatial_diag.get('assigned_count_per_expert') or []
+              sc_hist = spectral_diag.get('assigned_count_per_expert') or []
+              routing_payload = {
+                  'epoch': int(epoch_one_based),
+                  'split': str(split),
+                  'layer': layer,
+                  'spatial_assigned_count_per_expert': sp_hist,
+                  'spectral_assigned_count_per_expert': sc_hist,
+                  'spatial_collapsed_experts': int(sum(1 for v in sp_hist if int(v) == 0)),
+                  'spectral_collapsed_experts': int(sum(1 for v in sc_hist if int(v) == 0)),
+                  'spatial_routing_entropy_pre_capacity': spatial_diag.get('routing_entropy_pre_capacity'),
+                  'spectral_routing_entropy_pre_capacity': spectral_diag.get('routing_entropy_pre_capacity'),
+                  'spatial_routing_entropy_post_assignment': spatial_diag.get('routing_entropy_post_assignment'),
+                  'spectral_routing_entropy_post_assignment': spectral_diag.get('routing_entropy_post_assignment'),
+                  'spatial_pre_top1_histogram': spatial_diag.get('pre_top1_histogram'),
+                  'spectral_pre_top1_histogram': spectral_diag.get('pre_top1_histogram'),
+                  'spatial_reroute_rate': spatial_diag.get('reroute_rate'),
+                  'spectral_reroute_rate': spectral_diag.get('reroute_rate'),
+                  'spatial_overflow_count': spatial_diag.get('overflow_count'),
+                  'spectral_overflow_count': spectral_diag.get('overflow_count'),
+              }
+              self._append_json_record(routing_path, _to_jsonable(routing_payload))
+
     def _model_dir(self) -> str:
         return getattr(self.params, "model_dir", ".") or "."
 
@@ -510,6 +589,8 @@ class Trainer(object):
             'moe_router_arch': getattr(self.params, 'moe_router_arch', ''),
             'moe_use_attnres_depth_router_features': bool(getattr(self.params, 'moe_use_attnres_depth_router_features', False)),
             'moe_attnres_depth_router_dim': getattr(self.params, 'moe_attnres_depth_router_dim', ''),
+              'moe_attnres_depth_context_mode': getattr(self.params, 'moe_attnres_depth_context_mode', ''),
+              'moe_attnres_depth_block_count': getattr(self.params, 'moe_attnres_depth_block_count', ''),
             'moe_attnres_depth_summary_mode': getattr(self.params, 'moe_attnres_depth_summary_mode', ''),
             'moe_attnres_depth_probe_mlp_for_router': bool(getattr(self.params, 'moe_attnres_depth_probe_mlp_for_router', False)),
             'moe_attnres_depth_summary_grad_mode': getattr(self.params, 'moe_attnres_depth_summary_grad_mode', ''),
@@ -694,6 +775,7 @@ class Trainer(object):
                         grad_norms=grad_norms,
                         cm=np.asarray(cm),
                     )
+                      self._export_depth_context_diagnostics(epoch + 1, 'val')
                     self._warn_depth_summary_flow(epoch + 1, grad_norms)
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
@@ -940,6 +1022,7 @@ class Trainer(object):
                         grad_norms=grad_norms,
                         cm=np.asarray(cm),
                     )
+                      self._export_depth_context_diagnostics(epoch + 1, 'val')
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
                     if roc_auc > roc_auc_best:
@@ -1090,6 +1173,7 @@ class Trainer(object):
                         grad_norms=grad_norms,
                         cm=None,
                     )
+                      self._export_depth_context_diagnostics(epoch + 1, 'val')
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
                     if r2 > r2_best:

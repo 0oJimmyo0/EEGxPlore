@@ -725,6 +725,13 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         depth_summary_mean = None
         depth_summary_std = None
         depth_summary_mode = "NA"
+        depth_context_mode = "compact_shared"
+        depth_block_count = 0
+        depth_block_attn_mass_mean = None
+        depth_block_mlp_mass_mean = None
+        depth_block_delta_mass_mean = None
+        depth_block_summary_norms = None
+        depth_shared_context_norm = None
         depth_probe_mlp_for_router = False
         depth_summary_grad_mode = "detached"
         depth_summary_grad_active = False
@@ -740,6 +747,20 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 depth_summary_std = float(dsf.std(unbiased=False).item())
                 if isinstance(router_context.get("attnres_depth_summary_mode"), str):
                     depth_summary_mode = str(router_context.get("attnres_depth_summary_mode"))
+                if isinstance(router_context.get("attnres_depth_context_mode"), str):
+                    depth_context_mode = str(router_context.get("attnres_depth_context_mode"))
+                if "attnres_depth_block_count" in router_context:
+                    depth_block_count = int(router_context.get("attnres_depth_block_count"))
+                if "attnres_depth_block_attn_mass_mean" in router_context:
+                    depth_block_attn_mass_mean = list(router_context.get("attnres_depth_block_attn_mass_mean"))
+                if "attnres_depth_block_mlp_mass_mean" in router_context:
+                    depth_block_mlp_mass_mean = list(router_context.get("attnres_depth_block_mlp_mass_mean"))
+                if "attnres_depth_block_delta_mass_mean" in router_context:
+                    depth_block_delta_mass_mean = list(router_context.get("attnres_depth_block_delta_mass_mean"))
+                if "attnres_depth_block_summary_norms" in router_context:
+                    depth_block_summary_norms = list(router_context.get("attnres_depth_block_summary_norms"))
+                if "attnres_depth_shared_context_norm" in router_context:
+                    depth_shared_context_norm = float(router_context.get("attnres_depth_shared_context_norm"))
                 if "attnres_depth_probe_mlp_for_router" in router_context:
                     depth_probe_mlp_for_router = bool(router_context.get("attnres_depth_probe_mlp_for_router"))
                 if isinstance(router_context.get("attnres_depth_summary_grad_mode"), str):
@@ -768,6 +789,18 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 depth_sp = depth_sp * depth_path_scale
             if depth_sc is not None:
                 depth_sc = depth_sc * depth_path_scale
+
+                depth_proj_spatial_norm = None
+                depth_proj_spectral_norm = None
+                depth_proj_cosine = None
+                depth_proj_l2 = None
+                if depth_sp is not None and depth_sc is not None:
+                        dsp = depth_sp.detach().float()
+                        dsc = depth_sc.detach().float()
+                        depth_proj_spatial_norm = float(dsp.norm(dim=-1).mean().item())
+                        depth_proj_spectral_norm = float(dsc.norm(dim=-1).mean().item())
+                        depth_proj_cosine = float(F.cosine_similarity(dsp, dsc, dim=-1).mean().item())
+                        depth_proj_l2 = float((dsp - dsc).norm(dim=-1).mean().item())
 
         shared_blend = self._shared_blend_value(cur_epoch)
         expert_residual_scale = 1.0 - shared_blend
@@ -1058,10 +1091,21 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "eeg_summary_router_concat_spectral": bool(self.use_eeg_summary_router_concat_spectral),
             "attnres_depth_router_concat": bool(self.use_attnres_depth_router_concat),
             "attnres_depth_path_scale": float(depth_path_scale),
+            "attnres_depth_context_mode": depth_context_mode,
+            "attnres_depth_block_count": int(depth_block_count),
+            "attnres_depth_block_attn_mass_mean": depth_block_attn_mass_mean,
+            "attnres_depth_block_mlp_mass_mean": depth_block_mlp_mass_mean,
+            "attnres_depth_block_delta_mass_mean": depth_block_delta_mass_mean,
+            "attnres_depth_block_summary_norms": depth_block_summary_norms,
+            "attnres_depth_shared_context_norm": depth_shared_context_norm,
             "attnres_depth_summary_mean": depth_summary_mean,
             "attnres_depth_summary_std": depth_summary_std,
             "attnres_depth_summary_mode": depth_summary_mode,
             "attnres_depth_probe_mlp_for_router": depth_probe_mlp_for_router,
+            "attnres_depth_proj_spatial_norm": depth_proj_spatial_norm,
+            "attnres_depth_proj_spectral_norm": depth_proj_spectral_norm,
+            "attnres_depth_proj_cosine": depth_proj_cosine,
+            "attnres_depth_proj_l2": depth_proj_l2,
             "attnres_depth_summary_grad_mode": depth_summary_grad_mode,
             "attnres_depth_summary_grad_active": depth_summary_grad_active,
             "attnres_depth_summary_detached": bool(depth_summary_detached),
@@ -1280,10 +1324,17 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
         ),
         (
             f"    depth_summary: scale={diag.get('attnres_depth_path_scale', 1.0):.4f}  "
+            f"ctx_mode={diag.get('attnres_depth_context_mode', 'compact_shared')}  "
+            f"blocks={diag.get('attnres_depth_block_count', 0)}  "
             f"mean={diag.get('attnres_depth_summary_mean', 0.0) if diag.get('attnres_depth_summary_mean') is not None else 'NA'}  "
             f"std={diag.get('attnres_depth_summary_std', 0.0) if diag.get('attnres_depth_summary_std') is not None else 'NA'}  "
             f"mode={diag.get('attnres_depth_summary_mode', 'NA')}  "
             f"probe_mlp={diag.get('attnres_depth_probe_mlp_for_router', False)}  "
+            f"shared_ctx_norm={diag.get('attnres_depth_shared_context_norm', 'NA')}  "
+            f"proj_norm_sp={diag.get('attnres_depth_proj_spatial_norm', 'NA')}  "
+            f"proj_norm_sc={diag.get('attnres_depth_proj_spectral_norm', 'NA')}  "
+            f"proj_cos={diag.get('attnres_depth_proj_cosine', 'NA')}  "
+            f"proj_l2={diag.get('attnres_depth_proj_l2', 'NA')}  "
             f"grad_mode={diag.get('attnres_depth_summary_grad_mode', 'detached')}  "
             f"grad_active={diag.get('attnres_depth_summary_grad_active', False)}  "
             f"detached={diag.get('attnres_depth_summary_detached', True)}  "
