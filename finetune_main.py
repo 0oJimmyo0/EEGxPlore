@@ -92,6 +92,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument('--moe_attnres_depth_probe_mlp_for_router', action='store_true')
     parser.add_argument(
+        '--moe_attnres_depth_router_init',
+        type=str,
+        default='xavier',
+        choices=['xavier', 'zero'],
+        help='Initialization for depth-summary router projections (spatial/spectral).',
+    )
+    parser.add_argument(
         '--moe_attnres_depth_summary_grad_mode',
         type=str,
         default='delayed_unfreeze',

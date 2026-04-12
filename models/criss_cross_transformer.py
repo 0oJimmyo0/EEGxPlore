@@ -82,8 +82,8 @@ class TransformerEncoderLayer(nn.Module):
                   moe_attnres_depth_block_count: int = 4,
                  moe_attnres_depth_summary_mode: str = 'auto',
                  moe_attnres_depth_probe_mlp_for_router: bool = False,
-                 moe_attnres_depth_summary_grad_mode: str = 'detached',
-                 moe_attnres_depth_summary_unfreeze_epoch: int = 16,
+                  moe_attnres_depth_summary_grad_mode: str = 'delayed_unfreeze',
+                  moe_attnres_depth_summary_unfreeze_epoch: int = 8,
                  moe_ffn: Optional[nn.Module] = None) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
@@ -317,83 +317,74 @@ class TransformerEncoderLayer(nn.Module):
         return raw
 
     @staticmethod
-    def _block_mass_from_alpha(alpha: Optional[Tensor], block_count: int, fallback_ref: Tensor) -> Tensor:
-        """Per-sample depth mass grouped into contiguous blocks over AttnRes source depth."""
-        b = fallback_ref.shape[0]
-        dev = fallback_ref.device
-        dtype = fallback_ref.dtype
-        n_blocks = max(1, int(block_count))
-        if alpha is None:
-            return torch.zeros((b, n_blocks), device=dev, dtype=dtype)
-        if alpha.dim() != 4:
-            raise ValueError(f"AttnRes alpha must be [N,B,C,S], got {tuple(alpha.shape)}")
-
-        n, b_alpha, _, _ = alpha.shape
-        if n <= 0:
-            return torch.zeros((b, n_blocks), device=dev, dtype=dtype)
-        if b_alpha != b:
-            raise ValueError(f"AttnRes alpha batch mismatch: alpha B={b_alpha}, expected B={b}")
-
-        p = alpha.mean(dim=(2, 3)).transpose(0, 1)
-        p = p / p.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-
-        blocks = torch.tensor_split(torch.arange(n, device=dev), n_blocks)
-        masses = []
-        for ids in blocks:
-            if ids.numel() == 0:
-                masses.append(torch.zeros((b,), device=dev, dtype=p.dtype))
-            else:
-                masses.append(p.index_select(1, ids).sum(dim=1))
-        return torch.stack(masses, dim=-1).to(device=dev, dtype=dtype)
-
-    @staticmethod
     def _compose_block_shared_depth_summary(
-        attn_alpha: Optional[Tensor],
-        mlp_alpha: Optional[Tensor],
+        source_pool,
         out_dim: int,
         fallback_ref: Tensor,
         block_count: int,
-    ) -> Dict[str, Tensor]:
-        """Approach 1: shared block summary -> compact shared context.
+    ) -> Dict[str, Any]:
+        """Approach 1: block-wise summary over depth hidden states, then compact shared context.
 
-        Returns dict with:
-        - summary: [B, out_dim]
-        - attn_block_mass / mlp_block_mass / delta_block_mass: [B, blocks]
-        - block_summary_norms: [B, blocks]
+        Input source_pool is a list of [B, C, S, D] tensors ordered by depth/source index.
         """
         b = fallback_ref.shape[0]
         dev = fallback_ref.device
         dtype = fallback_ref.dtype
-        if out_dim <= 0:
+        n_blocks = max(1, int(block_count))
+
+        valid_sources = []
+        for src in (source_pool or []):
+            if not torch.is_tensor(src):
+                continue
+            if src.dim() != 4 or src.shape[0] != b:
+                continue
+            valid_sources.append(src.to(device=dev, dtype=dtype))
+
+        d = int(fallback_ref.shape[-1])
+        if not valid_sources:
+            z_blocks = torch.zeros((b, n_blocks), device=dev, dtype=dtype)
+            z_summary = torch.zeros((b, max(0, int(out_dim))), device=dev, dtype=dtype)
             return {
-                'summary': torch.zeros((b, 0), device=dev, dtype=dtype),
-                'attn_block_mass': torch.zeros((b, max(1, int(block_count))), device=dev, dtype=dtype),
-                'mlp_block_mass': torch.zeros((b, max(1, int(block_count))), device=dev, dtype=dtype),
-                'delta_block_mass': torch.zeros((b, max(1, int(block_count))), device=dev, dtype=dtype),
-                'block_summary_norms': torch.zeros((b, max(1, int(block_count))), device=dev, dtype=dtype),
+                'summary': z_summary,
+                'block_means': z_blocks,
+                'block_stds': z_blocks,
+                'block_norms': z_blocks,
+                'block_layer_counts': [0 for _ in range(n_blocks)],
+                'block_pooling': 'mean',
             }
 
-        attn_block = TransformerEncoderLayer._block_mass_from_alpha(attn_alpha, block_count, fallback_ref)
-        mlp_block = TransformerEncoderLayer._block_mass_from_alpha(mlp_alpha, block_count, fallback_ref)
-        delta_block = attn_block - mlp_block
+        depth_hidden = torch.stack([src.mean(dim=(1, 2)) for src in valid_sources], dim=1)  # [B, L, D]
+        l = int(depth_hidden.shape[1])
+        idx_blocks = torch.tensor_split(torch.arange(l, device=dev), n_blocks)
 
-        raw = torch.cat([attn_block, mlp_block, delta_block], dim=-1)
-        if raw.size(-1) > out_dim:
-            summary = F.adaptive_avg_pool1d(raw.unsqueeze(1), out_dim).squeeze(1)
-        elif raw.size(-1) < out_dim:
-            pad = torch.zeros((b, out_dim - raw.size(-1)), device=dev, dtype=dtype)
-            summary = torch.cat([raw, pad], dim=-1)
+        block_vecs = []
+        block_layer_counts = []
+        for ids in idx_blocks:
+            block_layer_counts.append(int(ids.numel()))
+            if ids.numel() == 0:
+                block_vecs.append(torch.zeros((b, d), device=dev, dtype=dtype))
+            else:
+                block_vecs.append(depth_hidden.index_select(1, ids).mean(dim=1))
+
+        block_stack = torch.stack(block_vecs, dim=1)  # [B, blocks, D]
+        shared = block_stack.reshape(b, -1)
+        if out_dim <= 0:
+            summary = torch.zeros((b, 0), device=dev, dtype=dtype)
+        elif shared.size(-1) > out_dim:
+            summary = F.adaptive_avg_pool1d(shared.unsqueeze(1), out_dim).squeeze(1)
+        elif shared.size(-1) < out_dim:
+            pad = torch.zeros((b, out_dim - shared.size(-1)), device=dev, dtype=dtype)
+            summary = torch.cat([shared, pad], dim=-1)
         else:
-            summary = raw
+            summary = shared
 
-        block_triplet = torch.stack([attn_block, mlp_block, delta_block], dim=-1)
-        block_norms = torch.linalg.vector_norm(block_triplet, ord=2, dim=-1)
         return {
             'summary': summary,
-            'attn_block_mass': attn_block,
-            'mlp_block_mass': mlp_block,
-            'delta_block_mass': delta_block,
-            'block_summary_norms': block_norms,
+            'block_means': block_stack.mean(dim=-1),
+            'block_stds': block_stack.std(dim=-1, unbiased=False),
+            'block_norms': torch.linalg.vector_norm(block_stack, ord=2, dim=-1),
+            'block_layer_counts': block_layer_counts,
+            'block_pooling': 'mean',
         }
 
 
@@ -488,25 +479,23 @@ class TransformerEncoderLayer(nn.Module):
             router_ctx = {"baseline": baseline_in, "attnres": attnres_in}
             if getattr(moe, "use_attnres_depth_router_concat", False):
                 depth_dim = int(getattr(moe, "attnres_depth_router_dim", 0))
-                  block_diag = None
-                  if self.moe_attnres_depth_context_mode == 'block_shared_typed_proj':
-                      block_out = self._compose_block_shared_depth_summary(
-                          attn_alpha=attn_alpha,
-                          mlp_alpha=mlp_alpha,
-                          out_dim=depth_dim,
-                          fallback_ref=baseline_in,
-                          block_count=self.moe_attnres_depth_block_count,
-                      )
-                      depth_summary = block_out['summary']
-                      block_diag = block_out
-                  else:
-                      depth_summary = self._compose_attnres_depth_summary(
-                          attn_alpha=attn_alpha,
-                          mlp_alpha=mlp_alpha,
-                          out_dim=depth_dim,
-                          fallback_ref=baseline_in,
-                          summary_mode=self.moe_attnres_depth_summary_mode,
-                      )
+                block_diag = None
+                if self.moe_attnres_depth_context_mode == 'block_shared_typed_proj':
+                    block_diag = self._compose_block_shared_depth_summary(
+                        source_pool=mlp_source_pool,
+                        out_dim=depth_dim,
+                        fallback_ref=baseline_in,
+                        block_count=self.moe_attnres_depth_block_count,
+                    )
+                    depth_summary = block_diag['summary']
+                else:
+                    depth_summary = self._compose_attnres_depth_summary(
+                        attn_alpha=attn_alpha,
+                        mlp_alpha=mlp_alpha,
+                        out_dim=depth_dim,
+                        fallback_ref=baseline_in,
+                        summary_mode=self.moe_attnres_depth_summary_mode,
+                    )
                 if depth_summary is not None:
                     grad_mode = str(self.moe_attnres_depth_summary_grad_mode).strip().lower()
                     cur_epoch = int(get_moe_train_epoch())
@@ -520,8 +509,8 @@ class TransformerEncoderLayer(nn.Module):
                     depth_summary_detached = not grad_active
                     depth_summary_for_router = depth_summary if grad_active else depth_summary.detach()
                     router_ctx["attnres_depth_summary"] = depth_summary_for_router
-                      router_ctx["attnres_depth_context_mode"] = self.moe_attnres_depth_context_mode
-                      router_ctx["attnres_depth_block_count"] = int(self.moe_attnres_depth_block_count)
+                    router_ctx["attnres_depth_context_mode"] = self.moe_attnres_depth_context_mode
+                    router_ctx["attnres_depth_block_count"] = int(self.moe_attnres_depth_block_count)
                     router_ctx["attnres_depth_summary_mode"] = self.moe_attnres_depth_summary_mode
                     router_ctx["attnres_depth_probe_mlp_for_router"] = bool(self.moe_attnres_depth_probe_mlp_for_router)
                     router_ctx["attnres_depth_summary_grad_mode"] = grad_mode
@@ -529,22 +518,21 @@ class TransformerEncoderLayer(nn.Module):
                     router_ctx["attnres_depth_summary_detached"] = bool(depth_summary_detached)
                     router_ctx["attnres_depth_summary_unfreeze_epoch"] = unfreeze_epoch
                     router_ctx["attnres_depth_summary_cur_epoch"] = cur_epoch
-                      router_ctx["attnres_depth_shared_context_norm"] = float(
-                          depth_summary_for_router.detach().float().norm(dim=-1).mean().item()
-                      )
-                      if block_diag is not None:
-                          router_ctx["attnres_depth_block_attn_mass_mean"] = (
-                              block_diag['attn_block_mass'].detach().float().mean(dim=0).cpu().tolist()
-                          )
-                          router_ctx["attnres_depth_block_mlp_mass_mean"] = (
-                              block_diag['mlp_block_mass'].detach().float().mean(dim=0).cpu().tolist()
-                          )
-                          router_ctx["attnres_depth_block_delta_mass_mean"] = (
-                              block_diag['delta_block_mass'].detach().float().mean(dim=0).cpu().tolist()
-                          )
-                          router_ctx["attnres_depth_block_summary_norms"] = (
-                              block_diag['block_summary_norms'].detach().float().mean(dim=0).cpu().tolist()
-                          )
+                    router_ctx["attnres_depth_shared_context_norm"] = float(
+                        depth_summary_for_router.detach().float().norm(dim=-1).mean().item()
+                    )
+                    if block_diag is not None:
+                        router_ctx["attnres_depth_block_layer_counts"] = list(block_diag['block_layer_counts'])
+                        router_ctx["attnres_depth_block_pooling"] = str(block_diag['block_pooling'])
+                        router_ctx["attnres_depth_block_mean"] = (
+                            block_diag['block_means'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_std"] = (
+                            block_diag['block_stds'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_summary_norms"] = (
+                            block_diag['block_norms'].detach().float().mean(dim=0).cpu().tolist()
+                        )
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 
         # for final-only, collect only block outputs

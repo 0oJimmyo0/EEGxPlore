@@ -88,10 +88,11 @@ ROUTER_SOFT_WARMUP_EPOCHS="${ROUTER_SOFT_WARMUP_EPOCHS:-15}"
 
 DEPTH_ROUTER="${DEPTH_ROUTER:-on}"
 DEPTH_ROUTER_DIM="${DEPTH_ROUTER_DIM:-15}"
-DEPTH_CONTEXT_MODE="${DEPTH_CONTEXT_MODE:-compact_shared}"
+DEPTH_CONTEXT_MODE="${DEPTH_CONTEXT_MODE:-block_shared_typed_proj}"
 DEPTH_BLOCK_COUNT="${DEPTH_BLOCK_COUNT:-4}"
 DEPTH_SUMMARY_MODE="${DEPTH_SUMMARY_MODE:-attn_delta4}"
 DEPTH_PROBE_MLP_FOR_ROUTER="${DEPTH_PROBE_MLP_FOR_ROUTER:-on}"
+DEPTH_ROUTER_INIT="${DEPTH_ROUTER_INIT:-xavier}"
 DEPTH_SUMMARY_GRAD_MODE="${DEPTH_SUMMARY_GRAD_MODE:-delayed_unfreeze}"
 DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-8}"
 
@@ -152,6 +153,7 @@ if [[ "$DEPTH_ROUTER" == "on" ]]; then
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_context_mode "$DEPTH_CONTEXT_MODE")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_block_count "$DEPTH_BLOCK_COUNT")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode "$DEPTH_SUMMARY_MODE")
+  DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_init "$DEPTH_ROUTER_INIT")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_grad_mode "$DEPTH_SUMMARY_GRAD_MODE")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_unfreeze_epoch "$DEPTH_SUMMARY_UNFREEZE_EPOCH")
   if [[ "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
@@ -224,7 +226,7 @@ echo "[seedv-slurm] run_mode=$RUN_MODE" >&2
 echo "[seedv-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
 echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers=$MOE_NUM_LAYERS" >&2
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2
-echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_MODE" >&2
+echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_MODE depth_proj_init=$DEPTH_ROUTER_INIT" >&2
 echo "[seedv-slurm] depth_grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
 echo "[seedv-slurm] split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>} component_lr=$USE_COMPONENT_LR" >&2
 
