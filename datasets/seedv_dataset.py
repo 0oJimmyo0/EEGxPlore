@@ -5,6 +5,7 @@ import lmdb
 import pickle
 import os
 import json
+from collections import Counter
 
 
 class CustomDataset(Dataset):
@@ -112,10 +113,14 @@ class LoadDataset(object):
         split_sets = {'train': train_set, 'val': val_set, 'test': test_set}
         subject_sets = {}
         split_trials = {}
+        split_label_counts = {}
+        split_missing_keys = {}
         for split_name, ds in split_sets.items():
             subjects = set()
             sessions = set()
             trials = set()
+            labels = Counter()
+            missing = 0
             for key in ds.keys:
                 p = self._parse_key_fields(key)
                 if p['subject']:
@@ -124,17 +129,38 @@ class LoadDataset(object):
                     sessions.add(p['session'])
                 if p['trial']:
                     trials.add(p['trial'])
+
+                enc_key = key.encode() if isinstance(key, str) else key
+                with ds.db.begin(write=False) as txn:
+                    raw = txn.get(enc_key)
+                if raw is None:
+                    missing += 1
+                    continue
+                pair = pickle.loads(raw)
+                labels[int(pair.get('label', -1))] += 1
+
             subject_sets[split_name] = subjects
             split_trials[split_name] = sorted(trials)
+            split_label_counts[split_name] = labels
+            split_missing_keys[split_name] = missing
             print(
                 f"[SEED-V split] {split_name}: n={len(ds)}, subjects={len(subjects)}, "
                 f"sessions={sorted(sessions)}, trials={sorted(trials)}"
+            )
+            print(
+                f"[SEED-V split] {split_name} class_counts={dict(sorted(labels.items()))} "
+                f"missing_keys={missing}"
             )
 
         tv = len(subject_sets['train'] & subject_sets['val'])
         tt = len(subject_sets['train'] & subject_sets['test'])
         vt = len(subject_sets['val'] & subject_sets['test'])
         print(f"[SEED-V split] subject overlap train/val={tv}, train/test={tt}, val/test={vt}")
+
+        total_labels = Counter()
+        for split_name in ['train', 'val', 'test']:
+            total_labels.update(split_label_counts[split_name])
+        print(f"[SEED-V split] overall class_counts={dict(sorted(total_labels.items()))}")
 
         trial_ok = (
             split_trials['train'] == ['0', '1', '2', '3', '4']

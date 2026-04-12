@@ -27,9 +27,9 @@ if [[ "$DATASET" != "SEED-V" ]]; then
   exit 2
 fi
 
-DATASET_DIR="${DATASET_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/processed_raw_eeg_200hz_1to75_4x200_lmdb}"
+DATASET_DIR="${DATASET_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/processed_raw_eeg_200hz_1to75_4x200_lmdb_v2}"
 NUM_CLASSES="${NUM_CLASSES:-5}"
-SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-$DATASET_DIR/subject_disjoint_manifest.json}"
+SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/subject_disjoint_manifest_balanced_v2.json}"
 
 MODEL_DIR="${MODEL_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/SEEDV_manual_${SLURM_JOB_ID:-manual}}"
 RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
@@ -49,7 +49,7 @@ DROPOUT="${DROPOUT:-0.3}"
 CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
 
-RUN_MODE="${RUN_MODE:-custom}"  # dense | selective | custom
+RUN_MODE="${RUN_MODE:-selective}"  # dense | selective | custom
 
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-pre_attn}"
 ATTNRES_START_LAYER="${ATTNRES_START_LAYER:-0}"

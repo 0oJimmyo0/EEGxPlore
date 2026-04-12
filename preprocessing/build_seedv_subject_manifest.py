@@ -81,6 +81,84 @@ def split_subjects(subjects, seed, train_ratio, val_ratio):
     return train, val, test
 
 
+def split_subjects_label_balanced(rows, seed, train_ratio, val_ratio):
+    by_subject = defaultdict(list)
+    for r in rows:
+        by_subject[r['subject']].append(r)
+
+    subjects = sorted([s for s in by_subject if s])
+    if len(subjects) < 3:
+        raise ValueError(f'Need at least 3 subjects, found {len(subjects)}.')
+
+    subj_label = {}
+    subj_total = {}
+    all_labels = set()
+    for sid in subjects:
+        c = Counter(int(x['label']) for x in by_subject[sid])
+        subj_label[sid] = c
+        subj_total[sid] = sum(c.values())
+        all_labels.update(c.keys())
+    all_labels = sorted(all_labels)
+
+    total_segments = sum(subj_total.values())
+    total_labels = Counter()
+    for sid in subjects:
+        total_labels.update(subj_label[sid])
+
+    target_ratio = {
+        'train': train_ratio,
+        'val': val_ratio,
+        'test': 1.0 - train_ratio - val_ratio,
+    }
+    target_seg = {k: target_ratio[k] * total_segments for k in target_ratio}
+    target_label = {
+        k: {lb: target_ratio[k] * total_labels[lb] for lb in all_labels}
+        for k in target_ratio
+    }
+
+    rng = random.Random(seed)
+    shuffled = subjects[:]
+    rng.shuffle(shuffled)
+    order = sorted(shuffled, key=lambda s: subj_total[s], reverse=True)
+
+    split_subjects = {'train': [], 'val': [], 'test': []}
+    split_seg = {'train': 0, 'val': 0, 'test': 0}
+    split_label = {
+        'train': Counter(),
+        'val': Counter(),
+        'test': Counter(),
+    }
+
+    # Seed each split with one subject first for stability.
+    for split_name, sid in zip(['train', 'val', 'test'], order[:3]):
+        split_subjects[split_name].append(sid)
+        split_seg[split_name] += subj_total[sid]
+        split_label[split_name].update(subj_label[sid])
+
+    def score(split_name, sid):
+        seg_after = split_seg[split_name] + subj_total[sid]
+        seg_term = ((seg_after - target_seg[split_name]) / max(1.0, target_seg[split_name])) ** 2
+        label_term = 0.0
+        for lb in all_labels:
+            after = split_label[split_name][lb] + subj_label[sid][lb]
+            tgt = max(1.0, target_label[split_name][lb])
+            label_term += ((after - tgt) / tgt) ** 2
+        # Emphasize label balance over split size.
+        return 0.7 * label_term + 0.3 * seg_term
+
+    for sid in order[3:]:
+        best_split = min(['train', 'val', 'test'], key=lambda sp: score(sp, sid))
+        split_subjects[best_split].append(sid)
+        split_seg[best_split] += subj_total[sid]
+        split_label[best_split].update(subj_label[sid])
+
+    return {
+        'train': set(split_subjects['train']),
+        'val': set(split_subjects['val']),
+        'test': set(split_subjects['test']),
+    }
+
+
 def summarize_split(name, keys, rows_by_key, split_subjects_set):
     label_counter = Counter()
     for k in keys:
@@ -97,6 +175,9 @@ def main():
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--train_ratio', type=float, default=0.7)
     ap.add_argument('--val_ratio', type=float, default=0.15)
+    ap.add_argument('--balance_labels', action='store_true', default=True,
+                    help='Use deterministic subject-level label-aware split assignment (default: on).')
+    ap.add_argument('--no-balance_labels', dest='balance_labels', action='store_false')
     args = ap.parse_args()
 
     if not os.path.isdir(args.lmdb_path):
@@ -121,7 +202,11 @@ def main():
     if len(subjects) < 3:
         raise ValueError(f'Need at least 3 subjects, found {len(subjects)}.')
 
-    train_sub, val_sub, test_sub = split_subjects(subjects, args.seed, args.train_ratio, args.val_ratio)
+    if args.balance_labels:
+        split_sub = split_subjects_label_balanced(rows, args.seed, args.train_ratio, args.val_ratio)
+        train_sub, val_sub, test_sub = split_sub['train'], split_sub['val'], split_sub['test']
+    else:
+        train_sub, val_sub, test_sub = split_subjects(subjects, args.seed, args.train_ratio, args.val_ratio)
 
     manifest = {'train': [], 'val': [], 'test': []}
     for sid, keys in by_subject.items():
@@ -144,6 +229,7 @@ def main():
     vt = len(val_sub & test_sub)
 
     print(f'[seedv-manifest] wrote {output_json}')
+    print(f'[seedv-manifest] balance_labels={args.balance_labels}')
     summarize_split('train', manifest['train'], rows_by_key, train_sub)
     summarize_split('val', manifest['val'], rows_by_key, val_sub)
     summarize_split('test', manifest['test'], rows_by_key, test_sub)
