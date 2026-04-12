@@ -103,6 +103,12 @@ class CBraMod(nn.Module):
             )
         if self.moe_router_compact_feature_mode != "none" and self.moe_router_compact_feature_dim <= 0:
             raise ValueError("moe_router_compact_feature_dim must be > 0 when compact router features are enabled")
+        valid_depth_context_modes = {"compact_shared", "block_shared_typed_proj", "dual_query_block_typed_proj"}
+        if str(moe_attnres_depth_context_mode) not in valid_depth_context_modes:
+            raise ValueError(
+                f"moe_attnres_depth_context_mode must be one of {sorted(valid_depth_context_modes)}, "
+                f"got {moe_attnres_depth_context_mode!r}"
+            )
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         if use_moe:

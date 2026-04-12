@@ -88,14 +88,24 @@ ROUTER_JITTER_ANNEAL_EPOCHS="${ROUTER_JITTER_ANNEAL_EPOCHS:-30}"
 ROUTER_SOFT_WARMUP_EPOCHS="${ROUTER_SOFT_WARMUP_EPOCHS:-15}"
 
 DEPTH_ROUTER="${DEPTH_ROUTER:-on}"
-DEPTH_ROUTER_DIM="${DEPTH_ROUTER_DIM:-15}"
+DEPTH_ROUTER_DIM="${DEPTH_ROUTER_DIM:-24}"
 DEPTH_CONTEXT_MODE="${DEPTH_CONTEXT_MODE:-block_shared_typed_proj}"
-DEPTH_BLOCK_COUNT="${DEPTH_BLOCK_COUNT:-4}"
+DEPTH_QUERY_MODE="${DEPTH_QUERY_MODE:-shared}"  # shared | dual
+DEPTH_BLOCK_COUNT="${DEPTH_BLOCK_COUNT:-8}"
 DEPTH_SUMMARY_MODE="${DEPTH_SUMMARY_MODE:-attn_delta4}"
 DEPTH_PROBE_MLP_FOR_ROUTER="${DEPTH_PROBE_MLP_FOR_ROUTER:-on}"
 DEPTH_ROUTER_INIT="${DEPTH_ROUTER_INIT:-xavier}"
 DEPTH_SUMMARY_GRAD_MODE="${DEPTH_SUMMARY_GRAD_MODE:-delayed_unfreeze}"
-DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-8}"
+DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-2}"
+
+case "$DEPTH_QUERY_MODE" in
+  shared|dual)
+    ;;
+  *)
+    echo "[seedv-slurm] invalid DEPTH_QUERY_MODE=$DEPTH_QUERY_MODE (expected: shared|dual)" >&2
+    exit 2
+    ;;
+esac
 
 MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS="${MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS:-0}"
 MOE_SHARED_BLEND_WARMUP_EPOCHS="${MOE_SHARED_BLEND_WARMUP_EPOCHS:-0}"
@@ -149,7 +159,11 @@ if [[ "$A1_STRICT_BLOCK_ABLATION" == "1" ]]; then
     SEEDV_SPLIT_MANIFEST=""
   fi
   if [[ "$USE_MOE" == "1" && "$DEPTH_ROUTER" == "on" ]]; then
-    DEPTH_CONTEXT_MODE="block_shared_typed_proj"
+    if [[ "$DEPTH_QUERY_MODE" == "dual" ]]; then
+      DEPTH_CONTEXT_MODE="dual_query_block_typed_proj"
+    else
+      DEPTH_CONTEXT_MODE="block_shared_typed_proj"
+    fi
     DEPTH_BLOCK_COUNT="4"
     DEPTH_ROUTER_DIM="15"
     DEPTH_SUMMARY_MODE="auto"
@@ -175,7 +189,7 @@ if [[ "$DEPTH_ROUTER" == "on" ]]; then
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_dim "$DEPTH_ROUTER_DIM")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_context_mode "$DEPTH_CONTEXT_MODE")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_block_count "$DEPTH_BLOCK_COUNT")
-  if [[ "$DEPTH_CONTEXT_MODE" == "block_shared_typed_proj" ]]; then
+  if [[ "$DEPTH_CONTEXT_MODE" == "block_shared_typed_proj" || "$DEPTH_CONTEXT_MODE" == "dual_query_block_typed_proj" ]]; then
     DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode auto)
   else
     DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode "$DEPTH_SUMMARY_MODE")
@@ -183,7 +197,7 @@ if [[ "$DEPTH_ROUTER" == "on" ]]; then
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_init "$DEPTH_ROUTER_INIT")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_grad_mode "$DEPTH_SUMMARY_GRAD_MODE")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_unfreeze_epoch "$DEPTH_SUMMARY_UNFREEZE_EPOCH")
-  if [[ "$DEPTH_CONTEXT_MODE" != "block_shared_typed_proj" && "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
+  if [[ "$DEPTH_CONTEXT_MODE" != "block_shared_typed_proj" && "$DEPTH_CONTEXT_MODE" != "dual_query_block_typed_proj" && "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
     DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_probe_mlp_for_router)
   fi
 fi
@@ -250,6 +264,8 @@ mkdir -p "$MODEL_DIR"
 DEPTH_SUMMARY_LABEL="$DEPTH_SUMMARY_MODE"
 if [[ "$DEPTH_CONTEXT_MODE" == "block_shared_typed_proj" ]]; then
   DEPTH_SUMMARY_LABEL="block_typed_learned"
+elif [[ "$DEPTH_CONTEXT_MODE" == "dual_query_block_typed_proj" ]]; then
+  DEPTH_SUMMARY_LABEL="dual_query_block_typed_learned"
 fi
 
 echo "[seedv-slurm] dataset=$DATASET dataset_dir=$DATASET_DIR num_classes=$NUM_CLASSES" >&2

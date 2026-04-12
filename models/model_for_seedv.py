@@ -30,6 +30,9 @@ class Model(nn.Module):
             if str(depth_context_mode) == 'block_shared_typed_proj':
                 depth_summary_mode = 'block_typed_learned'
                 depth_probe_mlp = False
+            if str(depth_context_mode) == 'dual_query_block_typed_proj':
+                depth_summary_mode = 'dual_query_block_typed_learned'
+                depth_probe_mlp = False
             print(
                 f"[SEED-V] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "
                 f"experts/bank={param.moe_num_experts}, "

@@ -125,7 +125,7 @@ class TransformerEncoderLayer(nn.Module):
         self.moe_attnres_depth_probe_mlp_for_router = bool(moe_attnres_depth_probe_mlp_for_router)
         self.moe_attnres_depth_summary_grad_mode = str(moe_attnres_depth_summary_grad_mode).strip().lower()
         self.moe_attnres_depth_summary_unfreeze_epoch = int(moe_attnres_depth_summary_unfreeze_epoch)
-        valid_context_modes = {'compact_shared', 'block_shared_typed_proj'}
+        valid_context_modes = {'compact_shared', 'block_shared_typed_proj', 'dual_query_block_typed_proj'}
         valid_depth_modes = {'auto', 'attn_delta4', 'attn_mlp_balanced', 'attn_mlp_latemix'}
         valid_grad_modes = {'detached', 'delayed_unfreeze', 'trainable'}
         if self.moe_attnres_depth_context_mode not in valid_context_modes:
@@ -162,11 +162,20 @@ class TransformerEncoderLayer(nn.Module):
 
         self.depth_block_score_pre_attn = None
         self.depth_block_score_pre_mlp = None
+        self.depth_block_score_pre_attn_spatial = None
+        self.depth_block_score_pre_attn_spectral = None
+        self.depth_block_score_pre_mlp_spatial = None
+        self.depth_block_score_pre_mlp_spectral = None
         self.depth_block_readout_spatial = None
         self.depth_block_readout_spectral = None
-        if self.moe_attnres_depth_context_mode == 'block_shared_typed_proj':
+        if self.moe_attnres_depth_context_mode in {'block_shared_typed_proj', 'dual_query_block_typed_proj'}:
             self.depth_block_score_pre_attn = nn.Linear(d_model, 1, bias=True, **factory_kwargs)
             self.depth_block_score_pre_mlp = nn.Linear(d_model, 1, bias=True, **factory_kwargs)
+            if self.moe_attnres_depth_context_mode == 'dual_query_block_typed_proj':
+                self.depth_block_score_pre_attn_spatial = nn.Linear(d_model, 1, bias=True, **factory_kwargs)
+                self.depth_block_score_pre_attn_spectral = nn.Linear(d_model, 1, bias=True, **factory_kwargs)
+                self.depth_block_score_pre_mlp_spatial = nn.Linear(d_model, 1, bias=True, **factory_kwargs)
+                self.depth_block_score_pre_mlp_spectral = nn.Linear(d_model, 1, bias=True, **factory_kwargs)
             readout_in_dim = 2 * self.moe_attnres_depth_block_count * d_model
             self.depth_block_readout_spatial = nn.Linear(
                 readout_in_dim,
@@ -365,11 +374,13 @@ class TransformerEncoderLayer(nn.Module):
         block_vecs = []
         block_layer_counts = []
         block_weight_mass = []
+        block_score_mass = []
         for ids in idx_blocks:
             block_layer_counts.append(int(ids.numel()))
             if ids.numel() == 0:
                 block_vecs.append(torch.zeros((b, d), device=dev, dtype=dtype))
                 block_weight_mass.append(torch.zeros((b,), device=dev, dtype=dtype))
+                block_score_mass.append(torch.full((b,), -1e4, device=dev, dtype=dtype))
                 continue
             blk = depth_hidden.index_select(1, ids)
             logits = scorer(blk).squeeze(-1)
@@ -377,10 +388,13 @@ class TransformerEncoderLayer(nn.Module):
             vec = torch.einsum('bl,bld->bd', weights, blk)
             block_vecs.append(vec)
             block_weight_mass.append(weights.max(dim=-1).values)
+            block_score_mass.append(logits.mean(dim=-1))
 
         block_stack = torch.stack(block_vecs, dim=1)
         block_weight_peak = torch.stack(block_weight_mass, dim=1)
-        return block_stack, block_layer_counts, block_weight_peak
+        block_score_stack = torch.stack(block_score_mass, dim=1)
+        block_weight_dist = F.softmax(block_score_stack, dim=-1)
+        return block_stack, block_layer_counts, block_weight_peak, block_weight_dist
 
     def _compose_block_typed_depth_summary(
         self,
@@ -435,28 +449,80 @@ class TransformerEncoderLayer(nn.Module):
         pre_attn_hidden = torch.stack([src.mean(dim=(1, 2)) for src in pre_attn_sources], dim=1)
         pre_mlp_hidden = torch.stack([src.mean(dim=(1, 2)) for src in pre_mlp_sources], dim=1)
 
-        attn_stack, attn_counts, attn_peak = self._learned_block_weighted_vectors(
-            pre_attn_hidden,
-            self.depth_block_score_pre_attn,
-            n_blocks,
-        )
-        mlp_stack, mlp_counts, mlp_peak = self._learned_block_weighted_vectors(
-            pre_mlp_hidden,
-            self.depth_block_score_pre_mlp,
-            n_blocks,
-        )
-
-        fused = torch.cat([attn_stack, mlp_stack], dim=1).reshape(b, -1)
-        if fused.shape[1] != (2 * n_blocks * d):
-            raise ValueError(
-                f'Unexpected fused block summary shape={tuple(fused.shape)}; expected last dim={2 * n_blocks * d}'
+        if self.moe_attnres_depth_context_mode == 'dual_query_block_typed_proj':
+            attn_stack_sp, attn_counts, attn_peak_sp, attn_dist_sp = self._learned_block_weighted_vectors(
+                pre_attn_hidden,
+                self.depth_block_score_pre_attn_spatial,
+                n_blocks,
+            )
+            attn_stack_sc, _, attn_peak_sc, attn_dist_sc = self._learned_block_weighted_vectors(
+                pre_attn_hidden,
+                self.depth_block_score_pre_attn_spectral,
+                n_blocks,
+            )
+            mlp_stack_sp, mlp_counts, mlp_peak_sp, mlp_dist_sp = self._learned_block_weighted_vectors(
+                pre_mlp_hidden,
+                self.depth_block_score_pre_mlp_spatial,
+                n_blocks,
+            )
+            mlp_stack_sc, _, mlp_peak_sc, mlp_dist_sc = self._learned_block_weighted_vectors(
+                pre_mlp_hidden,
+                self.depth_block_score_pre_mlp_spectral,
+                n_blocks,
             )
 
-        summary_spatial = self.depth_block_readout_spatial(fused)
-        summary_spectral = self.depth_block_readout_spectral(fused)
-        summary = 0.5 * (summary_spatial + summary_spectral)
+            fused_spatial = torch.cat([attn_stack_sp, mlp_stack_sp], dim=1).reshape(b, -1)
+            fused_spectral = torch.cat([attn_stack_sc, mlp_stack_sc], dim=1).reshape(b, -1)
+            if fused_spatial.shape[1] != (2 * n_blocks * d) or fused_spectral.shape[1] != (2 * n_blocks * d):
+                raise ValueError(
+                    'Unexpected fused dual-query block summary shape; '
+                    f'got spatial={tuple(fused_spatial.shape)} spectral={tuple(fused_spectral.shape)} '
+                    f'expected last dim={2 * n_blocks * d}'
+                )
 
-        shared_block = 0.5 * (attn_stack + mlp_stack)
+            summary_spatial = self.depth_block_readout_spatial(fused_spatial)
+            summary_spectral = self.depth_block_readout_spectral(fused_spectral)
+            shared_block = 0.25 * (attn_stack_sp + attn_stack_sc + mlp_stack_sp + mlp_stack_sc)
+            block_dist_spatial = 0.5 * (attn_dist_sp + mlp_dist_sp)
+            block_dist_spectral = 0.5 * (attn_dist_sc + mlp_dist_sc)
+            peak_spatial_pre_attn = attn_peak_sp
+            peak_spatial_pre_mlp = mlp_peak_sp
+            peak_spectral_pre_attn = attn_peak_sc
+            peak_spectral_pre_mlp = mlp_peak_sc
+            peak_pre_attn = 0.5 * (attn_peak_sp + attn_peak_sc)
+            peak_pre_mlp = 0.5 * (mlp_peak_sp + mlp_peak_sc)
+        else:
+            attn_stack, attn_counts, attn_peak, attn_dist = self._learned_block_weighted_vectors(
+                pre_attn_hidden,
+                self.depth_block_score_pre_attn,
+                n_blocks,
+            )
+            mlp_stack, mlp_counts, mlp_peak, mlp_dist = self._learned_block_weighted_vectors(
+                pre_mlp_hidden,
+                self.depth_block_score_pre_mlp,
+                n_blocks,
+            )
+
+            fused = torch.cat([attn_stack, mlp_stack], dim=1).reshape(b, -1)
+            if fused.shape[1] != (2 * n_blocks * d):
+                raise ValueError(
+                    f'Unexpected fused block summary shape={tuple(fused.shape)}; expected last dim={2 * n_blocks * d}'
+                )
+
+            summary_spatial = self.depth_block_readout_spatial(fused)
+            summary_spectral = self.depth_block_readout_spectral(fused)
+            shared_block = 0.5 * (attn_stack + mlp_stack)
+            block_dist_shared = 0.5 * (attn_dist + mlp_dist)
+            block_dist_spatial = block_dist_shared
+            block_dist_spectral = block_dist_shared
+            peak_spatial_pre_attn = attn_peak
+            peak_spatial_pre_mlp = mlp_peak
+            peak_spectral_pre_attn = attn_peak
+            peak_spectral_pre_mlp = mlp_peak
+            peak_pre_attn = attn_peak
+            peak_pre_mlp = mlp_peak
+
+        summary = 0.5 * (summary_spatial + summary_spectral)
         return {
             'summary': summary,
             'summary_spatial': summary_spatial,
@@ -469,8 +535,14 @@ class TransformerEncoderLayer(nn.Module):
             'block_layer_counts_pre_mlp': mlp_counts,
             'block_pooling': 'learned_softmax',
             'depth_family_mode': 'pre_attn_pre_mlp',
-            'block_peak_weight_pre_attn': attn_peak,
-            'block_peak_weight_pre_mlp': mlp_peak,
+            'block_peak_weight_pre_attn': peak_pre_attn,
+            'block_peak_weight_pre_mlp': peak_pre_mlp,
+            'block_peak_weight_spatial_pre_attn': peak_spatial_pre_attn,
+            'block_peak_weight_spatial_pre_mlp': peak_spatial_pre_mlp,
+            'block_peak_weight_spectral_pre_attn': peak_spectral_pre_attn,
+            'block_peak_weight_spectral_pre_mlp': peak_spectral_pre_mlp,
+            'block_weight_dist_spatial': block_dist_spatial,
+            'block_weight_dist_spectral': block_dist_spectral,
         }
 
 
@@ -566,7 +638,7 @@ class TransformerEncoderLayer(nn.Module):
             if getattr(moe, "use_attnres_depth_router_concat", False):
                 depth_dim = int(getattr(moe, "attnres_depth_router_dim", 0))
                 block_diag = None
-                if self.moe_attnres_depth_context_mode == 'block_shared_typed_proj':
+                if self.moe_attnres_depth_context_mode in {'block_shared_typed_proj', 'dual_query_block_typed_proj'}:
                     block_diag = self._compose_block_typed_depth_summary(
                         source_pool=mlp_source_pool,
                         out_dim=depth_dim,
@@ -610,7 +682,10 @@ class TransformerEncoderLayer(nn.Module):
                     router_ctx["attnres_depth_context_mode"] = self.moe_attnres_depth_context_mode
                     router_ctx["attnres_depth_block_count"] = int(self.moe_attnres_depth_block_count)
                     if block_diag is not None:
-                        router_ctx["attnres_depth_summary_mode"] = "block_typed_learned"
+                        if self.moe_attnres_depth_context_mode == 'dual_query_block_typed_proj':
+                            router_ctx["attnres_depth_summary_mode"] = "dual_query_block_typed_learned"
+                        else:
+                            router_ctx["attnres_depth_summary_mode"] = "block_typed_learned"
                         router_ctx["attnres_depth_probe_mlp_for_router"] = False
                     else:
                         router_ctx["attnres_depth_summary_mode"] = self.moe_attnres_depth_summary_mode
@@ -649,6 +724,24 @@ class TransformerEncoderLayer(nn.Module):
                         )
                         router_ctx["attnres_depth_block_peak_weight_pre_mlp"] = (
                             block_diag['block_peak_weight_pre_mlp'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_peak_weight_spatial_pre_attn"] = (
+                            block_diag['block_peak_weight_spatial_pre_attn'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_peak_weight_spatial_pre_mlp"] = (
+                            block_diag['block_peak_weight_spatial_pre_mlp'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_peak_weight_spectral_pre_attn"] = (
+                            block_diag['block_peak_weight_spectral_pre_attn'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_peak_weight_spectral_pre_mlp"] = (
+                            block_diag['block_peak_weight_spectral_pre_mlp'].detach().float().mean(dim=0).cpu().tolist()
+                        )
+                        router_ctx["attnres_depth_block_weight_dist_spatial"] = (
+                            block_diag['block_weight_dist_spatial'].detach().float()
+                        )
+                        router_ctx["attnres_depth_block_weight_dist_spectral"] = (
+                            block_diag['block_weight_dist_spectral'].detach().float()
                         )
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 

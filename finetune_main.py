@@ -81,7 +81,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         '--moe_attnres_depth_context_mode',
         type=str,
         default='compact_shared',
-        choices=['compact_shared', 'block_shared_typed_proj'],
+        choices=['compact_shared', 'block_shared_typed_proj', 'dual_query_block_typed_proj'],
     )
     parser.add_argument('--moe_attnres_depth_block_count', type=int, default=4)
     parser.add_argument(
@@ -89,12 +89,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default='auto',
         choices=['auto', 'attn_delta4', 'attn_mlp_balanced', 'attn_mlp_latemix'],
-        help='Compact depth-summary composition mode (ignored by block_shared_typed_proj).',
+        help='Compact depth-summary composition mode (ignored by block_shared_typed_proj and dual_query_block_typed_proj).',
     )
     parser.add_argument(
         '--moe_attnres_depth_probe_mlp_for_router',
         action='store_true',
-        help='Use pre-MLP AttnRes alpha in compact summary mode (ignored by block_shared_typed_proj).',
+        help='Use pre-MLP AttnRes alpha in compact summary mode (ignored by block_shared_typed_proj and dual_query_block_typed_proj).',
     )
     parser.add_argument(
         '--moe_attnres_depth_router_init',
@@ -207,25 +207,26 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError('--moe_attnres_depth_router_dim must be > 0.')
     if args.moe_attnres_depth_block_count < 1:
         raise ValueError('--moe_attnres_depth_block_count must be >= 1.')
+    typed_block_modes = {'block_shared_typed_proj', 'dual_query_block_typed_proj'}
     if (
-        args.moe_attnres_depth_context_mode == 'block_shared_typed_proj'
+        args.moe_attnres_depth_context_mode in typed_block_modes
         and not args.moe_use_attnres_depth_router_features
     ):
         print(
-            '[warn] block_shared_typed_proj selected but --moe_use_attnres_depth_router_features is off; '
+            f"[warn] {args.moe_attnres_depth_context_mode} selected but --moe_use_attnres_depth_router_features is off; "
             'depth block context will not be used by routers in this run.'
         )
-    if args.moe_attnres_depth_context_mode == 'block_shared_typed_proj':
+    if args.moe_attnres_depth_context_mode in typed_block_modes:
         if args.moe_attnres_depth_summary_mode != 'auto':
             print(
                 '[warn] --moe_attnres_depth_summary_mode is ignored for '
-                'block_shared_typed_proj; forcing auto.'
+                f'{args.moe_attnres_depth_context_mode}; forcing auto.'
             )
             args.moe_attnres_depth_summary_mode = 'auto'
         if args.moe_attnres_depth_probe_mlp_for_router:
             print(
                 '[warn] --moe_attnres_depth_probe_mlp_for_router is compact-summary-only; '
-                'disabling it for block_shared_typed_proj.'
+                f'disabling it for {args.moe_attnres_depth_context_mode}.'
             )
             args.moe_attnres_depth_probe_mlp_for_router = False
     if args.moe_router_compact_feature_dim <= 0:

@@ -773,6 +773,14 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         depth_block_layer_counts_pre_mlp = None
         depth_block_peak_weight_pre_attn = None
         depth_block_peak_weight_pre_mlp = None
+        depth_block_peak_weight_spatial_pre_attn = None
+        depth_block_peak_weight_spatial_pre_mlp = None
+        depth_block_peak_weight_spectral_pre_attn = None
+        depth_block_peak_weight_spectral_pre_mlp = None
+        depth_block_weight_dist_spatial = None
+        depth_block_weight_dist_spectral = None
+        depth_block_weight_dist_cosine = None
+        depth_block_weight_dist_js_div = None
         depth_probe_mlp_for_router = False
         depth_proj_spatial_norm = None
         depth_proj_spectral_norm = None
@@ -822,6 +830,43 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                     depth_block_peak_weight_pre_attn = list(router_context.get("attnres_depth_block_peak_weight_pre_attn"))
                 if "attnres_depth_block_peak_weight_pre_mlp" in router_context:
                     depth_block_peak_weight_pre_mlp = list(router_context.get("attnres_depth_block_peak_weight_pre_mlp"))
+                if "attnres_depth_block_peak_weight_spatial_pre_attn" in router_context:
+                    depth_block_peak_weight_spatial_pre_attn = list(router_context.get("attnres_depth_block_peak_weight_spatial_pre_attn"))
+                if "attnres_depth_block_peak_weight_spatial_pre_mlp" in router_context:
+                    depth_block_peak_weight_spatial_pre_mlp = list(router_context.get("attnres_depth_block_peak_weight_spatial_pre_mlp"))
+                if "attnres_depth_block_peak_weight_spectral_pre_attn" in router_context:
+                    depth_block_peak_weight_spectral_pre_attn = list(router_context.get("attnres_depth_block_peak_weight_spectral_pre_attn"))
+                if "attnres_depth_block_peak_weight_spectral_pre_mlp" in router_context:
+                    depth_block_peak_weight_spectral_pre_mlp = list(router_context.get("attnres_depth_block_peak_weight_spectral_pre_mlp"))
+                p_dist_mean = None
+                q_dist_mean = None
+                if torch.is_tensor(router_context.get("attnres_depth_block_weight_dist_spatial")):
+                    p_dist = router_context.get("attnres_depth_block_weight_dist_spatial").detach().float()
+                    if p_dist.dim() == 1:
+                        p_dist = p_dist.unsqueeze(0)
+                    if p_dist.dim() == 2 and p_dist.shape[0] > 0:
+                        p_dist_mean = p_dist.mean(dim=0)
+                        p_dist_mean = p_dist_mean / p_dist_mean.sum().clamp_min(1e-8)
+                        depth_block_weight_dist_spatial = p_dist_mean.cpu().tolist()
+                if torch.is_tensor(router_context.get("attnres_depth_block_weight_dist_spectral")):
+                    q_dist = router_context.get("attnres_depth_block_weight_dist_spectral").detach().float()
+                    if q_dist.dim() == 1:
+                        q_dist = q_dist.unsqueeze(0)
+                    if q_dist.dim() == 2 and q_dist.shape[0] > 0:
+                        q_dist_mean = q_dist.mean(dim=0)
+                        q_dist_mean = q_dist_mean / q_dist_mean.sum().clamp_min(1e-8)
+                        depth_block_weight_dist_spectral = q_dist_mean.cpu().tolist()
+                if p_dist_mean is not None and q_dist_mean is not None:
+                    depth_block_weight_dist_cosine = float(
+                        F.cosine_similarity(p_dist_mean.unsqueeze(0), q_dist_mean.unsqueeze(0), dim=-1).item()
+                    )
+                    pm = p_dist_mean.clamp_min(1e-8)
+                    qm = q_dist_mean.clamp_min(1e-8)
+                    mm = 0.5 * (pm + qm)
+                    depth_block_weight_dist_js_div = float(
+                        0.5 * (pm * (pm.log() - mm.log())).sum().item()
+                        + 0.5 * (qm * (qm.log() - mm.log())).sum().item()
+                    )
                 if "attnres_depth_probe_mlp_for_router" in router_context:
                     depth_probe_mlp_for_router = bool(router_context.get("attnres_depth_probe_mlp_for_router"))
                 if isinstance(router_context.get("attnres_depth_summary_grad_mode"), str):
@@ -1160,6 +1205,14 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "attnres_depth_family_mode": depth_family_mode,
             "attnres_depth_block_peak_weight_pre_attn": depth_block_peak_weight_pre_attn,
             "attnres_depth_block_peak_weight_pre_mlp": depth_block_peak_weight_pre_mlp,
+            "attnres_depth_block_peak_weight_spatial_pre_attn": depth_block_peak_weight_spatial_pre_attn,
+            "attnres_depth_block_peak_weight_spatial_pre_mlp": depth_block_peak_weight_spatial_pre_mlp,
+            "attnres_depth_block_peak_weight_spectral_pre_attn": depth_block_peak_weight_spectral_pre_attn,
+            "attnres_depth_block_peak_weight_spectral_pre_mlp": depth_block_peak_weight_spectral_pre_mlp,
+            "attnres_depth_block_weight_dist_spatial": depth_block_weight_dist_spatial,
+            "attnres_depth_block_weight_dist_spectral": depth_block_weight_dist_spectral,
+            "attnres_depth_block_weight_dist_cosine": depth_block_weight_dist_cosine,
+            "attnres_depth_block_weight_dist_js_div": depth_block_weight_dist_js_div,
             "attnres_depth_shared_context_norm": depth_shared_context_norm,
             "attnres_depth_spatial_context_norm": depth_spatial_context_norm,
             "attnres_depth_spectral_context_norm": depth_spectral_context_norm,
@@ -1409,6 +1462,12 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"cur_epoch={diag.get('attnres_depth_summary_cur_epoch', 0)}  "
             f"unfreeze_epoch={diag.get('attnres_depth_summary_unfreeze_epoch', 1)}  "
             f"unfreeze_reached={diag.get('attnres_depth_summary_unfreeze_reached', False)}"
+        ),
+        (
+            f"    depth_block_dist: spatial={diag.get('attnres_depth_block_weight_dist_spatial', 'NA')}  "
+            f"spectral={diag.get('attnres_depth_block_weight_dist_spectral', 'NA')}  "
+            f"cos={diag.get('attnres_depth_block_weight_dist_cosine', 'NA')}  "
+            f"js={diag.get('attnres_depth_block_weight_dist_js_div', 'NA')}"
         ),
         (
             f"    aux_total={diag.get('aux_total', 0.0):.6f}  lb={diag.get('aux_load_balance', 0.0):.6f}  "

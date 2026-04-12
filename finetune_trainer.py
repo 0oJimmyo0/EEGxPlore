@@ -476,6 +476,14 @@ class Trainer(object):
                 'block_summary_norms': d.get('attnres_depth_block_summary_norms'),
                 'block_peak_weight_pre_attn': d.get('attnres_depth_block_peak_weight_pre_attn'),
                 'block_peak_weight_pre_mlp': d.get('attnres_depth_block_peak_weight_pre_mlp'),
+                'block_peak_weight_spatial_pre_attn': d.get('attnres_depth_block_peak_weight_spatial_pre_attn'),
+                'block_peak_weight_spatial_pre_mlp': d.get('attnres_depth_block_peak_weight_spatial_pre_mlp'),
+                'block_peak_weight_spectral_pre_attn': d.get('attnres_depth_block_peak_weight_spectral_pre_attn'),
+                'block_peak_weight_spectral_pre_mlp': d.get('attnres_depth_block_peak_weight_spectral_pre_mlp'),
+                'block_weight_dist_spatial': d.get('attnres_depth_block_weight_dist_spatial'),
+                'block_weight_dist_spectral': d.get('attnres_depth_block_weight_dist_spectral'),
+                'block_weight_dist_cosine': d.get('attnres_depth_block_weight_dist_cosine'),
+                'block_weight_dist_js_div': d.get('attnres_depth_block_weight_dist_js_div'),
             }
             self._append_json_record(block_path, _to_jsonable(block_payload))
 
