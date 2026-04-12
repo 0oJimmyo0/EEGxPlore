@@ -3,16 +3,30 @@ import argparse
 import collections
 import os
 import pickle
+import re
 
 import lmdb
 
 
 def parse_key(key):
     k = key.decode() if isinstance(key, bytes) else str(key)
+
+    # New format: <subject>_<session>_tXX_gXXXXX
+    m = re.match(r'^([^_]+)_([^_]+)_t(\d+)_g(\d+)$', k)
+    if m:
+        return {
+            'key': k,
+            'subject': m.group(1),
+            'session': m.group(2),
+            'trial_id': int(m.group(3)),
+            'segment_id': int(m.group(4)),
+        }
+
+    # Legacy fallback: <subject>_<session>-<trial>-<segment>
     parts = k.rsplit('-', 2)
     prefix = parts[0] if len(parts) == 3 else k
-    trial_id = parts[1] if len(parts) == 3 else ''
-    segment_id = parts[2] if len(parts) == 3 else ''
+    trial_id = int(parts[1]) if len(parts) == 3 and str(parts[1]).isdigit() else -1
+    segment_id = int(parts[2]) if len(parts) == 3 and str(parts[2]).isdigit() else -1
 
     fparts = prefix.split('_')
     subject = fparts[0] if len(fparts) >= 1 else ''
@@ -63,7 +77,7 @@ def main():
                 subjects.add(p['subject'])
             if p['session']:
                 sessions[p['session']] += 1
-            if p['trial_id']:
+            if p['trial_id'] != -1:
                 trials[p['trial_id']] += 1
 
         split_subjects[split] = subjects

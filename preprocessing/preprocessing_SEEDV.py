@@ -13,11 +13,13 @@ import pandas as pd
 USELESS_CH = ['M1', 'M2', 'VEO', 'HEO']
 N_TRIALS = 15
 TARGET_FS = 200
-LOW_FREQ = 1.0
+LOW_FREQ = 0.3
 HIGH_FREQ = 75.0
 PATCH_LEN = 200
-N_PATCH = 4
-SEGMENT_LEN = PATCH_LEN * N_PATCH
+CBRAMOD_N_PATCH = 1
+LEGACY_N_PATCH = 4
+PROTOCOL_CBRAMOD = 'cbramod_benchmark'
+PROTOCOL_LEGACY = 'legacy_subject_disjoint_4x200'
 
 
 def _extract_numbers(line: str):
@@ -39,58 +41,70 @@ def parse_trial_timestamps(timestamp_txt: str):
     if not os.path.isfile(timestamp_txt):
         raise FileNotFoundError(f'trial timestamp file not found: {timestamp_txt}')
 
-    starts = {}
-    ends = {}
-    paired = {}
-    all_nums = []
+    sessions = {
+        '1': {'start': None, 'end': None},
+        '2': {'start': None, 'end': None},
+        '3': {'start': None, 'end': None},
+    }
+    current_sid = ''
 
     with open(timestamp_txt, 'r', encoding='utf-8') as f:
         lines = [ln.strip() for ln in f if ln.strip()]
 
     for ln in lines:
-        nums = _extract_numbers(ln)
-        if not nums:
-            continue
-        all_nums.extend(nums)
-        sid = _extract_session_id(ln)
         low = ln.lower()
-
-        if sid and len(nums) >= 30:
-            paired[sid] = nums[:30]
-            continue
-        if sid and 'start' in low and len(nums) >= N_TRIALS:
-            starts[sid] = nums[:N_TRIALS]
-            continue
-        if sid and 'end' in low and len(nums) >= N_TRIALS:
-            ends[sid] = nums[:N_TRIALS]
+        if low.startswith('session'):
+            sid = _extract_session_id(ln)
+            current_sid = sid if sid in sessions else ''
             continue
 
-    sessions = {}
-    for sid in ['1', '2', '3']:
-        if sid in paired:
-            vals = paired[sid]
-            sessions[sid] = {
-                'start': [int(round(v)) for v in vals[:N_TRIALS]],
-                'end': [int(round(v)) for v in vals[N_TRIALS:2 * N_TRIALS]],
+        if current_sid not in sessions:
+            continue
+
+        # Parse only values inside [...] to avoid picking up session ids from prose.
+        m = re.search(r'\[(.*?)\]', ln)
+        if not m:
+            continue
+        nums = [int(round(float(v))) for v in re.findall(r'-?\d+(?:\.\d+)?', m.group(1))]
+        if len(nums) < N_TRIALS:
+            continue
+
+        if 'start' in low:
+            sessions[current_sid]['start'] = nums[:N_TRIALS]
+        elif 'end' in low:
+            sessions[current_sid]['end'] = nums[:N_TRIALS]
+
+    # Lightweight fallback: parse flat bracketed arrays if session headers are absent.
+    if not all(sessions[s]['start'] and sessions[s]['end'] for s in sessions):
+        bracket_arrays = []
+        for ln in lines:
+            m = re.search(r'\[(.*?)\]', ln)
+            if not m:
+                continue
+            nums = [int(round(float(v))) for v in re.findall(r'-?\d+(?:\.\d+)?', m.group(1))]
+            if len(nums) >= N_TRIALS:
+                bracket_arrays.append(nums[:N_TRIALS])
+        if len(bracket_arrays) >= 6:
+            sessions = {
+                '1': {'start': bracket_arrays[0], 'end': bracket_arrays[1]},
+                '2': {'start': bracket_arrays[2], 'end': bracket_arrays[3]},
+                '3': {'start': bracket_arrays[4], 'end': bracket_arrays[5]},
             }
-        elif sid in starts and sid in ends:
-            sessions[sid] = {
-                'start': [int(round(v)) for v in starts[sid]],
-                'end': [int(round(v)) for v in ends[sid]],
-            }
 
-    if len(sessions) < 3 and len(all_nums) >= 3 * 2 * N_TRIALS:
-        flat = [int(round(v)) for v in all_nums[:3 * 2 * N_TRIALS]]
-        for i, sid in enumerate(['1', '2', '3']):
-            chunk = flat[i * 30:(i + 1) * 30]
-            sessions[sid] = {'start': chunk[:N_TRIALS], 'end': chunk[N_TRIALS:2 * N_TRIALS]}
-
-    if set(sessions.keys()) != {'1', '2', '3'}:
+    if not all(sessions[s]['start'] and sessions[s]['end'] for s in sessions):
         raise ValueError(
-            f'Failed to parse all session timestamps from {timestamp_txt}. Parsed sessions={sorted(sessions.keys())}'
+            f'Failed to parse all session timestamps from {timestamp_txt}. Parsed={sessions}'
         )
 
-    return sessions
+    # Sanity checks: each trial window should be positive.
+    for sid in ['1', '2', '3']:
+        for i, (st, ed) in enumerate(zip(sessions[sid]['start'], sessions[sid]['end'])):
+            if ed <= st:
+                raise ValueError(
+                    f'Invalid timestamp window session={sid} trial={i}: start={st}, end={ed} from {timestamp_txt}'
+                )
+
+    return {sid: {'start': sessions[sid]['start'], 'end': sessions[sid]['end']} for sid in ['1', '2', '3']}
 
 
 def parse_labels_xlsx(label_xlsx: str):
@@ -228,29 +242,69 @@ def parse_subject_session(file_name: str):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Preprocess SEED-V raw EEG (.cnt) into LMDB windows (62, 4, 200).')
+    ap = argparse.ArgumentParser(
+        description='Preprocess SEED-V raw EEG (.cnt) into LMDB windows with CBraMod-style benchmark defaults.'
+    )
     ap.add_argument('--raw_root', type=str, default='/data/datasets/BigDownstream/SEED-V/files')
     ap.add_argument('--timestamp_txt', type=str, default='')
     ap.add_argument('--label_xlsx', type=str, default='')
     ap.add_argument(
+        '--protocol',
+        type=str,
+        default=PROTOCOL_CBRAMOD,
+        choices=[PROTOCOL_CBRAMOD, PROTOCOL_LEGACY],
+        help='SEED-V preprocessing protocol. cbramod_benchmark is the default benchmark path; legacy keeps 4x200 windows.',
+    )
+    ap.add_argument(
         '--output_lmdb',
         type=str,
-        default='/data/datasets/BigDownstream/SEED-V/processed_raw_eeg_200hz_1to75_4x200_lmdb',
+        default='/data/datasets/BigDownstream/SEED-V/processed_lmdb',
     )
     ap.add_argument('--map_size', type=int, default=64 * 1024 * 1024 * 1024)
     args = ap.parse_args()
+
+    n_patch = CBRAMOD_N_PATCH if args.protocol == PROTOCOL_CBRAMOD else LEGACY_N_PATCH
+    segment_len = PATCH_LEN * n_patch
 
     timestamp_txt = args.timestamp_txt or os.path.join(args.raw_root, 'trial_start_end_timestamp.txt')
     label_xlsx = args.label_xlsx or os.path.join(args.raw_root, 'emotion_label_and_stimuli_order.xlsx')
 
     print('[SEED-V preprocess] raw EEG pipeline (.cnt)')
     print(f'[SEED-V preprocess] raw_root={args.raw_root}')
+    print(f'[SEED-V preprocess] protocol={args.protocol}')
     print(f'[SEED-V preprocess] timestamp_txt={timestamp_txt}')
     print(f'[SEED-V preprocess] label_xlsx={label_xlsx}')
-    print(f'[SEED-V preprocess] target_fs={TARGET_FS}Hz band={LOW_FREQ}-{HIGH_FREQ}Hz patch_shape=(62,{N_PATCH},{PATCH_LEN})')
+    print(
+        f'[SEED-V preprocess] target_fs={TARGET_FS}Hz band={LOW_FREQ}-{HIGH_FREQ}Hz '
+        f'patch_shape=(62,{n_patch},{PATCH_LEN})'
+    )
 
     trials = parse_trial_timestamps(timestamp_txt)
     labels = parse_labels_xlsx(label_xlsx)
+
+    label_time_audit_json = args.output_lmdb.rstrip('/\\') + '_label_time_audit.json'
+    label_time_audit = {
+        'timestamp_txt': timestamp_txt,
+        'label_xlsx': label_xlsx,
+        'session_trial_start_end_seconds': {
+            sid: [
+                {
+                    'trial': tid,
+                    'start_second': int(trials[sid]['start'][tid]),
+                    'end_second': int(trials[sid]['end'][tid]),
+                }
+                for tid in range(N_TRIALS)
+            ]
+            for sid in ['1', '2', '3']
+        },
+        'session_trial_labels': {
+            sid: [{'trial': tid, 'label': int(labels[sid][tid])} for tid in range(N_TRIALS)]
+            for sid in ['1', '2', '3']
+        },
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(label_time_audit_json)), exist_ok=True)
+    with open(label_time_audit_json, 'w', encoding='utf-8') as af:
+        json.dump(label_time_audit, af, indent=2, ensure_ascii=True)
 
     files = sorted([f for f in os.listdir(args.raw_root) if f.lower().endswith('.cnt')])
     if not files:
@@ -262,6 +316,8 @@ def main():
     meta_jsonl = args.output_lmdb.rstrip('/\\') + '_sample_meta.jsonl'
     key_index = {'train': [], 'val': [], 'test': []}
     label_counter = Counter()
+    split_counts = Counter()
+    split_label_counter = {'train': Counter(), 'val': Counter(), 'test': Counter()}
     seen_subjects = set()
     seen_sessions = set()
     seen_trials = set()
@@ -298,11 +354,11 @@ def main():
                     continue
 
                 trial_data = data_matrix[:, start_i:end_i]
-                usable = (trial_data.shape[1] // SEGMENT_LEN) * SEGMENT_LEN
-                if usable < SEGMENT_LEN:
+                usable = (trial_data.shape[1] // segment_len) * segment_len
+                if usable < segment_len:
                     continue
 
-                segments = trial_data[:, :usable].reshape(62, -1, N_PATCH, PATCH_LEN).transpose(1, 0, 2, 3)
+                segments = trial_data[:, :usable].reshape(62, -1, n_patch, PATCH_LEN).transpose(1, 0, 2, 3)
                 split = 'train' if trial_idx < 5 else ('val' if trial_idx < 10 else 'test')
                 label = int(labels[session_id][trial_idx])
 
@@ -311,7 +367,10 @@ def main():
                 seen_trials.add(f'{subject_id}_{session_id}_{trial_idx}')
 
                 for seg_idx, sample in enumerate(segments):
-                    sample_key = f'{subject_id}_{session_id}_t{trial_idx:02d}_g{seg_idx:05d}'
+                    if args.protocol == PROTOCOL_CBRAMOD:
+                        sample_key = f'{file_name}-{trial_idx}-{seg_idx}'
+                    else:
+                        sample_key = f'{subject_id}_{session_id}_t{trial_idx:02d}_g{seg_idx:05d}'
                     rec = {
                         'sample': sample.astype(np.float32),
                         'label': label,
@@ -335,6 +394,8 @@ def main():
                     mf.write(json.dumps(meta, ensure_ascii=True) + '\n')
 
                     label_counter[label] += 1
+                    split_counts[split] += 1
+                    split_label_counter[split][label] += 1
                     n_segments += 1
                     write_count += 1
 
@@ -347,15 +408,54 @@ def main():
 
     db.close()
 
+    audit_json = args.output_lmdb.rstrip('/\\') + '_audit_summary.json'
+    audit = {
+        'protocol': args.protocol,
+        'raw_root': args.raw_root,
+        'timestamp_txt': timestamp_txt,
+        'label_xlsx': label_xlsx,
+        'sample_shape': [62, n_patch, PATCH_LEN],
+        'target_fs': TARGET_FS,
+        'bandpass_hz': [LOW_FREQ, HIGH_FREQ],
+        'total_samples': int(n_segments),
+        'split_counts': {k: int(split_counts[k]) for k in ['train', 'val', 'test']},
+        'split_class_counts': {
+            k: {int(kk): int(vv) for kk, vv in sorted(split_label_counter[k].items())}
+            for k in ['train', 'val', 'test']
+        },
+        'subjects': int(len(seen_subjects)),
+        'sessions': int(len(seen_sessions)),
+        'trials': int(len(seen_trials)),
+        'expected_total_samples_cbramod': 117744,
+    }
+    with open(audit_json, 'w', encoding='utf-8') as f:
+        json.dump(audit, f, indent=2, ensure_ascii=True)
+
     print('[SEED-V preprocess] done')
     print(f'[SEED-V preprocess] output_lmdb={args.output_lmdb}')
     print(f'[SEED-V preprocess] metadata_jsonl={meta_jsonl}')
+    print(f'[SEED-V preprocess] label_time_audit_json={label_time_audit_json}')
+    print(f'[SEED-V preprocess] audit_json={audit_json}')
     print(f'[SEED-V preprocess][audit] subjects={len(seen_subjects)}')
     print(f'[SEED-V preprocess][audit] sessions={len(seen_sessions)}')
     print(f'[SEED-V preprocess][audit] trials={len(seen_trials)}')
     print(f'[SEED-V preprocess][audit] segments={n_segments}')
-    print(f'[SEED-V preprocess][audit] sample_shape=(62, {N_PATCH}, {PATCH_LEN})')
+    print(f'[SEED-V preprocess][audit] split_counts={dict(split_counts)}')
+    print(
+        '[SEED-V preprocess][audit] split_class_counts='
+        + str({k: dict(sorted(v.items())) for k, v in split_label_counter.items()})
+    )
+    print(f'[SEED-V preprocess][audit] sample_shape=(62, {n_patch}, {PATCH_LEN})')
     print(f'[SEED-V preprocess][audit] label_distribution={dict(sorted(label_counter.items()))}')
+
+    if args.protocol == PROTOCOL_CBRAMOD:
+        expected = 117744
+        if abs(n_segments - expected) > max(100, int(0.01 * expected)):
+            print(
+                '[SEED-V preprocess][warning] total sample count differs from CBraMod expectation: '
+                f'expected={expected}, got={n_segments}. This usually indicates differences in '
+                'available raw files, timestamp windows, or channel/drop filtering outcomes.'
+            )
 
 
 if __name__ == '__main__':

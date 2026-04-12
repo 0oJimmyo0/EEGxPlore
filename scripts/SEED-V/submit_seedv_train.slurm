@@ -27,9 +27,23 @@ if [[ "$DATASET" != "SEED-V" ]]; then
   exit 2
 fi
 
-DATASET_DIR="${DATASET_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/processed_raw_eeg_200hz_1to75_4x200_lmdb_v2}"
+SEEDV_PROTOCOL="${SEEDV_PROTOCOL:-cbramod_benchmark}"  # cbramod_benchmark | legacy_subject_disjoint_4x200
+case "$SEEDV_PROTOCOL" in
+  cbramod_benchmark)
+    DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb}"
+    SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-}"
+    ;;
+  legacy_subject_disjoint_4x200)
+    DATASET_DIR="${DATASET_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/processed_raw_eeg_200hz_1to75_4x200_lmdb_v2}"
+    SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/subject_disjoint_manifest_balanced_v2.json}"
+    ;;
+  *)
+    echo "[seedv-slurm] invalid SEEDV_PROTOCOL=$SEEDV_PROTOCOL (expected: cbramod_benchmark|legacy_subject_disjoint_4x200)" >&2
+    exit 2
+    ;;
+esac
+
 NUM_CLASSES="${NUM_CLASSES:-5}"
-SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/subject_disjoint_manifest_balanced_v2.json}"
 
 MODEL_DIR="${MODEL_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/SEEDV_manual_${SLURM_JOB_ID:-manual}}"
 RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
@@ -37,17 +51,17 @@ RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
 
 CUDA_ID="${CUDA_ID:-0}"
-EPOCHS="${EPOCHS:-30}"
-BATCH_SIZE="${BATCH_SIZE:-32}"
+EPOCHS="${EPOCHS:-25}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
-LR="${LR:-2e-4}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-2e-2}"
+LR="${LR:-1e-4}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-5e-2}"
 OPTIMIZER="${OPTIMIZER:-AdamW}"
 CLIP_VALUE="${CLIP_VALUE:-1.0}"
-DROPOUT="${DROPOUT:-0.3}"
+DROPOUT="${DROPOUT:-0.1}"
 CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
-LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
+LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.1}"
 
 RUN_MODE="${RUN_MODE:-selective}"  # dense | selective | custom
 
@@ -119,9 +133,9 @@ case "$RUN_MODE" in
     ;;
 esac
 
-if [[ ! -f "$SEEDV_SPLIT_MANIFEST" ]]; then
+if [[ -n "$SEEDV_SPLIT_MANIFEST" && ! -f "$SEEDV_SPLIT_MANIFEST" ]]; then
   echo "[seedv-slurm] subject-disjoint manifest not found: $SEEDV_SPLIT_MANIFEST" >&2
-  echo "[seedv-slurm] build it with: python preprocessing/build_seedv_subject_manifest.py --lmdb_path $DATASET_DIR --output_json $DATASET_DIR/subject_disjoint_manifest.json --seed 42" >&2
+  echo "[seedv-slurm] build it with: python preprocessing/build_seedv_subject_manifest.py --lmdb_path $DATASET_DIR --output_json $DATASET_DIR/subject_disjoint_manifest.json --seed 42 (or scripts/SEED-V/build_seedv_subject_disjoint_manifest.py)" >&2
   exit 2
 fi
 
@@ -201,6 +215,7 @@ fi
 mkdir -p "$MODEL_DIR"
 
 echo "[seedv-slurm] dataset=$DATASET dataset_dir=$DATASET_DIR num_classes=$NUM_CLASSES" >&2
+echo "[seedv-slurm] seedv_protocol=$SEEDV_PROTOCOL" >&2
 echo "[seedv-slurm] run_mode=$RUN_MODE" >&2
 echo "[seedv-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
 echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers=$MOE_NUM_LAYERS" >&2
