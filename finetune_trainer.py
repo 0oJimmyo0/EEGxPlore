@@ -62,9 +62,35 @@ def _estimate_state_dict_cpu_bytes(sd: Dict[str, Any]) -> int:
     return n
 
 
+def _is_uninitialized_tensor(v: torch.Tensor) -> bool:
+    is_lazy = getattr(torch.nn.parameter, 'is_lazy', None)
+    if callable(is_lazy):
+        try:
+            if bool(is_lazy(v)):
+                return True
+        except Exception:
+            pass
+    for cls_name in ('UninitializedParameter', 'UninitializedBuffer'):
+        cls = getattr(torch.nn.parameter, cls_name, None)
+        if cls is not None and isinstance(v, cls):
+            return True
+    return False
+
+
 def _state_dict_to_cpu(model: torch.nn.Module) -> Dict[str, Any]:
     """Checkpoint snapshot without deepcopy: avoids duplicating GPU weights (OOM on large models)."""
-    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    out: Dict[str, Any] = {}
+    for k, v in model.state_dict().items():
+        if not isinstance(v, torch.Tensor):
+            out[k] = v
+            continue
+        if _is_uninitialized_tensor(v):
+            raise RuntimeError(
+                f"Cannot snapshot state_dict: tensor {k!r} is uninitialized. "
+                "Run at least one forward pass to materialize lazy modules first."
+            )
+        out[k] = v.detach().cpu().clone()
+    return out
 
 
 def _move_meta_to_cuda(batch_meta):
@@ -106,18 +132,34 @@ def _to_jsonable(obj):
 
 
 class EMAHelper:
+    @staticmethod
+    def _is_uninitialized_parameter(p: torch.nn.Parameter) -> bool:
+        if _is_uninitialized_tensor(p):
+            return True
+        try:
+            _ = p.detach()
+        except ValueError as e:
+            if 'uninitialized parameter' in str(e).lower():
+                return True
+            raise
+        return False
+
+    @classmethod
+    def _is_trackable(cls, p: torch.nn.Parameter) -> bool:
+        return bool(p.requires_grad and not cls._is_uninitialized_parameter(p))
+
     def __init__(self, model: torch.nn.Module, decay: float = 0.999):
         self.decay = float(decay)
         self.shadow: Dict[str, torch.Tensor] = {}
         self.backup: Dict[str, torch.Tensor] = {}
         for name, p in model.named_parameters():
-            if p.requires_grad:
+            if self._is_trackable(p):
                 self.shadow[name] = p.detach().clone()
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
         for name, p in model.named_parameters():
-            if not p.requires_grad:
+            if not self._is_trackable(p):
                 continue
             if name not in self.shadow:
                 self.shadow[name] = p.detach().clone()
@@ -128,10 +170,11 @@ class EMAHelper:
     def apply_shadow(self, model: torch.nn.Module) -> None:
         self.backup = {}
         for name, p in model.named_parameters():
-            if not p.requires_grad:
+            if not self._is_trackable(p):
                 continue
             if name not in self.shadow:
-                continue
+                # Lazy parameters may become initialized later; seed EMA from current value.
+                self.shadow[name] = p.detach().clone()
             self.backup[name] = p.detach().clone()
             p.copy_(self.shadow[name])
 
@@ -235,11 +278,11 @@ class Trainer(object):
         self._ema_eval_only = bool(getattr(self.params, 'ema_eval_only', True))
         self._ema_warmup_steps = int(getattr(self.params, 'ema_warmup_steps', 300))
         self._ema_decay = float(getattr(self.params, 'ema_decay', 0.999))
-        if bool(getattr(self.params, 'use_ema', False)):
-            self._ema_helper = EMAHelper(self.model, decay=self._ema_decay)
+        self._ema_requested = bool(getattr(self.params, 'use_ema', False))
+        if self._ema_requested:
             print(
                 f"[EMA] enabled decay={self._ema_decay:.6f} warmup_steps={self._ema_warmup_steps} "
-                f"eval_only={self._ema_eval_only}",
+                f"eval_only={self._ema_eval_only} (lazy-init after warmup)",
                 flush=True,
             )
 
@@ -249,14 +292,41 @@ class Trainer(object):
     def _ema_is_ready(self) -> bool:
         return self._ema_enabled() and self._ema_updates > 0
 
+    def _warn_if_ema_never_updated(self) -> None:
+        if self._ema_requested and self._ema_updates == 0:
+            print(
+                "[EMA] warning: enabled but no EMA updates were applied "
+                f"(global_step={self._global_step}, warmup_steps={self._ema_warmup_steps}).",
+                flush=True,
+            )
+
+    def _maybe_init_ema_helper(self) -> None:
+        if not self._ema_requested or self._ema_helper is not None:
+            return
+        self._ema_helper = EMAHelper(self.model, decay=self._ema_decay)
+        print(
+            f"[EMA] initialized trackable_params={len(self._ema_helper.shadow)} at global_step={self._global_step}",
+            flush=True,
+        )
+        if len(self._ema_helper.shadow) == 0:
+            print(
+                "[EMA] warning: no trackable parameters found at initialization; "
+                "EMA evaluation will remain unavailable.",
+                flush=True,
+            )
+
     def _ema_update_after_step(self) -> None:
         self._global_step += 1
-        if not self._ema_enabled():
+        if not self._ema_requested:
             return
         if self._global_step < self._ema_warmup_steps:
             return
+        self._maybe_init_ema_helper()
+        if not self._ema_enabled():
+            return
         self._ema_helper.update(self.model)
-        self._ema_updates += 1
+        if len(self._ema_helper.shadow) > 0:
+            self._ema_updates += 1
 
     def _snapshot_ema_state_dict_cpu(self) -> Optional[Dict[str, Any]]:
         if not self._ema_enabled():
@@ -1050,6 +1120,8 @@ class Trainer(object):
                 else:
                     self.best_model_states = raw_best_model_states
 
+            self._warn_if_ema_never_updated()
+
             _mem_report("train_multiclass_done_pre_test", md)
 
             with torch.no_grad():
@@ -1373,6 +1445,7 @@ class Trainer(object):
             if self.best_model_states is None:
                 print('Warning: val roc_auc never improved; using last epoch weights.')
                 self.best_model_states = _state_dict_to_cpu(self.model)
+            self._warn_if_ema_never_updated()
             _mem_report("train_binary_done_pre_test", md)
 
             self.model.load_state_dict(self.best_model_states)
@@ -1524,6 +1597,7 @@ class Trainer(object):
             if self.best_model_states is None:
                 print('Warning: val r2 never improved; using last epoch weights.')
                 self.best_model_states = _state_dict_to_cpu(self.model)
+            self._warn_if_ema_never_updated()
             _mem_report("train_regression_done_pre_test", md)
 
             self.model.load_state_dict(self.best_model_states)
