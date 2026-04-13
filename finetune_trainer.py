@@ -176,7 +176,9 @@ class Trainer(object):
 
         # Original CBraMod finetune: cosine over full run, per optimizer step
         self.optimizer_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=self.params.epochs * self.data_length, eta_min=1e-6
+            self.optimizer,
+            T_max=self.params.epochs * self.data_length,
+            eta_min=float(getattr(self.params, 'min_lr', 5e-6)),
         )
 
         if getattr(self.params, 'use_component_lr', False):
@@ -207,6 +209,8 @@ class Trainer(object):
             'subject_summary_proj',
             'eeg_summary_proj',
             'depth_summary_proj',
+            'attnres_depth_router_proj_',
+            'attnres_depth_router_gate_',
         )
         expert_keys = (
             'shared.',
@@ -323,6 +327,8 @@ class Trainer(object):
                 or ('depth_summary_proj' in name)
                 or ('attnres_depth_router_proj_spatial' in name)
                 or ('attnres_depth_router_proj_spectral' in name)
+                or ('attnres_depth_router_gate_spatial' in name)
+                or ('attnres_depth_router_gate_spectral' in name)
             ):
                 accum['depth_summary_path'] += g2
             if 'attnres_depth_router_proj_spatial' in name:
@@ -611,6 +617,8 @@ class Trainer(object):
               'moe_attnres_depth_block_count': getattr(self.params, 'moe_attnres_depth_block_count', ''),
             'moe_attnres_depth_summary_mode': getattr(self.params, 'moe_attnres_depth_summary_mode', ''),
             'moe_attnres_depth_probe_mlp_for_router': bool(getattr(self.params, 'moe_attnres_depth_probe_mlp_for_router', False)),
+            'moe_attnres_depth_router_norm_gate': bool(getattr(self.params, 'moe_attnres_depth_router_norm_gate', True)),
+            'moe_attnres_depth_router_gate_init': getattr(self.params, 'moe_attnres_depth_router_gate_init', ''),
             'moe_attnres_depth_summary_grad_mode': getattr(self.params, 'moe_attnres_depth_summary_grad_mode', ''),
             'moe_attnres_depth_summary_unfreeze_epoch': getattr(self.params, 'moe_attnres_depth_summary_unfreeze_epoch', ''),
             'moe_router_dispatch_mode': getattr(self.params, 'moe_router_dispatch_mode', ''),

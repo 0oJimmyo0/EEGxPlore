@@ -3,7 +3,7 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -51,12 +51,13 @@ RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
 
 CUDA_ID="${CUDA_ID:-0}"
-EPOCHS="${EPOCHS:-30}"
+EPOCHS="${EPOCHS:-40}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
 LR="${LR:-2e-5}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-2e-2}"
+MIN_LR="${MIN_LR:-5e-6}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-3e-2}"
 OPTIMIZER="${OPTIMIZER:-AdamW}"
 CLIP_VALUE="${CLIP_VALUE:-1.0}"
 DROPOUT="${DROPOUT:-0.1}"
@@ -79,10 +80,10 @@ ROUTER_ARCH="${ROUTER_ARCH:-mlp}"
 ROUTER_MLP_HIDDEN="${ROUTER_MLP_HIDDEN:-128}"
 ROUTER_DISPATCH_MODE="${ROUTER_DISPATCH_MODE:-soft}"
 ROUTER_TEMPERATURE="${ROUTER_TEMPERATURE:-1.5}"
-ROUTER_ENTROPY_COEF="${ROUTER_ENTROPY_COEF:-0.005}"
-ROUTER_BALANCE_KL_COEF="${ROUTER_BALANCE_KL_COEF:-0.01}"
+ROUTER_ENTROPY_COEF="${ROUTER_ENTROPY_COEF:-0.001}"
+ROUTER_BALANCE_KL_COEF="${ROUTER_BALANCE_KL_COEF:-0.002}"
 ROUTER_Z_LOSS_COEF="${ROUTER_Z_LOSS_COEF:-0.001}"
-ROUTER_JITTER_STD="${ROUTER_JITTER_STD:-0.02}"
+ROUTER_JITTER_STD="${ROUTER_JITTER_STD:-0.005}"
 ROUTER_JITTER_FINAL_STD="${ROUTER_JITTER_FINAL_STD:-0.005}"
 ROUTER_JITTER_ANNEAL_EPOCHS="${ROUTER_JITTER_ANNEAL_EPOCHS:-30}"
 ROUTER_SOFT_WARMUP_EPOCHS="${ROUTER_SOFT_WARMUP_EPOCHS:-15}"
@@ -95,6 +96,7 @@ DEPTH_BLOCK_COUNT="${DEPTH_BLOCK_COUNT:-8}"
 DEPTH_SUMMARY_MODE="${DEPTH_SUMMARY_MODE:-attn_delta4}"
 DEPTH_PROBE_MLP_FOR_ROUTER="${DEPTH_PROBE_MLP_FOR_ROUTER:-on}"
 DEPTH_ROUTER_INIT="${DEPTH_ROUTER_INIT:-xavier}"
+DEPTH_ROUTER_GATE_INIT="${DEPTH_ROUTER_GATE_INIT:-0.075}"
 DEPTH_SUMMARY_GRAD_MODE="${DEPTH_SUMMARY_GRAD_MODE:-delayed_unfreeze}"
 DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-2}"
 
@@ -120,10 +122,10 @@ MOE_ROUTER_COMPACT_FEATURE_MODE="${MOE_ROUTER_COMPACT_FEATURE_MODE:-none}"
 MOE_ROUTER_COMPACT_FEATURE_DIM="${MOE_ROUTER_COMPACT_FEATURE_DIM:-8}"
 MOE_EXPERT_INIT_NOISE_STD="${MOE_EXPERT_INIT_NOISE_STD:-0.0}"
 
-USE_COMPONENT_LR="${USE_COMPONENT_LR:-0}"
-LR_BACKBONE_MULT="${LR_BACKBONE_MULT:-1.0}"
-LR_ROUTER_MULT="${LR_ROUTER_MULT:-1.0}"
-LR_EXPERT_MULT="${LR_EXPERT_MULT:-1.0}"
+USE_COMPONENT_LR="${USE_COMPONENT_LR:-1}"
+LR_BACKBONE_MULT="${LR_BACKBONE_MULT:-0.5}"
+LR_ROUTER_MULT="${LR_ROUTER_MULT:-2.0}"
+LR_EXPERT_MULT="${LR_EXPERT_MULT:-1.5}"
 LR_CLASSIFIER_MULT="${LR_CLASSIFIER_MULT:-1.0}"
 LR_OTHER_MULT="${LR_OTHER_MULT:-1.0}"
 
@@ -195,6 +197,7 @@ if [[ "$DEPTH_ROUTER" == "on" ]]; then
     DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode "$DEPTH_SUMMARY_MODE")
   fi
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_init "$DEPTH_ROUTER_INIT")
+    DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_gate_init "$DEPTH_ROUTER_GATE_INIT")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_grad_mode "$DEPTH_SUMMARY_GRAD_MODE")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_unfreeze_epoch "$DEPTH_SUMMARY_UNFREEZE_EPOCH")
   if [[ "$DEPTH_CONTEXT_MODE" != "block_shared_typed_proj" && "$DEPTH_CONTEXT_MODE" != "dual_query_block_typed_proj" && "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
@@ -208,13 +211,15 @@ if [[ -n "$SEEDV_SPLIT_MANIFEST" ]]; then
 fi
 
 COMPONENT_LR_ARGS=()
+COMPONENT_LR_ARGS+=(--lr_backbone_mult "$LR_BACKBONE_MULT")
+COMPONENT_LR_ARGS+=(--lr_router_mult "$LR_ROUTER_MULT")
+COMPONENT_LR_ARGS+=(--lr_expert_mult "$LR_EXPERT_MULT")
+COMPONENT_LR_ARGS+=(--lr_classifier_mult "$LR_CLASSIFIER_MULT")
+COMPONENT_LR_ARGS+=(--lr_other_mult "$LR_OTHER_MULT")
 if [[ "$USE_COMPONENT_LR" == "1" ]]; then
   COMPONENT_LR_ARGS+=(--use_component_lr)
-  COMPONENT_LR_ARGS+=(--lr_backbone_mult "$LR_BACKBONE_MULT")
-  COMPONENT_LR_ARGS+=(--lr_router_mult "$LR_ROUTER_MULT")
-  COMPONENT_LR_ARGS+=(--lr_expert_mult "$LR_EXPERT_MULT")
-  COMPONENT_LR_ARGS+=(--lr_classifier_mult "$LR_CLASSIFIER_MULT")
-  COMPONENT_LR_ARGS+=(--lr_other_mult "$LR_OTHER_MULT")
+else
+  COMPONENT_LR_ARGS+=(--no-use_component_lr)
 fi
 
 MOE_ARGS=()
@@ -250,7 +255,6 @@ if [[ "$USE_MOE" == "1" ]]; then
     MOE_ARGS+=(--moe_router_mlp_hidden "$ROUTER_MLP_HIDDEN")
   fi
   MOE_ARGS+=("${DEPTH_ROUTER_ARGS[@]}")
-  MOE_ARGS+=("${COMPONENT_LR_ARGS[@]}")
 fi
 
 EXTRA_ARGS=()
@@ -274,10 +278,12 @@ echo "[seedv-slurm] run_mode=$RUN_MODE" >&2
 echo "[seedv-slurm] a1_strict_block_ablation=$A1_STRICT_BLOCK_ABLATION" >&2
 echo "[seedv-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
 echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers=$MOE_NUM_LAYERS" >&2
+echo "[seedv-slurm] lr=$LR min_lr=$MIN_LR" >&2
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2
-echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_LABEL depth_proj_init=$DEPTH_ROUTER_INIT" >&2
+echo "[seedv-slurm] router_soft_warmup_epochs=$ROUTER_SOFT_WARMUP_EPOCHS (soft-dispatch runs use warmup blending in MoE router)" >&2
+echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_LABEL depth_proj_init=$DEPTH_ROUTER_INIT depth_gate_init=$DEPTH_ROUTER_GATE_INIT" >&2
 echo "[seedv-slurm] depth_grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
-echo "[seedv-slurm] split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>} component_lr=$USE_COMPONENT_LR" >&2
+echo "[seedv-slurm] split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>} component_lr=$USE_COMPONENT_LR lr_mults=(bb:$LR_BACKBONE_MULT,router:$LR_ROUTER_MULT,expert:$LR_EXPERT_MULT,clf:$LR_CLASSIFIER_MULT,other:$LR_OTHER_MULT)" >&2
 
 time python "$REPO_DIR/finetune_main.py" \
   --seed 42 \
@@ -285,6 +291,7 @@ time python "$REPO_DIR/finetune_main.py" \
   --epochs "$EPOCHS" \
   --batch_size "$BATCH_SIZE" \
   --lr "$LR" \
+  --min_lr "$MIN_LR" \
   --weight_decay "$WEIGHT_DECAY" \
   --optimizer "$OPTIMIZER" \
   --clip_value "$CLIP_VALUE" \
@@ -303,5 +310,6 @@ time python "$REPO_DIR/finetune_main.py" \
   --routing_run_name "$RUN_NAME" \
   --no-tqdm \
   "${SPLIT_ARGS[@]}" \
+  "${COMPONENT_LR_ARGS[@]}" \
   "${MOE_ARGS[@]}" \
   "${EXTRA_ARGS[@]}"

@@ -16,6 +16,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--min_lr', type=float, default=5e-6)
     parser.add_argument('--weight_decay', type=float, default=5e-2)
     parser.add_argument('--optimizer', type=str, default='AdamW', choices=['AdamW', 'SGD'])
     parser.add_argument('--clip_value', type=float, default=1.0)
@@ -104,6 +105,24 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         help='Initialization for depth-summary router projections (spatial/spectral).',
     )
     parser.add_argument(
+        '--moe_attnres_depth_router_norm_gate',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Apply RMSNorm + small learned gates to dual-query depth summaries before router projection.',
+    )
+    parser.add_argument(
+        '--moe_attnres_depth_router_gate_init',
+        type=float,
+        default=0.075,
+        help='Initial gate value for dual-query depth summary stabilization (recommended 0.05-0.1).',
+    )
+    parser.add_argument(
+        '--moe_attnres_depth_router_norm_eps',
+        type=float,
+        default=1e-6,
+        help='Epsilon for RMS normalization applied before depth summary router projection.',
+    )
+    parser.add_argument(
         '--moe_attnres_depth_summary_grad_mode',
         type=str,
         default='delayed_unfreeze',
@@ -136,9 +155,9 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--moe_expert_init_noise_std', type=float, default=0.0)
 
     parser.add_argument('--use_component_lr', action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument('--lr_backbone_mult', type=float, default=1.0)
-    parser.add_argument('--lr_router_mult', type=float, default=1.0)
-    parser.add_argument('--lr_expert_mult', type=float, default=1.0)
+    parser.add_argument('--lr_backbone_mult', type=float, default=0.5)
+    parser.add_argument('--lr_router_mult', type=float, default=2.0)
+    parser.add_argument('--lr_expert_mult', type=float, default=1.5)
     parser.add_argument('--lr_classifier_mult', type=float, default=1.0)
     parser.add_argument('--lr_other_mult', type=float, default=1.0)
 
@@ -168,6 +187,13 @@ def add_seedv_args(parser: argparse.ArgumentParser) -> None:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.min_lr <= 0:
+        raise ValueError('--min_lr must be > 0.')
+    if args.min_lr > args.lr:
+        print(
+            f"[warn] --min_lr ({args.min_lr}) is higher than --lr ({args.lr}); "
+            'cosine LR schedule will increase toward eta_min floor behavior.'
+        )
     if args.moe_router_temperature <= 0:
         raise ValueError('--moe_router_temperature must be > 0.')
     if args.moe_router_mlp_hidden <= 0:
@@ -207,6 +233,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError('--moe_attnres_depth_router_dim must be > 0.')
     if args.moe_attnres_depth_block_count < 1:
         raise ValueError('--moe_attnres_depth_block_count must be >= 1.')
+    if args.moe_attnres_depth_router_gate_init <= 0:
+        raise ValueError('--moe_attnres_depth_router_gate_init must be > 0.')
+    if args.moe_attnres_depth_router_norm_eps <= 0:
+        raise ValueError('--moe_attnres_depth_router_norm_eps must be > 0.')
     typed_block_modes = {'block_shared_typed_proj', 'dual_query_block_typed_proj'}
     if (
         args.moe_attnres_depth_context_mode in typed_block_modes
