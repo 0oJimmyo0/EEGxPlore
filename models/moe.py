@@ -229,6 +229,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 attnres_depth_router_norm_gate: bool = True,
                 attnres_depth_router_norm_eps: float = 1e-6,
                 attnres_depth_router_gate_init: float = 0.075,
+        attnres_depth_block_separation_coef: float = 0.0,
         expert_init_noise_std: float = 0.0,
         load_balance_coef: float = 0.0,
         domain_bias_reg_coef: float = 0.0,
@@ -309,12 +310,15 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.attnres_depth_router_norm_gate = bool(attnres_depth_router_norm_gate)
         self.attnres_depth_router_norm_eps = float(attnres_depth_router_norm_eps)
         self.attnres_depth_router_gate_init = float(attnres_depth_router_gate_init)
+        self.attnres_depth_block_separation_coef = float(attnres_depth_block_separation_coef)
         if self.attnres_depth_router_init not in {"zero", "xavier"}:
             raise ValueError("attnres_depth_router_init must be one of {'zero','xavier'}")
         if self.attnres_depth_router_norm_eps <= 0.0:
             raise ValueError("attnres_depth_router_norm_eps must be > 0")
         if self.attnres_depth_router_gate_init <= 0.0:
             raise ValueError("attnres_depth_router_gate_init must be > 0")
+        if self.attnres_depth_block_separation_coef < 0.0:
+            raise ValueError("attnres_depth_block_separation_coef must be >= 0")
         if not self.use_spatial_specialists and not self.use_spectral_specialists:
             raise ValueError("At least one specialist bank must be enabled.")
         self.expert_init_noise_std = float(max(0.0, expert_init_noise_std))
@@ -602,11 +606,18 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         ds_sc = spectral_summary if spectral_summary is not None else (shared_summary if shared_summary is not None else z)
 
         ctx_mode = ""
+        summary_mode = ""
         if router_context is not None and isinstance(router_context.get("attnres_depth_context_mode"), str):
-            ctx_mode = str(router_context.get("attnres_depth_context_mode"))
+            ctx_mode = str(router_context.get("attnres_depth_context_mode")).strip().lower()
+        if router_context is not None and isinstance(router_context.get("attnres_depth_summary_mode"), str):
+            summary_mode = str(router_context.get("attnres_depth_summary_mode")).strip().lower()
+        dual_query_mode_active = (
+            ctx_mode == "dual_query_block_typed_proj"
+            or summary_mode == "dual_query_block_typed_learned"
+        )
         norm_gate_active = (
             self.attnres_depth_router_norm_gate
-            and ctx_mode == "dual_query_block_typed_proj"
+            and dual_query_mode_active
             and self.attnres_depth_router_gate_spatial is not None
             and self.attnres_depth_router_gate_spectral is not None
         )
@@ -733,6 +744,15 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         p = p.clamp_min(1e-10)
         return float((-(p * p.log()).sum()).item())
 
+    @staticmethod
+    def _mean_js_divergence(p: Tensor, q: Tensor, eps: float = 1e-8) -> Tensor:
+        p = p.clamp_min(eps)
+        q = q.clamp_min(eps)
+        p = p / p.sum(dim=-1, keepdim=True).clamp_min(eps)
+        q = q / q.sum(dim=-1, keepdim=True).clamp_min(eps)
+        m = 0.5 * (p + q)
+        return 0.5 * (p * (p.log() - m.log())).sum(dim=-1).mean() + 0.5 * (q * (q.log() - m.log())).sum(dim=-1).mean()
+
     def _bank_load_balance(self, probs: Tensor, raw_top1: Tensor) -> Tensor:
         if probs.numel() == 0:
             return probs.new_zeros(())
@@ -827,6 +847,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         depth_block_weight_dist_spectral = None
         depth_block_weight_dist_cosine = None
         depth_block_weight_dist_js_div = None
+        depth_block_weight_dist_spatial_raw: Optional[Tensor] = None
+        depth_block_weight_dist_spectral_raw: Optional[Tensor] = None
         depth_probe_mlp_for_router = False
         depth_proj_spatial_norm = None
         depth_proj_spectral_norm = None
@@ -905,7 +927,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 p_dist_mean = None
                 q_dist_mean = None
                 if torch.is_tensor(router_context.get("attnres_depth_block_weight_dist_spatial")):
-                    p_dist = router_context.get("attnres_depth_block_weight_dist_spatial").detach().float()
+                    p_dist_raw = router_context.get("attnres_depth_block_weight_dist_spatial")
+                    if p_dist_raw.dim() == 1:
+                        p_dist_raw = p_dist_raw.unsqueeze(0)
+                    if p_dist_raw.dim() == 2 and p_dist_raw.shape[0] > 0:
+                        depth_block_weight_dist_spatial_raw = p_dist_raw.to(device=x.device, dtype=x_flat.dtype)
+                    p_dist = p_dist_raw.detach().float()
                     if p_dist.dim() == 1:
                         p_dist = p_dist.unsqueeze(0)
                     if p_dist.dim() == 2 and p_dist.shape[0] > 0:
@@ -913,7 +940,12 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                         p_dist_mean = p_dist_mean / p_dist_mean.sum().clamp_min(1e-8)
                         depth_block_weight_dist_spatial = p_dist_mean.cpu().tolist()
                 if torch.is_tensor(router_context.get("attnres_depth_block_weight_dist_spectral")):
-                    q_dist = router_context.get("attnres_depth_block_weight_dist_spectral").detach().float()
+                    q_dist_raw = router_context.get("attnres_depth_block_weight_dist_spectral")
+                    if q_dist_raw.dim() == 1:
+                        q_dist_raw = q_dist_raw.unsqueeze(0)
+                    if q_dist_raw.dim() == 2 and q_dist_raw.shape[0] > 0:
+                        depth_block_weight_dist_spectral_raw = q_dist_raw.to(device=x.device, dtype=x_flat.dtype)
+                    q_dist = q_dist_raw.detach().float()
                     if q_dist.dim() == 1:
                         q_dist = q_dist.unsqueeze(0)
                     if q_dist.dim() == 2 and q_dist.shape[0] > 0:
@@ -975,6 +1007,26 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 depth_sp = depth_sp * depth_path_scale
             if depth_sc is not None:
                 depth_sc = depth_sc * depth_path_scale
+
+        # Read post-transform gate diagnostics after depth features are built.
+        if self.use_attnres_depth_router_concat and router_context is not None:
+            if "attnres_depth_router_norm_gate_active" in router_context:
+                depth_router_norm_gate_active = bool(router_context.get("attnres_depth_router_norm_gate_active"))
+            if "attnres_depth_router_norm_eps" in router_context:
+                depth_router_norm_eps = float(router_context.get("attnres_depth_router_norm_eps"))
+            if "attnres_depth_router_gate_spatial" in router_context:
+                v = router_context.get("attnres_depth_router_gate_spatial")
+                depth_router_gate_spatial = None if v is None else float(v)
+            if "attnres_depth_router_gate_spectral" in router_context:
+                v = router_context.get("attnres_depth_router_gate_spectral")
+                depth_router_gate_spectral = None if v is None else float(v)
+            if "attnres_depth_router_normed_spatial_norm" in router_context:
+                v = router_context.get("attnres_depth_router_normed_spatial_norm")
+                depth_router_normed_spatial_norm = None if v is None else float(v)
+            if "attnres_depth_router_normed_spectral_norm" in router_context:
+                v = router_context.get("attnres_depth_router_normed_spectral_norm")
+                depth_router_normed_spectral_norm = None if v is None else float(v)
+
         if depth_sp is not None and depth_sc is not None:
             dsp = depth_sp.detach().float()
             dsc = depth_sc.detach().float()
@@ -1202,6 +1254,20 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         balance_kl_sp = self._batch_uniform_kl(probs_sp) if self.use_spatial_specialists else probs_sp.new_zeros(())
         balance_kl_sc = self._batch_uniform_kl(probs_sc) if self.use_spectral_specialists else probs_sc.new_zeros(())
         balance_kl = balance_kl_sp + balance_kl_sc
+        depth_block_sep_js = probs_sp.new_zeros(())
+        if (
+            self.attnres_depth_block_separation_coef > 0.0
+            and depth_context_mode == "dual_query_block_typed_proj"
+            and depth_block_weight_dist_spatial_raw is not None
+            and depth_block_weight_dist_spectral_raw is not None
+            and depth_block_weight_dist_spatial_raw.shape == depth_block_weight_dist_spectral_raw.shape
+            and depth_block_weight_dist_spatial_raw.dim() == 2
+            and depth_block_weight_dist_spatial_raw.shape[0] > 0
+        ):
+            p_sep = depth_block_weight_dist_spatial_raw.to(device=probs_sp.device, dtype=probs_sp.dtype)
+            q_sep = depth_block_weight_dist_spectral_raw.to(device=probs_sp.device, dtype=probs_sp.dtype)
+            depth_block_sep_js = self._mean_js_divergence(p_sep, q_sep)
+        depth_block_sep_term = -self.attnres_depth_block_separation_coef * depth_block_sep_js
         z_loss = torch.logsumexp(logits_sp, dim=-1).pow(2).mean() + torch.logsumexp(logits_sc, dim=-1).pow(2).mean()
 
         self._last_lb_loss = lb
@@ -1218,6 +1284,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             + eff_entropy_coef_sc * entropy_reg_sc
             + eff_balance_kl_coef_sp * balance_kl_sp
             + eff_balance_kl_coef_sc * balance_kl_sc
+            + depth_block_sep_term
             + self.router_z_loss_coef * z_loss
         )
 
@@ -1283,6 +1350,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "router_balance_kl_coef_spectral": float(base_balance_kl_coef_sc),
             "router_balance_kl_coef_effective": float(eff_balance_kl_coef_sp),
             "router_balance_kl_coef_effective_spectral": float(eff_balance_kl_coef_sc),
+            "attnres_depth_block_separation_coef": float(self.attnres_depth_block_separation_coef),
             "router_early_reg_boost": float(early_reg_boost),
             "router_early_reg_epochs": int(early_reg_epochs),
             "router_z_loss_coef": float(self.router_z_loss_coef),
@@ -1357,6 +1425,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "aux_domain_bias_reg": float(domain_reg.detach().item()),
             "aux_entropy_reg": float(entropy_reg.detach().item()),
             "aux_balance_kl": float(balance_kl.detach().item()),
+            "aux_depth_block_sep_js": float(depth_block_sep_js.detach().item()),
+            "aux_depth_block_sep_term": float(depth_block_sep_term.detach().item()),
             "aux_z_loss": float(z_loss.detach().item()),
             "aux_total": float(self._last_aux_loss.detach().item()),
             "domain_bias_abs_spatial": sp_domain_abs,
@@ -1608,6 +1678,9 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"balance_kl_coef_sc(base/eff)=({diag.get('router_balance_kl_coef', 0.0):.6f}/"
             f"{diag.get('router_balance_kl_coef_effective_spectral', diag.get('router_balance_kl_coef_effective', diag.get('router_balance_kl_coef', 0.0))):.6f})  "
             f"balance_kl_coef_spectral={diag.get('router_balance_kl_coef_spectral', diag.get('router_balance_kl_coef', 0.0)):.6f}  "
+            f"depth_sep_js={diag.get('aux_depth_block_sep_js', 0.0):.6f}  "
+            f"depth_sep_coef={diag.get('attnres_depth_block_separation_coef', 0.0):.6f}  "
+            f"depth_sep_term={diag.get('aux_depth_block_sep_term', 0.0):.6f}  "
             f"early_reg_boost={diag.get('router_early_reg_boost', 1.0):.2f}<=ep{diag.get('router_early_reg_epochs', 0)}  "
             f"z_loss={diag.get('aux_z_loss', 0.0):.6f}  z_loss_coef={diag.get('router_z_loss_coef', 0.0):.6f}"
         ),

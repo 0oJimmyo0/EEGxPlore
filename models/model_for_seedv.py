@@ -49,6 +49,7 @@ class Model(nn.Module):
                 f"attnres_depth_router_norm_gate={getattr(param, 'moe_attnres_depth_router_norm_gate', True)}, "
                 f"attnres_depth_router_gate_init={getattr(param, 'moe_attnres_depth_router_gate_init', 0.075)}, "
                 f"attnres_depth_router_norm_eps={getattr(param, 'moe_attnres_depth_router_norm_eps', 1e-6)}, "
+                f"attnres_depth_block_separation_coef={getattr(param, 'moe_attnres_depth_block_separation_coef', 0.0)}, "
                 f"attnres_depth_grad_mode={getattr(param, 'moe_attnres_depth_summary_grad_mode', 'delayed_unfreeze')}, "
                 f"attnres_depth_unfreeze_epoch={getattr(param, 'moe_attnres_depth_summary_unfreeze_epoch', 8)}, "
                 f"uniform_warmup_epochs={getattr(param, 'moe_uniform_dispatch_warmup_epochs', 0)}, "

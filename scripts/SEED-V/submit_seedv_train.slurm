@@ -3,7 +3,7 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -51,11 +51,11 @@ RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
 
 CUDA_ID="${CUDA_ID:-0}"
-EPOCHS="${EPOCHS:-40}"
+EPOCHS="${EPOCHS:-25}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
-LR="${LR:-2e-5}"
+LR="${LR:-3e-5}"
 MIN_LR="${MIN_LR:-5e-6}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-3e-2}"
 OPTIMIZER="${OPTIMIZER:-AdamW}"
@@ -97,6 +97,7 @@ DEPTH_SUMMARY_MODE="${DEPTH_SUMMARY_MODE:-attn_delta4}"
 DEPTH_PROBE_MLP_FOR_ROUTER="${DEPTH_PROBE_MLP_FOR_ROUTER:-on}"
 DEPTH_ROUTER_INIT="${DEPTH_ROUTER_INIT:-xavier}"
 DEPTH_ROUTER_GATE_INIT="${DEPTH_ROUTER_GATE_INIT:-0.075}"
+DEPTH_BLOCK_SEP_COEF="${DEPTH_BLOCK_SEP_COEF:-0.001}"
 DEPTH_SUMMARY_GRAD_MODE="${DEPTH_SUMMARY_GRAD_MODE:-delayed_unfreeze}"
 DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-2}"
 
@@ -124,7 +125,7 @@ MOE_EXPERT_INIT_NOISE_STD="${MOE_EXPERT_INIT_NOISE_STD:-0.0}"
 
 USE_COMPONENT_LR="${USE_COMPONENT_LR:-1}"
 LR_BACKBONE_MULT="${LR_BACKBONE_MULT:-0.5}"
-LR_ROUTER_MULT="${LR_ROUTER_MULT:-2.0}"
+LR_ROUTER_MULT="${LR_ROUTER_MULT:-3.0}"
 LR_EXPERT_MULT="${LR_EXPERT_MULT:-1.5}"
 LR_CLASSIFIER_MULT="${LR_CLASSIFIER_MULT:-1.0}"
 LR_OTHER_MULT="${LR_OTHER_MULT:-1.0}"
@@ -198,6 +199,7 @@ if [[ "$DEPTH_ROUTER" == "on" ]]; then
   fi
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_init "$DEPTH_ROUTER_INIT")
     DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_router_gate_init "$DEPTH_ROUTER_GATE_INIT")
+  DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_block_separation_coef "$DEPTH_BLOCK_SEP_COEF")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_grad_mode "$DEPTH_SUMMARY_GRAD_MODE")
   DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_unfreeze_epoch "$DEPTH_SUMMARY_UNFREEZE_EPOCH")
   if [[ "$DEPTH_CONTEXT_MODE" != "block_shared_typed_proj" && "$DEPTH_CONTEXT_MODE" != "dual_query_block_typed_proj" && "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
@@ -281,7 +283,7 @@ echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers
 echo "[seedv-slurm] lr=$LR min_lr=$MIN_LR" >&2
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2
 echo "[seedv-slurm] router_soft_warmup_epochs=$ROUTER_SOFT_WARMUP_EPOCHS (soft-dispatch runs use warmup blending in MoE router)" >&2
-echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_LABEL depth_proj_init=$DEPTH_ROUTER_INIT depth_gate_init=$DEPTH_ROUTER_GATE_INIT" >&2
+echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_LABEL depth_proj_init=$DEPTH_ROUTER_INIT depth_gate_init=$DEPTH_ROUTER_GATE_INIT depth_sep_coef=$DEPTH_BLOCK_SEP_COEF" >&2
 echo "[seedv-slurm] depth_grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
 echo "[seedv-slurm] split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>} component_lr=$USE_COMPONENT_LR lr_mults=(bb:$LR_BACKBONE_MULT,router:$LR_ROUTER_MULT,expert:$LR_EXPERT_MULT,clf:$LR_CLASSIFIER_MULT,other:$LR_OTHER_MULT)" >&2
 

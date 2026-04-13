@@ -737,11 +737,21 @@ class TransformerEncoderLayer(nn.Module):
                         router_ctx["attnres_depth_block_peak_weight_spectral_pre_mlp"] = (
                             block_diag['block_peak_weight_spectral_pre_mlp'].detach().float().mean(dim=0).cpu().tolist()
                         )
+                        block_weight_dist_spatial_for_router = (
+                            block_diag['block_weight_dist_spatial']
+                            if grad_active
+                            else block_diag['block_weight_dist_spatial'].detach()
+                        )
+                        block_weight_dist_spectral_for_router = (
+                            block_diag['block_weight_dist_spectral']
+                            if grad_active
+                            else block_diag['block_weight_dist_spectral'].detach()
+                        )
                         router_ctx["attnres_depth_block_weight_dist_spatial"] = (
-                            block_diag['block_weight_dist_spatial'].detach().float()
+                            block_weight_dist_spatial_for_router
                         )
                         router_ctx["attnres_depth_block_weight_dist_spectral"] = (
-                            block_diag['block_weight_dist_spectral'].detach().float()
+                            block_weight_dist_spectral_for_router
                         )
         x_out = mlp_in + self._ff_block(ffn_in, router_context=router_ctx)
 
