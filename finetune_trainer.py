@@ -6,7 +6,7 @@ import shutil
 import traceback
 from datetime import datetime
 from timeit import default_timer as timer
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -105,6 +105,44 @@ def _to_jsonable(obj):
     return str(obj)
 
 
+class EMAHelper:
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999):
+        self.decay = float(decay)
+        self.shadow: Dict[str, torch.Tensor] = {}
+        self.backup: Dict[str, torch.Tensor] = {}
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                self.shadow[name] = p.detach().clone()
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name not in self.shadow:
+                self.shadow[name] = p.detach().clone()
+                continue
+            self.shadow[name].mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def apply_shadow(self, model: torch.nn.Module) -> None:
+        self.backup = {}
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name not in self.shadow:
+                continue
+            self.backup[name] = p.detach().clone()
+            p.copy_(self.shadow[name])
+
+    @torch.no_grad()
+    def restore(self, model: torch.nn.Module) -> None:
+        for name, p in model.named_parameters():
+            if name in self.backup:
+                p.copy_(self.backup[name])
+        self.backup = {}
+
+
 class Trainer(object):
     def __init__(self, params, data_loader, model):
         self.params = params
@@ -190,6 +228,66 @@ class Trainer(object):
                 )
 
         print(self.model)
+
+        self._global_step = 0
+        self._ema_updates = 0
+        self._ema_helper: Optional[EMAHelper] = None
+        self._ema_eval_only = bool(getattr(self.params, 'ema_eval_only', True))
+        self._ema_warmup_steps = int(getattr(self.params, 'ema_warmup_steps', 300))
+        self._ema_decay = float(getattr(self.params, 'ema_decay', 0.999))
+        if bool(getattr(self.params, 'use_ema', False)):
+            self._ema_helper = EMAHelper(self.model, decay=self._ema_decay)
+            print(
+                f"[EMA] enabled decay={self._ema_decay:.6f} warmup_steps={self._ema_warmup_steps} "
+                f"eval_only={self._ema_eval_only}",
+                flush=True,
+            )
+
+    def _ema_enabled(self) -> bool:
+        return self._ema_helper is not None
+
+    def _ema_is_ready(self) -> bool:
+        return self._ema_enabled() and self._ema_updates > 0
+
+    def _ema_update_after_step(self) -> None:
+        self._global_step += 1
+        if not self._ema_enabled():
+            return
+        if self._global_step < self._ema_warmup_steps:
+            return
+        self._ema_helper.update(self.model)
+        self._ema_updates += 1
+
+    def _snapshot_ema_state_dict_cpu(self) -> Optional[Dict[str, Any]]:
+        if not self._ema_enabled():
+            return None
+        self._ema_helper.apply_shadow(self.model)
+        try:
+            return _state_dict_to_cpu(self.model)
+        finally:
+            self._ema_helper.restore(self.model)
+
+    def _eval_multiclass_with_optional_ema(
+        self,
+        evaluator: Evaluator,
+        epoch_for_log: Optional[int] = None,
+    ) -> Tuple[Tuple[float, float, float, np.ndarray], Optional[Tuple[float, float, float, np.ndarray]]]:
+        if epoch_for_log is None:
+            raw = evaluator.get_metrics_for_multiclass(self.model)
+        else:
+            raw = evaluator.get_metrics_for_multiclass(self.model, epoch_for_log=epoch_for_log)
+
+        ema = None
+        if self._ema_is_ready():
+            self._ema_helper.apply_shadow(self.model)
+            try:
+                if epoch_for_log is None:
+                    ema = evaluator.get_metrics_for_multiclass(self.model)
+                else:
+                    ema = evaluator.get_metrics_for_multiclass(self.model, epoch_for_log=epoch_for_log)
+            finally:
+                self._ema_helper.restore(self.model)
+        return raw, ema
 
     @staticmethod
     def _component_name_for_param(name: str) -> str:
@@ -606,6 +704,10 @@ class Trainer(object):
             'batch_size': getattr(self.params, 'batch_size', ''),
             'lr': getattr(self.params, 'lr', ''),
             'weight_decay': getattr(self.params, 'weight_decay', ''),
+            'use_ema': bool(getattr(self.params, 'use_ema', False)),
+            'ema_decay': getattr(self.params, 'ema_decay', ''),
+            'ema_warmup_steps': getattr(self.params, 'ema_warmup_steps', ''),
+            'ema_eval_only': bool(getattr(self.params, 'ema_eval_only', True)),
             'classifier': getattr(self.params, 'classifier', ''),
             'attnres_variant': getattr(self.params, 'attnres_variant', ''),
             'moe': bool(getattr(self.params, 'moe', False)),
@@ -672,9 +774,19 @@ class Trainer(object):
         f1_best = float('-inf')
         kappa_best = float('-inf')
         acc_best = float('-inf')
-        cm_best = None
         best_f1_epoch = 0
         best_val_metrics = {}
+
+        raw_kappa_best = float('-inf')
+        raw_best_epoch = 0
+        raw_best_val_metrics: Dict[str, float] = {}
+        raw_best_model_states: Optional[Dict[str, Any]] = None
+
+        ema_kappa_best = float('-inf')
+        ema_best_epoch = 0
+        ema_best_val_metrics: Dict[str, float] = {}
+        ema_best_model_states: Optional[Dict[str, Any]] = None
+
         train_steps = 0
 
         self._print_slurm_oom_hints()
@@ -716,6 +828,7 @@ class Trainer(object):
                         if self.params.clip_value > 0:
                             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                         self.optimizer.step()
+                        self._ema_update_after_step()
                         self.optimizer_scheduler.step()
                         train_steps += 1
                         if train_steps % 50 == 0:
@@ -751,21 +864,53 @@ class Trainer(object):
 
                 try:
                     with torch.no_grad():
-                        acc, kappa, f1, cm = self.val_eval.get_metrics_for_multiclass(
-                            self.model, epoch_for_log=epoch + 1
+                        (raw_acc, raw_kappa, raw_f1, raw_cm), ema_pack = self._eval_multiclass_with_optional_ema(
+                            self.val_eval,
+                            epoch_for_log=epoch + 1,
                         )
+                    ema_acc = ema_kappa = ema_f1 = None
+                    ema_cm = None
+                    if ema_pack is not None:
+                        ema_acc, ema_kappa, ema_f1, ema_cm = ema_pack
+
+                    selected_source = 'raw'
+                    acc, kappa, f1, cm = raw_acc, raw_kappa, raw_f1, raw_cm
+                    if ema_pack is not None and self._ema_eval_only:
+                        selected_source = 'ema'
+                        acc, kappa, f1, cm = ema_acc, ema_kappa, ema_f1, ema_cm
+
                     _mem_report(f"after_val ep={epoch + 1}", md)
                     print(
-                        "Epoch {} : Training Loss: {:.5f}, acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}, LR: {:.5f}, Time elapsed {:.2f} mins".format(
+                        "Epoch {} : Training Loss: {:.5f}, acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}, LR: {:.5f}, Time elapsed {:.2f} mins, eval_source={}".format(
                             epoch + 1,
                             np.mean(losses) if losses else float("nan"),
                             acc,
                             kappa,
                             f1,
                             lr_cur,
-                            (timer() - start_time) / 60
+                            (timer() - start_time) / 60,
+                            selected_source,
                         )
                     )
+                    print(
+                        "[diag] ep={} val_raw acc={:.5f} kappa={:.5f} f1={:.5f}".format(
+                            epoch + 1,
+                            raw_acc,
+                            raw_kappa,
+                            raw_f1,
+                        ),
+                        flush=True,
+                    )
+                    if ema_pack is not None:
+                        print(
+                            "[diag] ep={} val_ema acc={:.5f} kappa={:.5f} f1={:.5f}".format(
+                                epoch + 1,
+                                ema_acc,
+                                ema_kappa,
+                                ema_f1,
+                            ),
+                            flush=True,
+                        )
                     if hasattr(self.model, "backbone") and hasattr(self.model.backbone, "encoder"):
                         gate_vals = []
                         st = self.params.attnres_start_layer
@@ -787,6 +932,17 @@ class Trainer(object):
                         f"[diag] ep={epoch + 1} classwise_recall={json.dumps(classwise_recall)}",
                         flush=True,
                     )
+                    raw_classwise_recall = self._classwise_recall_from_cm(np.asarray(raw_cm))
+                    print(
+                        f"[diag] ep={epoch + 1} classwise_recall_raw={json.dumps(raw_classwise_recall)}",
+                        flush=True,
+                    )
+                    if ema_pack is not None:
+                        ema_classwise_recall = self._classwise_recall_from_cm(np.asarray(ema_cm))
+                        print(
+                            f"[diag] ep={epoch + 1} classwise_recall_ema={json.dumps(ema_classwise_recall)}",
+                            flush=True,
+                        )
                     self._append_machine_readable_epoch_diag(
                         epoch_one_based=epoch + 1,
                         split='val',
@@ -794,6 +950,13 @@ class Trainer(object):
                             'balanced_accuracy': float(acc),
                             'kappa': float(kappa),
                             'weighted_f1': float(f1),
+                            'eval_source': selected_source,
+                            'raw_balanced_accuracy': float(raw_acc),
+                            'raw_kappa': float(raw_kappa),
+                            'raw_weighted_f1': float(raw_f1),
+                            'ema_balanced_accuracy': float(ema_acc) if ema_acc is not None else None,
+                            'ema_kappa': float(ema_kappa) if ema_kappa is not None else None,
+                            'ema_weighted_f1': float(ema_f1) if ema_f1 is not None else None,
                             'lr': float(lr_cur),
                             'loss_mean': float(np.mean(losses) if losses else float('nan')),
                             'lr_groups': lr_by_group,
@@ -805,9 +968,31 @@ class Trainer(object):
                     self._warn_depth_summary_flow(epoch + 1, grad_norms)
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
+
+                    if raw_kappa > raw_kappa_best:
+                        raw_best_epoch = epoch + 1
+                        raw_kappa_best = raw_kappa
+                        raw_best_val_metrics = {
+                            'balanced_accuracy': float(raw_acc),
+                            'kappa': float(raw_kappa),
+                            'weighted_f1': float(raw_f1),
+                        }
+                        raw_best_model_states = _state_dict_to_cpu(self.model)
+
+                    if ema_pack is not None and ema_kappa > ema_kappa_best:
+                        ema_best_epoch = epoch + 1
+                        ema_kappa_best = ema_kappa
+                        ema_best_val_metrics = {
+                            'balanced_accuracy': float(ema_acc),
+                            'kappa': float(ema_kappa),
+                            'weighted_f1': float(ema_f1),
+                        }
+                        ema_best_model_states = self._snapshot_ema_state_dict_cpu()
+
                     if kappa > kappa_best:
                         print("kappa increasing....saving weights !! ")
-                        print("Val Evaluation: acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}".format(
+                        print("Val Evaluation ({}): acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}".format(
+                            selected_source,
                             acc,
                             kappa,
                             f1,
@@ -821,11 +1006,15 @@ class Trainer(object):
                             'balanced_accuracy': float(acc),
                             'kappa': float(kappa),
                             'weighted_f1': float(f1),
+                            'eval_source': selected_source,
                         }
-                        self.best_model_states = _state_dict_to_cpu(self.model)
+                        if selected_source == 'ema':
+                            self.best_model_states = self._snapshot_ema_state_dict_cpu()
+                        else:
+                            self.best_model_states = _state_dict_to_cpu(self.model)
                         est_b = _estimate_state_dict_cpu_bytes(self.best_model_states)
                         print(
-                            f"[checkpoint] best val kappa improved -> CPU state_dict ~{est_b / (1024 ** 2):.1f} MiB",
+                            f"[checkpoint] best val kappa improved ({selected_source}) -> CPU state_dict ~{est_b / (1024 ** 2):.1f} MiB",
                             flush=True,
                         )
                         _mem_report(f"after_best_snapshot ep={epoch + 1}", md)
@@ -836,40 +1025,115 @@ class Trainer(object):
                 print(f"epoch {epoch + 1} fully complete", flush=True)
                 self._epoch_end_gc()
 
+            if raw_best_model_states is None:
+                raw_best_model_states = _state_dict_to_cpu(self.model)
+                raw_best_epoch = self.params.epochs
+                raw_best_val_metrics = {
+                    'balanced_accuracy': float(acc_best),
+                    'kappa': float(raw_kappa_best if raw_kappa_best != float('-inf') else 0.0),
+                    'weighted_f1': float(f1_best),
+                }
+
+            if self._ema_enabled() and ema_best_model_states is None and self._ema_is_ready():
+                ema_best_model_states = self._snapshot_ema_state_dict_cpu()
+                ema_best_epoch = self.params.epochs
+                ema_best_val_metrics = {
+                    'balanced_accuracy': float(acc_best),
+                    'kappa': float(ema_kappa_best if ema_kappa_best != float('-inf') else 0.0),
+                    'weighted_f1': float(f1_best),
+                }
+
             if self.best_model_states is None:
-                print('Warning: val kappa never improved; using last epoch weights for test/save.')
-                self.best_model_states = _state_dict_to_cpu(self.model)
+                print('Warning: val kappa never improved; using fallback weights for test/save.')
+                if self._ema_eval_only and ema_best_model_states is not None:
+                    self.best_model_states = ema_best_model_states
+                else:
+                    self.best_model_states = raw_best_model_states
 
             _mem_report("train_multiclass_done_pre_test", md)
 
-            self.model.load_state_dict(self.best_model_states)
-            self.model.cuda()
             with torch.no_grad():
                 print("***************************Test************************")
-                acc, kappa, f1, cm = self.test_eval.get_metrics_for_multiclass(self.model)
-                print("***************************Test results************************")
+
+                self.model.load_state_dict(raw_best_model_states)
+                self.model.cuda()
+                raw_test_acc, raw_test_kappa, raw_test_f1, raw_test_cm = self.test_eval.get_metrics_for_multiclass(self.model)
+                print("***************************Test results (raw)************************")
                 print(
                     "Test Evaluation: acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}".format(
-                        acc,
-                        kappa,
-                        f1,
+                        raw_test_acc,
+                        raw_test_kappa,
+                        raw_test_f1,
                     ),
                     flush=True,
                 )
-                print(cm, flush=True)
-                print("[post_test] after test confusion matrix", flush=True)
+                print(raw_test_cm, flush=True)
+
+                ema_test_acc = ema_test_kappa = ema_test_f1 = None
+                ema_test_cm = None
+                if ema_best_model_states is not None:
+                    self.model.load_state_dict(ema_best_model_states)
+                    self.model.cuda()
+                    ema_test_acc, ema_test_kappa, ema_test_f1, ema_test_cm = self.test_eval.get_metrics_for_multiclass(self.model)
+                    print("***************************Test results (ema)************************")
+                    print(
+                        "Test Evaluation EMA: acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}".format(
+                            ema_test_acc,
+                            ema_test_kappa,
+                            ema_test_f1,
+                        ),
+                        flush=True,
+                    )
+                    print(ema_test_cm, flush=True)
+
+                use_ema_primary = bool(self._ema_eval_only and ema_test_acc is not None)
+                primary_source = 'ema' if use_ema_primary else 'raw'
+                if use_ema_primary:
+                    primary_epoch = ema_best_epoch
+                    primary_acc = ema_test_acc
+                    primary_kappa = ema_test_kappa
+                    primary_f1 = ema_test_f1
+                    primary_val_metrics = dict(ema_best_val_metrics)
+                else:
+                    primary_epoch = raw_best_epoch
+                    primary_acc = raw_test_acc
+                    primary_kappa = raw_test_kappa
+                    primary_f1 = raw_test_f1
+                    primary_val_metrics = dict(raw_best_val_metrics)
+
+                print(f"[post_test] primary_eval_source={primary_source}", flush=True)
 
                 rd = getattr(self.params, "routing_export_dir", None) or ""
                 model_path = ""
+                raw_model_path = ""
+                ema_model_path = ""
                 try:
                     print("[post_test] before checkpoint save", flush=True)
                     if not os.path.isdir(self.params.model_dir):
                         os.makedirs(self.params.model_dir)
-                    model_path = self.params.model_dir + "/epoch{}_acc_{:.5f}_kappa_{:.5f}_f1_{:.5f}.pth".format(
-                        best_f1_epoch, acc, kappa, f1
+
+                    self.model.load_state_dict(raw_best_model_states)
+                    raw_model_path = self.params.model_dir + "/raw_epoch{}_acc_{:.5f}_kappa_{:.5f}_f1_{:.5f}.pth".format(
+                        raw_best_epoch, raw_test_acc, raw_test_kappa, raw_test_f1
                     )
+                    torch.save(self.model.state_dict(), raw_model_path)
+
+                    if ema_best_model_states is not None:
+                        self.model.load_state_dict(ema_best_model_states)
+                        ema_model_path = self.params.model_dir + "/ema_epoch{}_acc_{:.5f}_kappa_{:.5f}_f1_{:.5f}.pth".format(
+                            ema_best_epoch, ema_test_acc, ema_test_kappa, ema_test_f1
+                        )
+                        torch.save(self.model.state_dict(), ema_model_path)
+
+                    if use_ema_primary and ema_best_model_states is not None:
+                        self.model.load_state_dict(ema_best_model_states)
+                        model_path = ema_model_path
+                    else:
+                        self.model.load_state_dict(raw_best_model_states)
+                        model_path = raw_model_path
+
                     ck_tag = os.path.basename(model_path).replace(".pth", "")
-                    epoch_tag = f"best_ep{best_f1_epoch}"
+                    epoch_tag = f"best_ep{primary_epoch}"
                     raw_splits = getattr(self.params, "routing_export_splits", "test") or "test"
                     split_list = [s.strip() for s in raw_splits.split(",") if s.strip()]
                     if self.params.downstream_dataset == "FACED" and rd:
@@ -884,8 +1148,6 @@ class Trainer(object):
                                 f"[post_test]   example: faced_routing_{sp}_e{epoch_tag}_{ck_tag}_per_sample.csv",
                                 flush=True,
                             )
-
-                    torch.save(self.model.state_dict(), model_path)
                     print("[post_test] after checkpoint save", flush=True)
                     exists = os.path.isfile(model_path)
                     sz = os.path.getsize(model_path) if exists else -1
@@ -922,23 +1184,53 @@ class Trainer(object):
                         )
                     print("[post_test] after routing export", flush=True)
 
-                    if not best_val_metrics:
-                        best_val_metrics = {
+                    if not primary_val_metrics:
+                        primary_val_metrics = {
                             'balanced_accuracy': float(acc_best),
                             'kappa': float(kappa_best),
                             'weighted_f1': float(f1_best),
+                            'eval_source': primary_source,
                         }
                     self._write_run_summary(
                         task_type='multiclass',
-                        best_epoch=best_f1_epoch,
-                        best_val_metrics=best_val_metrics,
+                        best_epoch=primary_epoch,
+                        best_val_metrics=primary_val_metrics,
                         test_metrics={
-                            'balanced_accuracy': float(acc),
-                            'kappa': float(kappa),
-                            'weighted_f1': float(f1),
+                            'balanced_accuracy': float(primary_acc),
+                            'kappa': float(primary_kappa),
+                            'weighted_f1': float(primary_f1),
                         },
                         model_path=model_path,
                     )
+
+                    if ema_test_acc is not None:
+                        ema_compare_payload = {
+                            'primary_eval_source': primary_source,
+                            'raw': {
+                                'best_epoch': int(raw_best_epoch),
+                                'best_val_metrics': _to_jsonable(raw_best_val_metrics),
+                                'test_metrics': {
+                                    'balanced_accuracy': float(raw_test_acc),
+                                    'kappa': float(raw_test_kappa),
+                                    'weighted_f1': float(raw_test_f1),
+                                },
+                                'checkpoint_path': raw_model_path,
+                            },
+                            'ema': {
+                                'best_epoch': int(ema_best_epoch),
+                                'best_val_metrics': _to_jsonable(ema_best_val_metrics),
+                                'test_metrics': {
+                                    'balanced_accuracy': float(ema_test_acc),
+                                    'kappa': float(ema_test_kappa),
+                                    'weighted_f1': float(ema_test_f1),
+                                },
+                                'checkpoint_path': ema_model_path,
+                            },
+                        }
+                        ema_compare_path = os.path.join(self.params.model_dir, 'ema_comparison_summary.json')
+                        with open(ema_compare_path, 'w', encoding='utf-8') as f:
+                            json.dump(ema_compare_payload, f, indent=2, ensure_ascii=True)
+                        print(f"[summary] wrote {ema_compare_path}", flush=True)
                 except Exception:
                     print("[post_test] EXCEPTION in checkpoint save / routing export block", flush=True)
                     traceback.print_exc()
@@ -997,6 +1289,7 @@ class Trainer(object):
                     if self.params.clip_value > 0:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                     self.optimizer.step()
+                    self._ema_update_after_step()
                     self.optimizer_scheduler.step()
                     train_steps += 1
                     if train_steps % 50 == 0:
@@ -1149,6 +1442,7 @@ class Trainer(object):
                     if self.params.clip_value > 0:
                         torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.params.clip_value)
                     self.optimizer.step()
+                    self._ema_update_after_step()
                     self.optimizer_scheduler.step()
                     train_steps += 1
                     if train_steps % 50 == 0:

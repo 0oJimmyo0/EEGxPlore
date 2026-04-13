@@ -51,7 +51,8 @@ RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
 
 CUDA_ID="${CUDA_ID:-0}"
-EPOCHS="${EPOCHS:-25}"
+EPOCHS="${EPOCHS:-40}"
+SEED_LIST="${SEED_LIST:-42 3407 2025}"  # space/comma separated
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
@@ -63,6 +64,10 @@ CLIP_VALUE="${CLIP_VALUE:-1.0}"
 DROPOUT="${DROPOUT:-0.1}"
 CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
+USE_EMA="${USE_EMA:-0}"
+EMA_DECAY="${EMA_DECAY:-0.999}"
+EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-300}"
+EMA_EVAL_ONLY="${EMA_EVAL_ONLY:-1}"
 
 RUN_MODE="${RUN_MODE:-custom}"  # dense | selective | custom
 A1_STRICT_BLOCK_ABLATION="${A1_STRICT_BLOCK_ABLATION:-1}"  # 1 => keep A1 as one clean block-summary change
@@ -234,6 +239,20 @@ else
   COMPONENT_LR_ARGS+=(--no-use_component_lr)
 fi
 
+EMA_ARGS=()
+if [[ "$USE_EMA" == "1" ]]; then
+  EMA_ARGS+=(--use_ema)
+else
+  EMA_ARGS+=(--no-use_ema)
+fi
+EMA_ARGS+=(--ema_decay "$EMA_DECAY")
+EMA_ARGS+=(--ema_warmup_steps "$EMA_WARMUP_STEPS")
+if [[ "$EMA_EVAL_ONLY" == "1" ]]; then
+  EMA_ARGS+=(--ema_eval_only)
+else
+  EMA_ARGS+=(--no-ema_eval_only)
+fi
+
 MOE_ARGS=()
 if [[ "$USE_MOE" == "1" ]]; then
   MOE_ARGS+=(--moe --moe_diagnostics)
@@ -277,6 +296,15 @@ fi
 
 mkdir -p "$MODEL_DIR"
 
+# Parse once so a single sbatch can run a fixed 3-seed sweep.
+SEED_LIST_SANITIZED="${SEED_LIST//,/ }"
+# shellcheck disable=SC2206
+SEEDS=($SEED_LIST_SANITIZED)
+if [[ ${#SEEDS[@]} -eq 0 ]]; then
+  echo "[seedv-slurm] SEED_LIST is empty after parsing: '$SEED_LIST'" >&2
+  exit 2
+fi
+
 DEPTH_SUMMARY_LABEL="$DEPTH_SUMMARY_MODE"
 if [[ "$DEPTH_CONTEXT_MODE" == "block_shared_typed_proj" ]]; then
   DEPTH_SUMMARY_LABEL="block_typed_learned"
@@ -289,39 +317,49 @@ echo "[seedv-slurm] seedv_protocol=$SEEDV_PROTOCOL" >&2
 echo "[seedv-slurm] run_mode=$RUN_MODE" >&2
 echo "[seedv-slurm] a1_strict_block_ablation=$A1_STRICT_BLOCK_ABLATION" >&2
 echo "[seedv-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
+echo "[seedv-slurm] seeds=${SEEDS[*]}" >&2
 echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers=$MOE_NUM_LAYERS" >&2
 echo "[seedv-slurm] lr=$LR min_lr=$MIN_LR" >&2
+echo "[seedv-slurm] ema(use/decay/warmup/eval_only)=($USE_EMA/$EMA_DECAY/$EMA_WARMUP_STEPS/$EMA_EVAL_ONLY)" >&2
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2
 echo "[seedv-slurm] router_soft_warmup_epochs=$ROUTER_SOFT_WARMUP_EPOCHS (soft-dispatch runs use warmup blending in MoE router)" >&2
 echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_LABEL depth_proj_init=$DEPTH_ROUTER_INIT depth_norm_gate=$DEPTH_ROUTER_NORM_GATE depth_norm_eps=$DEPTH_ROUTER_NORM_EPS depth_gate_init=$DEPTH_ROUTER_GATE_INIT depth_sep_coef=$DEPTH_BLOCK_SEP_COEF depth_sep_target_js=$DEPTH_BLOCK_SEP_TARGET_JS" >&2
 echo "[seedv-slurm] depth_grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
 echo "[seedv-slurm] split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>} component_lr=$USE_COMPONENT_LR lr_mults=(bb:$LR_BACKBONE_MULT,router:$LR_ROUTER_MULT,expert:$LR_EXPERT_MULT,clf:$LR_CLASSIFIER_MULT,other:$LR_OTHER_MULT)" >&2
 
-time python "$REPO_DIR/finetune_main.py" \
-  --seed 42 \
-  --cuda "$CUDA_ID" \
-  --epochs "$EPOCHS" \
-  --batch_size "$BATCH_SIZE" \
-  --lr "$LR" \
-  --min_lr "$MIN_LR" \
-  --weight_decay "$WEIGHT_DECAY" \
-  --optimizer "$OPTIMIZER" \
-  --clip_value "$CLIP_VALUE" \
-  --dropout "$DROPOUT" \
-  --classifier "$CLASSIFIER" \
-  --downstream_dataset "$DATASET" \
-  --datasets_dir "$DATASET_DIR" \
-  --num_of_classes "$NUM_CLASSES" \
-  --model_dir "$MODEL_DIR" \
-  --label_smoothing "$LABEL_SMOOTHING" \
-  --num_workers "$NUM_WORKERS" \
-  --attnres_variant "$ATTNRES_VARIANT" \
-  --attnres_start_layer "$ATTNRES_START_LAYER" \
-  --use_pretrained_weights \
-  --foundation_dir "$FOUNDATION_DIR" \
-  --routing_run_name "$RUN_NAME" \
-  --no-tqdm \
-  "${SPLIT_ARGS[@]}" \
-  "${COMPONENT_LR_ARGS[@]}" \
-  "${MOE_ARGS[@]}" \
-  "${EXTRA_ARGS[@]}"
+for SEED in "${SEEDS[@]}"; do
+  RUN_MODEL_DIR="${MODEL_DIR}/seed_${SEED}"
+  RUN_RUN_NAME="${RUN_NAME}_s${SEED}"
+  mkdir -p "$RUN_MODEL_DIR"
+
+  echo "[seedv-slurm] starting seed=$SEED model_dir=$RUN_MODEL_DIR run_name=$RUN_RUN_NAME" >&2
+  time python "$REPO_DIR/finetune_main.py" \
+    --seed "$SEED" \
+    --cuda "$CUDA_ID" \
+    --epochs "$EPOCHS" \
+    --batch_size "$BATCH_SIZE" \
+    --lr "$LR" \
+    --min_lr "$MIN_LR" \
+    --weight_decay "$WEIGHT_DECAY" \
+    --optimizer "$OPTIMIZER" \
+    --clip_value "$CLIP_VALUE" \
+    --dropout "$DROPOUT" \
+    --classifier "$CLASSIFIER" \
+    --downstream_dataset "$DATASET" \
+    --datasets_dir "$DATASET_DIR" \
+    --num_of_classes "$NUM_CLASSES" \
+    --model_dir "$RUN_MODEL_DIR" \
+    --label_smoothing "$LABEL_SMOOTHING" \
+    --num_workers "$NUM_WORKERS" \
+    --attnres_variant "$ATTNRES_VARIANT" \
+    --attnres_start_layer "$ATTNRES_START_LAYER" \
+    --use_pretrained_weights \
+    --foundation_dir "$FOUNDATION_DIR" \
+    --routing_run_name "$RUN_RUN_NAME" \
+    --no-tqdm \
+    "${SPLIT_ARGS[@]}" \
+    "${EMA_ARGS[@]}" \
+    "${COMPONENT_LR_ARGS[@]}" \
+    "${MOE_ARGS[@]}" \
+    "${EXTRA_ARGS[@]}"
+done

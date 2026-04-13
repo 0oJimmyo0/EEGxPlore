@@ -20,6 +20,30 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--weight_decay', type=float, default=5e-2)
     parser.add_argument('--optimizer', type=str, default='AdamW', choices=['AdamW', 'SGD'])
     parser.add_argument('--clip_value', type=float, default=1.0)
+    parser.add_argument(
+        '--use_ema',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Enable exponential moving average tracking of trainable model parameters.',
+    )
+    parser.add_argument(
+        '--ema_decay',
+        type=float,
+        default=0.999,
+        help='EMA decay factor in [0, 1).',
+    )
+    parser.add_argument(
+        '--ema_warmup_steps',
+        type=int,
+        default=300,
+        help='Number of optimizer steps before EMA updates start.',
+    )
+    parser.add_argument(
+        '--ema_eval_only',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='If true, select best epoch using EMA validation metrics when EMA is available.',
+    )
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument(
         '--classifier',
@@ -201,6 +225,10 @@ def add_seedv_args(parser: argparse.ArgumentParser) -> None:
 def validate_args(args: argparse.Namespace) -> None:
     if args.min_lr <= 0:
         raise ValueError('--min_lr must be > 0.')
+    if args.ema_decay < 0.0 or args.ema_decay >= 1.0:
+        raise ValueError('--ema_decay must satisfy 0 <= ema_decay < 1.')
+    if args.ema_warmup_steps < 0:
+        raise ValueError('--ema_warmup_steps must be >= 0.')
     if args.min_lr > args.lr:
         print(
             f"[warn] --min_lr ({args.min_lr}) is higher than --lr ({args.lr}); "
