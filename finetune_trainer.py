@@ -492,6 +492,8 @@ class Trainer(object):
                 'split': str(split),
                 'layer': layer,
                 'shared_context_norm': d.get('attnres_depth_shared_context_norm'),
+                'spatial_summary_norm': d.get('attnres_depth_summary_spatial_norm'),
+                'spectral_summary_norm': d.get('attnres_depth_summary_spectral_norm'),
                 'spatial_context_norm': d.get('attnres_depth_spatial_context_norm'),
                 'spectral_context_norm': d.get('attnres_depth_spectral_context_norm'),
                 'spatial_projected_context_norm': d.get('attnres_depth_proj_spatial_norm'),

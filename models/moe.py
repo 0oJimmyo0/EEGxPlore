@@ -557,36 +557,25 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         if not self.use_attnres_depth_router_concat:
             return None, None
         z = torch.zeros(batch_size, self.attnres_depth_router_dim, device=device, dtype=dtype)
-        ds = z
-        ds_sp = z
-        ds_sc = z
-        if router_context is not None and torch.is_tensor(router_context.get("attnres_depth_summary")):
-            raw = router_context.get("attnres_depth_summary")
+
+        def _coerce_summary(raw: Optional[Tensor]) -> Optional[Tensor]:
+            if not torch.is_tensor(raw):
+                return None
             if raw.dim() == 1:
                 raw = raw.unsqueeze(0)
-            if raw.dim() == 2 and raw.shape[0] == batch_size and raw.shape[1] == self.attnres_depth_router_dim:
-                ds = raw.to(device=device, dtype=dtype)
-        if router_context is not None and torch.is_tensor(router_context.get("attnres_depth_summary_spatial")):
-            raw_sp = router_context.get("attnres_depth_summary_spatial")
-            if raw_sp.dim() == 1:
-                raw_sp = raw_sp.unsqueeze(0)
-            if raw_sp.dim() == 2 and raw_sp.shape[0] == batch_size and raw_sp.shape[1] == self.attnres_depth_router_dim:
-                ds_sp = raw_sp.to(device=device, dtype=dtype)
-            else:
-                ds_sp = ds
-        else:
-            ds_sp = ds
+            if raw.dim() != 2:
+                return None
+            if raw.shape[0] != batch_size or raw.shape[1] != self.attnres_depth_router_dim:
+                return None
+            return raw.to(device=device, dtype=dtype)
 
-        if router_context is not None and torch.is_tensor(router_context.get("attnres_depth_summary_spectral")):
-            raw_sc = router_context.get("attnres_depth_summary_spectral")
-            if raw_sc.dim() == 1:
-                raw_sc = raw_sc.unsqueeze(0)
-            if raw_sc.dim() == 2 and raw_sc.shape[0] == batch_size and raw_sc.shape[1] == self.attnres_depth_router_dim:
-                ds_sc = raw_sc.to(device=device, dtype=dtype)
-            else:
-                ds_sc = ds
-        else:
-            ds_sc = ds
+        shared_summary = _coerce_summary(None if router_context is None else router_context.get("attnres_depth_summary"))
+        spatial_summary = _coerce_summary(None if router_context is None else router_context.get("attnres_depth_summary_spatial"))
+        spectral_summary = _coerce_summary(None if router_context is None else router_context.get("attnres_depth_summary_spectral"))
+
+        # Prefer bank-specific summaries; fall back to shared summary for backward compatibility.
+        ds_sp = spatial_summary if spatial_summary is not None else (shared_summary if shared_summary is not None else z)
+        ds_sc = spectral_summary if spectral_summary is not None else (shared_summary if shared_summary is not None else z)
         return self.attnres_depth_router_proj_spatial(ds_sp), self.attnres_depth_router_proj_spectral(ds_sc)
 
     def _domain_logit_bias(self, batch_size: int, bank: str, device: torch.device) -> Tensor:
@@ -792,12 +781,24 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         depth_summary_cur_epoch = int(cur_epoch)
         depth_summary_unfreeze_epoch = 1
         depth_summary_unfreeze_reached = False
+        depth_summary_spatial_norm = None
+        depth_summary_spectral_norm = None
         if self.use_attnres_depth_router_concat and router_context is not None:
             ds = router_context.get("attnres_depth_summary")
+            ds_sp = router_context.get("attnres_depth_summary_spatial")
+            ds_sc = router_context.get("attnres_depth_summary_spectral")
+            if not torch.is_tensor(ds):
+                ds = ds_sp if torch.is_tensor(ds_sp) else ds_sc
             if torch.is_tensor(ds):
                 dsf = ds.detach().float()
                 depth_summary_mean = float(dsf.mean().item())
                 depth_summary_std = float(dsf.std(unbiased=False).item())
+                if torch.is_tensor(ds_sp):
+                    dsf_sp = ds_sp.detach().float()
+                    depth_summary_spatial_norm = float(dsf_sp.norm(dim=-1).mean().item())
+                if torch.is_tensor(ds_sc):
+                    dsf_sc = ds_sc.detach().float()
+                    depth_summary_spectral_norm = float(dsf_sc.norm(dim=-1).mean().item())
                 if isinstance(router_context.get("attnres_depth_summary_mode"), str):
                     depth_summary_mode = str(router_context.get("attnres_depth_summary_mode"))
                 if isinstance(router_context.get("attnres_depth_context_mode"), str):
@@ -1218,6 +1219,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "attnres_depth_spectral_context_norm": depth_spectral_context_norm,
             "attnres_depth_summary_mean": depth_summary_mean,
             "attnres_depth_summary_std": depth_summary_std,
+            "attnres_depth_summary_spatial_norm": depth_summary_spatial_norm,
+            "attnres_depth_summary_spectral_norm": depth_summary_spectral_norm,
             "attnres_depth_summary_mode": depth_summary_mode,
             "attnres_depth_probe_mlp_for_router": depth_probe_mlp_for_router,
             "attnres_depth_proj_spatial_norm": depth_proj_spatial_norm,
@@ -1449,6 +1452,8 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"layer_counts={diag.get('attnres_depth_block_layer_counts', 'NA')}  "
             f"mean={diag.get('attnres_depth_summary_mean', 0.0) if diag.get('attnres_depth_summary_mean') is not None else 'NA'}  "
             f"std={diag.get('attnres_depth_summary_std', 0.0) if diag.get('attnres_depth_summary_std') is not None else 'NA'}  "
+            f"summary_norm_sp={diag.get('attnres_depth_summary_spatial_norm', 'NA')}  "
+            f"summary_norm_sc={diag.get('attnres_depth_summary_spectral_norm', 'NA')}  "
             f"mode={diag.get('attnres_depth_summary_mode', 'NA')}  "
             f"probe_mlp={diag.get('attnres_depth_probe_mlp_for_router', False)}  "
             f"shared_ctx_norm={diag.get('attnres_depth_shared_context_norm', 'NA')}  "
