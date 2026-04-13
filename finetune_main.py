@@ -126,7 +126,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         '--moe_attnres_depth_block_separation_coef',
         type=float,
         default=0.0,
-        help='Mild anti-collapse regularizer coefficient: maximize JS divergence between spatial/spectral depth block distributions.',
+        help='Mild anti-collapse regularizer coefficient for hinge penalty on depth-block JS separation.',
+    )
+    parser.add_argument(
+        '--moe_attnres_depth_block_separation_target_js',
+        type=float,
+        default=0.03,
+        help='Target JS floor for hinge-style depth block separation regularizer.',
     )
     parser.add_argument(
         '--moe_attnres_depth_summary_grad_mode',
@@ -245,6 +251,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError('--moe_attnres_depth_router_norm_eps must be > 0.')
     if args.moe_attnres_depth_block_separation_coef < 0:
         raise ValueError('--moe_attnres_depth_block_separation_coef must be >= 0.')
+    if args.moe_attnres_depth_block_separation_target_js < 0:
+        raise ValueError('--moe_attnres_depth_block_separation_target_js must be >= 0.')
     typed_block_modes = {'block_shared_typed_proj', 'dual_query_block_typed_proj'}
     if (
         args.moe_attnres_depth_context_mode in typed_block_modes
