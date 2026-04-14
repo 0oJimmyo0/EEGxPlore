@@ -2,8 +2,8 @@
 #SBATCH --job-name=SEEDV_TUNE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:a100:1
+#SBATCH --partition=gpu_devel
+#SBATCH --gres=gpu:a40:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -51,7 +51,7 @@ RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
 
 CUDA_ID="${CUDA_ID:-0}"
-EPOCHS="${EPOCHS:-40}"
+EPOCHS="${EPOCHS:-25}"
 SEED_LIST="${SEED_LIST:-42}"  # space/comma separated
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
@@ -65,8 +65,8 @@ DROPOUT="${DROPOUT:-0.1}"
 CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
 USE_EMA="${USE_EMA:-1}"
-EMA_DECAY="${EMA_DECAY:-0.999}"
-EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-300}"
+EMA_DECAY="${EMA_DECAY:-0.9995}"
+EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-1000}"
 EMA_EVAL_ONLY="${EMA_EVAL_ONLY:-1}"
 
 RUN_MODE="${RUN_MODE:-custom}"  # dense | selective | custom

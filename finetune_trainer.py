@@ -195,6 +195,7 @@ class Trainer(object):
         self.test_eval = Evaluator(params, self.data_loader['test'])
 
         self.model = model.cuda()
+        self._materialize_lazy_modules_from_train_batch()
         if self.params.downstream_dataset in ['FACED', 'SEED-V']:
             self.criterion = CrossEntropyLoss(label_smoothing=self.params.label_smoothing).cuda()
         else:
@@ -280,11 +281,56 @@ class Trainer(object):
         self._ema_decay = float(getattr(self.params, 'ema_decay', 0.999))
         self._ema_requested = bool(getattr(self.params, 'use_ema', False))
         if self._ema_requested:
+            self._ema_helper = EMAHelper(self.model, decay=self._ema_decay)
             print(
                 f"[EMA] enabled decay={self._ema_decay:.6f} warmup_steps={self._ema_warmup_steps} "
-                f"eval_only={self._ema_eval_only} (lazy-init after warmup)",
+                f"eval_only={self._ema_eval_only} trackable_params={len(self._ema_helper.shadow)}",
                 flush=True,
             )
+
+    def _materialize_lazy_modules_from_train_batch(self) -> None:
+        def _collect_uninitialized_names() -> List[str]:
+            names: List[str] = []
+            for n, p in self.model.named_parameters():
+                if _is_uninitialized_tensor(p):
+                    names.append(f"param:{n}")
+            for n, b in self.model.named_buffers():
+                if _is_uninitialized_tensor(b):
+                    names.append(f"buffer:{n}")
+            return names
+
+        uninitialized_before = _collect_uninitialized_names()
+        if len(uninitialized_before) == 0:
+            return
+
+        print(
+            f"[lazy-init] materializing {len(uninitialized_before)} tensors from one train batch",
+            flush=True,
+        )
+        try:
+            batch = next(iter(self.data_loader['train']))
+        except StopIteration as e:
+            raise RuntimeError(
+                "Cannot materialize lazy modules: training loader is empty."
+            ) from e
+
+        x = batch[0].cuda(non_blocking=True)
+        batch_meta = _move_meta_to_cuda(batch[3]) if len(batch) >= 4 and isinstance(batch[3], dict) else None
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            _ = _forward_with_optional_meta(self.model, x, batch_meta)
+        if was_training:
+            self.model.train()
+
+        uninitialized_after = _collect_uninitialized_names()
+        if len(uninitialized_after) > 0:
+            raise RuntimeError(
+                "Lazy module materialization incomplete; still uninitialized: "
+                + ", ".join(uninitialized_after[:10])
+                + (" ..." if len(uninitialized_after) > 10 else "")
+            )
+        print("[lazy-init] done", flush=True)
 
     def _ema_enabled(self) -> bool:
         return self._ema_helper is not None
@@ -300,28 +346,12 @@ class Trainer(object):
                 flush=True,
             )
 
-    def _maybe_init_ema_helper(self) -> None:
-        if not self._ema_requested or self._ema_helper is not None:
-            return
-        self._ema_helper = EMAHelper(self.model, decay=self._ema_decay)
-        print(
-            f"[EMA] initialized trackable_params={len(self._ema_helper.shadow)} at global_step={self._global_step}",
-            flush=True,
-        )
-        if len(self._ema_helper.shadow) == 0:
-            print(
-                "[EMA] warning: no trackable parameters found at initialization; "
-                "EMA evaluation will remain unavailable.",
-                flush=True,
-            )
-
     def _ema_update_after_step(self) -> None:
         self._global_step += 1
         if not self._ema_requested:
             return
         if self._global_step < self._ema_warmup_steps:
             return
-        self._maybe_init_ema_helper()
         if not self._ema_enabled():
             return
         self._ema_helper.update(self.model)
