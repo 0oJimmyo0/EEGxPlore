@@ -39,8 +39,10 @@ class Evaluator:
             pred = _forward_with_optional_meta(model, x, batch_meta)
             pred_y = torch.max(pred, dim=-1)[1]
 
-            truths += y.cpu().squeeze().numpy().tolist()
-            preds += pred_y.cpu().squeeze().numpy().tolist()
+            # Flatten across all non-class dimensions so sequence tasks (e.g., ISRUC)
+            # are evaluated on per-epoch labels rather than nested arrays.
+            truths.extend(np.asarray(y.detach().cpu().numpy()).reshape(-1).tolist())
+            preds.extend(np.asarray(pred_y.detach().cpu().numpy()).reshape(-1).tolist())
 
         if epoch_for_log is not None:
             print(f"finished validation loop for epoch {epoch_for_log}", flush=True)

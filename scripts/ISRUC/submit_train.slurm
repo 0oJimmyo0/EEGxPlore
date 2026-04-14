@@ -35,7 +35,7 @@ if [[ ! -d "$DATASET_DIR/seq" || ! -d "$DATASET_DIR/labels" ]]; then
   exit 2
 fi
 
-EPOCHS="${EPOCHS:-40}"
+EPOCHS="${EPOCHS:-30}"
 BATCH_SIZE="${BATCH_SIZE:-16}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
@@ -180,7 +180,7 @@ python "$REPO_DIR/finetune_main.py" \
   --cuda 0 \
   --epochs "$EPOCHS" \
   --batch_size "$BATCH_SIZE" \
-  --lr 2e-4 \
+  --lr 1e-4 \
   --weight_decay 2e-2 \
   --optimizer AdamW \
   --clip_value 1.0 \
