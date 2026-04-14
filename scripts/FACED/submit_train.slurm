@@ -2,8 +2,8 @@
 #SBATCH --job-name=FACED_TUNE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/FACED/out/faced_hier_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/FACED/err/faced_hier_%j.err
-#SBATCH --partition=gpu_devel
-#SBATCH --gres=gpu:a40:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -20,10 +20,23 @@ DATASET="${DATASET:-FACED}"
 DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/FACED}"
 NUM_CLASSES="${NUM_CLASSES:-9}"
 FACED_META_CSV="${FACED_META_CSV:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv}"
+FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
 
-EPOCHS="${EPOCHS:-50}"
+EPOCHS="${EPOCHS:-40}"
+LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
+CLASS_WEIGHT_MODE="${CLASS_WEIGHT_MODE:-none}"  # none | inv_freq_clip | effective_num
+CLASS_WEIGHT_CLIP_MIN="${CLASS_WEIGHT_CLIP_MIN:-0.75}"
+CLASS_WEIGHT_CLIP_MAX="${CLASS_WEIGHT_CLIP_MAX:-1.5}"
+EFFECTIVE_NUM_BETA="${EFFECTIVE_NUM_BETA:-0.999}"
+USE_EMA="${USE_EMA:-1}"
+EMA_DECAY="${EMA_DECAY:-0.999}"
+EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-1000}"
+EMA_EVAL_ONLY="${EMA_EVAL_ONLY:-1}"
+
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-pre_attn}"
 DEPTH_ROUTER="${DEPTH_ROUTER:-on}"
+DEPTH_CONTEXT_MODE="${DEPTH_CONTEXT_MODE:-dual_query_block_typed_proj}"  # compact_shared | block_shared_typed_proj | dual_query_block_typed_proj
+DEPTH_BLOCK_COUNT="${DEPTH_BLOCK_COUNT:-4}"
 if [[ -z "${DEPTH_ROUTER_DIM:-}" ]]; then
   if [[ "$ATTNRES_VARIANT" == "pre_attn" ]]; then
     DEPTH_ROUTER_DIM=15
@@ -35,7 +48,7 @@ ROUTER_ARCH="${ROUTER_ARCH:-mlp}"
 ROUTER_MLP_HIDDEN="${ROUTER_MLP_HIDDEN:-128}"
 DEPTH_SUMMARY_MODE="${DEPTH_SUMMARY_MODE:-attn_delta4}"
 DEPTH_PROBE_MLP_FOR_ROUTER="${DEPTH_PROBE_MLP_FOR_ROUTER:-on}"
-DEPTH_SUMMARY_GRAD_MODE="${DEPTH_SUMMARY_GRAD_MODE:-none}"
+DEPTH_SUMMARY_GRAD_MODE="${DEPTH_SUMMARY_GRAD_MODE:-detached}"
 DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-16}"
 ABLATION_GROUP="${ABLATION_GROUP:-grad}"
 ABLATION_VALUE="${ABLATION_VALUE:-trainable}"
@@ -100,11 +113,38 @@ RUN_NAME="${RUN_NAME:-${SLURM_JOB_ID:-manual}_A1_${ABLATION_TAG}_${ATTNRES_VARIA
 DEPTH_ROUTER_ARGS=()
 if [[ "$DEPTH_ROUTER" == "on" ]]; then
   DEPTH_ROUTER_ARGS+=(--moe_use_attnres_depth_router_features --moe_attnres_depth_router_dim "$DEPTH_ROUTER_DIM")
-  DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode "$DEPTH_SUMMARY_MODE")
-  if [[ "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
-    DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_probe_mlp_for_router)
+  DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_context_mode "$DEPTH_CONTEXT_MODE")
+  DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_block_count "$DEPTH_BLOCK_COUNT")
+  if [[ "$DEPTH_CONTEXT_MODE" == "block_shared_typed_proj" || "$DEPTH_CONTEXT_MODE" == "dual_query_block_typed_proj" ]]; then
+    DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode auto)
+  else
+    DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_summary_mode "$DEPTH_SUMMARY_MODE")
+    if [[ "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
+      DEPTH_ROUTER_ARGS+=(--moe_attnres_depth_probe_mlp_for_router)
+    fi
   fi
 fi
+
+EMA_ARGS=()
+if [[ "$USE_EMA" == "1" ]]; then
+  EMA_ARGS+=(--use_ema)
+else
+  EMA_ARGS+=(--no-use_ema)
+fi
+EMA_ARGS+=(--ema_decay "$EMA_DECAY")
+EMA_ARGS+=(--ema_warmup_steps "$EMA_WARMUP_STEPS")
+if [[ "$EMA_EVAL_ONLY" == "1" ]]; then
+  EMA_ARGS+=(--ema_eval_only)
+else
+  EMA_ARGS+=(--no-ema_eval_only)
+fi
+
+CLASS_WEIGHT_ARGS=(
+  --class_weight_mode "$CLASS_WEIGHT_MODE"
+  --class_weight_clip_min "$CLASS_WEIGHT_CLIP_MIN"
+  --class_weight_clip_max "$CLASS_WEIGHT_CLIP_MAX"
+  --effective_num_beta "$EFFECTIVE_NUM_BETA"
+)
 
 mkdir -p "$MODEL_DIR" "$ROUTING_EXPORT_DIR"
 
@@ -112,8 +152,10 @@ echo "[slurm] running A1_base only | epochs=$EPOCHS" >&2
 echo "[slurm] dataset=$DATASET num_classes=$NUM_CLASSES" >&2
 echo "[slurm] ablation_group=$ABLATION_GROUP ablation_value=${ABLATION_VALUE:-NA}" >&2
 echo "[slurm] attnres_variant=$ATTNRES_VARIANT depth_router=$DEPTH_ROUTER dispatch=$ROUTER_DISPATCH_MODE" >&2
-echo "[slurm] depth_summary_mode=$DEPTH_SUMMARY_MODE probe_mlp_for_router=$DEPTH_PROBE_MLP_FOR_ROUTER" >&2
+echo "[slurm] depth_context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary_mode=$DEPTH_SUMMARY_MODE probe_mlp_for_router=$DEPTH_PROBE_MLP_FOR_ROUTER" >&2
 echo "[slurm] depth_summary_grad_mode=$DEPTH_SUMMARY_GRAD_MODE depth_summary_unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
+echo "[slurm] ema(use/decay/warmup/eval_only)=($USE_EMA/$EMA_DECAY/$EMA_WARMUP_STEPS/$EMA_EVAL_ONLY)" >&2
+echo "[slurm] loss(label_smoothing/class_weight_mode/clip_min/clip_max/effective_num_beta)=($LABEL_SMOOTHING/$CLASS_WEIGHT_MODE/$CLASS_WEIGHT_CLIP_MIN/$CLASS_WEIGHT_CLIP_MAX/$EFFECTIVE_NUM_BETA)" >&2
 echo "[slurm] router_temp=$ROUTER_TEMPERATURE entropy=$ROUTER_ENTROPY_COEF bal_kl=$ROUTER_BALANCE_KL_COEF" >&2
 echo "[slurm] model_dir=$MODEL_DIR" >&2
 echo "[slurm] routing_export_dir=$ROUTING_EXPORT_DIR | run_name=$RUN_NAME" >&2
@@ -133,11 +175,12 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/finetune_main.
   --datasets_dir "$DATASET_DIR" \
   --num_of_classes "$NUM_CLASSES" \
   --model_dir "$MODEL_DIR" \
-  --label_smoothing 0.05 \
+  --label_smoothing "$LABEL_SMOOTHING" \
   --num_workers 4 \
   --attnres_variant "$ATTNRES_VARIANT" \
   --attnres_start_layer 0 \
   --use_pretrained_weights \
+  --foundation_dir "$FOUNDATION_DIR" \
   --moe \
   --moe_diagnostics \
   --moe_num_layers 1 \
@@ -160,5 +203,7 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/finetune_main.
   --routing_export_splits val,test \
   --faced_meta_csv "$FACED_META_CSV" \
   --routing_run_name "$RUN_NAME" \
+  "${EMA_ARGS[@]}" \
+  "${CLASS_WEIGHT_ARGS[@]}" \
   --no-tqdm 
 

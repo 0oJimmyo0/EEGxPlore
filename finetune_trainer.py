@@ -197,7 +197,18 @@ class Trainer(object):
         self.model = model.cuda()
         self._materialize_lazy_modules_from_train_batch()
         if self.params.downstream_dataset in ['FACED', 'SEED-V']:
-            self.criterion = CrossEntropyLoss(label_smoothing=self.params.label_smoothing).cuda()
+            class_weights = self._build_class_weights_from_train_split()
+            label_smoothing = float(getattr(self.params, 'label_smoothing', 0.0))
+            if class_weights is not None and label_smoothing > 0.05:
+                print(
+                    f"[loss] weighted CE active with label_smoothing={label_smoothing:.4f}. "
+                    "Use a smaller --label_smoothing explicitly if you want milder smoothing.",
+                    flush=True,
+                )
+            self.criterion = CrossEntropyLoss(
+                weight=class_weights,
+                label_smoothing=label_smoothing,
+            ).cuda()
         else:
             raise ValueError(
                 f"Unsupported downstream_dataset={self.params.downstream_dataset}. "
@@ -287,6 +298,58 @@ class Trainer(object):
                 f"eval_only={self._ema_eval_only} trackable_params={len(self._ema_helper.shadow)}",
                 flush=True,
             )
+
+    def _train_class_counts(self) -> torch.Tensor:
+        num_classes = int(self.params.num_of_classes)
+        counts = torch.zeros(num_classes, dtype=torch.float64)
+        for batch in self.data_loader['train']:
+            y = batch[1]
+            if torch.is_tensor(y):
+                yy = y.detach().to(dtype=torch.long, device='cpu').view(-1)
+            else:
+                yy = torch.as_tensor(y, dtype=torch.long).view(-1)
+            valid = (yy >= 0) & (yy < num_classes)
+            if bool(valid.any()):
+                counts += torch.bincount(yy[valid], minlength=num_classes).to(torch.float64)
+        return counts
+
+    def _build_class_weights_from_train_split(self) -> Optional[torch.Tensor]:
+        mode = str(getattr(self.params, 'class_weight_mode', 'none')).strip().lower()
+        if mode == 'none':
+            print('[loss] class_weight_mode=none (baseline CE)', flush=True)
+            return None
+
+        counts = self._train_class_counts()
+        if float(counts.sum().item()) <= 0:
+            raise RuntimeError('Class-weight computation failed: training split has zero counted labels.')
+
+        missing = torch.where(counts <= 0)[0].tolist()
+        safe_counts = torch.clamp(counts, min=1.0)
+
+        if mode == 'inv_freq_clip':
+            weights = safe_counts.sum() / (safe_counts * float(len(safe_counts)))
+            weights = weights / torch.mean(weights)
+            clip_min = float(getattr(self.params, 'class_weight_clip_min', 0.75))
+            clip_max = float(getattr(self.params, 'class_weight_clip_max', 1.5))
+            weights = torch.clamp(weights, min=clip_min, max=clip_max)
+        elif mode == 'effective_num':
+            beta = float(getattr(self.params, 'effective_num_beta', 0.999))
+            beta_tensor = torch.full_like(safe_counts, beta)
+            effective_num = 1.0 - torch.pow(beta_tensor, safe_counts)
+            weights = (1.0 - beta) / effective_num
+            weights = weights / torch.mean(weights)
+        else:
+            raise ValueError(f'Unsupported class_weight_mode={mode!r}')
+
+        print(f"[loss] class_weight_mode={mode}", flush=True)
+        print(f"[loss] train_class_counts={counts.to(dtype=torch.long).tolist()}", flush=True)
+        if missing:
+            print(
+                f"[loss] warning: missing classes in train split={missing}; used count=1 fallback for weight computation.",
+                flush=True,
+            )
+        print(f"[loss] class_weights={weights.to(dtype=torch.float32).tolist()}", flush=True)
+        return weights.to(dtype=torch.float32)
 
     def _materialize_lazy_modules_from_train_batch(self) -> None:
         def _collect_uninitialized_names() -> List[str]:

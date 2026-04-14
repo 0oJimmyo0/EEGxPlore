@@ -65,6 +65,31 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--label_smoothing', type=float, default=0.1)
     parser.add_argument(
+        '--class_weight_mode',
+        type=str,
+        default='none',
+        choices=['none', 'inv_freq_clip', 'effective_num'],
+        help='Optional class-weighted CE mode. Weights are computed from train split only.',
+    )
+    parser.add_argument(
+        '--class_weight_clip_min',
+        type=float,
+        default=0.75,
+        help='Lower bound for clipped inverse-frequency class weights.',
+    )
+    parser.add_argument(
+        '--class_weight_clip_max',
+        type=float,
+        default=1.5,
+        help='Upper bound for clipped inverse-frequency class weights.',
+    )
+    parser.add_argument(
+        '--effective_num_beta',
+        type=float,
+        default=0.999,
+        help='Beta for effective-number class weights: (1-beta)/(1-beta^n).',
+    )
+    parser.add_argument(
         '--multi_lr',
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -315,6 +340,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError('--moe_router_balance_kl_coef_spatial must be >= 0 or -1 for fallback.')
     if args.moe_router_balance_kl_coef_spectral < 0 and args.moe_router_balance_kl_coef_spectral != -1.0:
         raise ValueError('--moe_router_balance_kl_coef_spectral must be >= 0 or -1 for fallback.')
+    if args.class_weight_clip_min <= 0:
+        raise ValueError('--class_weight_clip_min must be > 0.')
+    if args.class_weight_clip_max < args.class_weight_clip_min:
+        raise ValueError('--class_weight_clip_max must be >= --class_weight_clip_min.')
+    if args.effective_num_beta < 0.0 or args.effective_num_beta >= 1.0:
+        raise ValueError('--effective_num_beta must satisfy 0 <= effective_num_beta < 1.')
 
     for key in ['lr_backbone_mult', 'lr_router_mult', 'lr_expert_mult', 'lr_classifier_mult', 'lr_other_mult']:
         if getattr(args, key) <= 0:

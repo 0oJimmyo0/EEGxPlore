@@ -2,8 +2,8 @@
 #SBATCH --job-name=SEEDV_TUNE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
-#SBATCH --partition=gpu_devel
-#SBATCH --gres=gpu:a40:1
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -52,7 +52,7 @@ FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_r
 
 CUDA_ID="${CUDA_ID:-0}"
 EPOCHS="${EPOCHS:-25}"
-SEED_LIST="${SEED_LIST:-42}"  # space/comma separated
+SEED_LIST="${SEED_LIST:-3407}"  # space/comma separated
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 
@@ -64,6 +64,10 @@ CLIP_VALUE="${CLIP_VALUE:-1.0}"
 DROPOUT="${DROPOUT:-0.1}"
 CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
+CLASS_WEIGHT_MODE="${CLASS_WEIGHT_MODE:-inv_freq_clip}"  # none | inv_freq_clip | effective_num
+CLASS_WEIGHT_CLIP_MIN="${CLASS_WEIGHT_CLIP_MIN:-0.95}"
+CLASS_WEIGHT_CLIP_MAX="${CLASS_WEIGHT_CLIP_MAX:-1.1}"
+EFFECTIVE_NUM_BETA="${EFFECTIVE_NUM_BETA:-0.999}"
 USE_EMA="${USE_EMA:-1}"
 EMA_DECAY="${EMA_DECAY:-0.9995}"
 EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-1000}"
@@ -239,6 +243,12 @@ else
   COMPONENT_LR_ARGS+=(--no-use_component_lr)
 fi
 
+CLASS_WEIGHT_ARGS=()
+CLASS_WEIGHT_ARGS+=(--class_weight_mode "$CLASS_WEIGHT_MODE")
+CLASS_WEIGHT_ARGS+=(--class_weight_clip_min "$CLASS_WEIGHT_CLIP_MIN")
+CLASS_WEIGHT_ARGS+=(--class_weight_clip_max "$CLASS_WEIGHT_CLIP_MAX")
+CLASS_WEIGHT_ARGS+=(--effective_num_beta "$EFFECTIVE_NUM_BETA")
+
 EMA_ARGS=()
 if [[ "$USE_EMA" == "1" ]]; then
   EMA_ARGS+=(--use_ema)
@@ -320,6 +330,7 @@ echo "[seedv-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
 echo "[seedv-slurm] seeds=${SEEDS[*]}" >&2
 echo "[seedv-slurm] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE moe_layers=$MOE_NUM_LAYERS" >&2
 echo "[seedv-slurm] lr=$LR min_lr=$MIN_LR" >&2
+echo "[seedv-slurm] loss(label_smoothing/class_weight_mode/clip_min/clip_max/effective_num_beta)=($LABEL_SMOOTHING/$CLASS_WEIGHT_MODE/$CLASS_WEIGHT_CLIP_MIN/$CLASS_WEIGHT_CLIP_MAX/$EFFECTIVE_NUM_BETA)" >&2
 echo "[seedv-slurm] ema(use/decay/warmup/eval_only)=($USE_EMA/$EMA_DECAY/$EMA_WARMUP_STEPS/$EMA_EVAL_ONLY)" >&2
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2
 echo "[seedv-slurm] router_soft_warmup_epochs=$ROUTER_SOFT_WARMUP_EPOCHS (soft-dispatch runs use warmup blending in MoE router)" >&2
@@ -359,6 +370,7 @@ for SEED in "${SEEDS[@]}"; do
     --no-tqdm \
     "${SPLIT_ARGS[@]}" \
     "${EMA_ARGS[@]}" \
+    "${CLASS_WEIGHT_ARGS[@]}" \
     "${COMPONENT_LR_ARGS[@]}" \
     "${MOE_ARGS[@]}" \
     "${EXTRA_ARGS[@]}"
