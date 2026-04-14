@@ -196,7 +196,7 @@ class Trainer(object):
 
         self.model = model.cuda()
         self._materialize_lazy_modules_from_train_batch()
-        if self.params.downstream_dataset in ['FACED', 'SEED-V']:
+        if self.params.downstream_dataset in ['FACED', 'SEED-V', 'ISRUC']:
             class_weights = self._build_class_weights_from_train_split()
             label_smoothing = float(getattr(self.params, 'label_smoothing', 0.0))
             if class_weights is not None and label_smoothing > 0.05:
@@ -212,7 +212,7 @@ class Trainer(object):
         else:
             raise ValueError(
                 f"Unsupported downstream_dataset={self.params.downstream_dataset}. "
-                "This refactored branch supports FACED and SEED-V only."
+                "This refactored branch supports FACED, SEED-V, and ISRUC only."
             )
 
         self.best_model_states = None

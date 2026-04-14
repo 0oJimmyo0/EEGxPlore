@@ -3,7 +3,7 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gres=gpu:h200:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -64,7 +64,7 @@ CLIP_VALUE="${CLIP_VALUE:-1.0}"
 DROPOUT="${DROPOUT:-0.1}"
 CLASSIFIER="${CLASSIFIER:-all_patch_reps}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
-CLASS_WEIGHT_MODE="${CLASS_WEIGHT_MODE:-inv_freq_clip}"  # none | inv_freq_clip | effective_num
+CLASS_WEIGHT_MODE="${CLASS_WEIGHT_MODE:-none}"  # none | inv_freq_clip | effective_num
 CLASS_WEIGHT_CLIP_MIN="${CLASS_WEIGHT_CLIP_MIN:-0.95}"
 CLASS_WEIGHT_CLIP_MAX="${CLASS_WEIGHT_CLIP_MAX:-1.1}"
 EFFECTIVE_NUM_BETA="${EFFECTIVE_NUM_BETA:-0.999}"
@@ -364,9 +364,9 @@ for SEED in "${SEEDS[@]}"; do
     --num_workers "$NUM_WORKERS" \
     --attnres_variant "$ATTNRES_VARIANT" \
     --attnres_start_layer "$ATTNRES_START_LAYER" \
-    --use_pretrained_weights \
     --foundation_dir "$FOUNDATION_DIR" \
     --routing_run_name "$RUN_RUN_NAME" \
+    --use_pretrained_weights \
     --no-tqdm \
     "${SPLIT_ARGS[@]}" \
     "${EMA_ARGS[@]}" \

@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=FACED_TUNE
-#SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/FACED/out/faced_hier_%j.out
-#SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/FACED/err/faced_hier_%j.err
+#SBATCH --job-name=ISRUC_TUNE
+#SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/ISRUC/out/isruc_hier_%j.out
+#SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/ISRUC/err/isruc_hier_%j.err
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=0-04:00:00
+#SBATCH --time=0-06:00:00
 
 set -euo pipefail
 
@@ -16,19 +16,34 @@ module load CUDA/12.6.3
 module load miniconda/24.3.0
 conda activate cbramod
 
-DATASET="${DATASET:-FACED}"
-DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/FACED}"
-NUM_CLASSES="${NUM_CLASSES:-9}"
-FACED_META_CSV="${FACED_META_CSV:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv}"
+REPO_DIR="/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore"
+LOG_ROOT="$REPO_DIR/logs/ISRUC"
+mkdir -p "$LOG_ROOT/out" "$LOG_ROOT/err"
+
+DATASET="${DATASET:-ISRUC}"
+if [[ "$DATASET" != "ISRUC" ]]; then
+  echo "[isruc-slurm] DATASET must be ISRUC (got: $DATASET)" >&2
+  exit 2
+fi
+
+DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/ISRUC/precessed_filter_35}"
+NUM_CLASSES="${NUM_CLASSES:-5}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
 
-# Baseline defaults aligned to faced_hier_1465030 (stable best run).
+if [[ ! -d "$DATASET_DIR/seq" || ! -d "$DATASET_DIR/labels" ]]; then
+  echo "[isruc-slurm] expected ISRUC layout missing under $DATASET_DIR (need seq/ and labels/)" >&2
+  exit 2
+fi
+
 EPOCHS="${EPOCHS:-40}"
+BATCH_SIZE="${BATCH_SIZE:-16}"
+NUM_WORKERS="${NUM_WORKERS:-4}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.05}"
 CLASS_WEIGHT_MODE="${CLASS_WEIGHT_MODE:-none}"  # none | inv_freq_clip | effective_num
 CLASS_WEIGHT_CLIP_MIN="${CLASS_WEIGHT_CLIP_MIN:-0.75}"
 CLASS_WEIGHT_CLIP_MAX="${CLASS_WEIGHT_CLIP_MAX:-1.5}"
 EFFECTIVE_NUM_BETA="${EFFECTIVE_NUM_BETA:-0.999}"
+
 USE_EMA="${USE_EMA:-1}"
 EMA_DECAY="${EMA_DECAY:-0.999}"
 EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-1000}"
@@ -50,9 +65,8 @@ ROUTER_MLP_HIDDEN="${ROUTER_MLP_HIDDEN:-128}"
 DEPTH_SUMMARY_MODE="${DEPTH_SUMMARY_MODE:-attn_delta4}"
 DEPTH_PROBE_MLP_FOR_ROUTER="${DEPTH_PROBE_MLP_FOR_ROUTER:-on}"
 DEPTH_SUMMARY_GRAD_MODE="${DEPTH_SUMMARY_GRAD_MODE:-detached}"
-DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-16}"
-ABLATION_GROUP="${ABLATION_GROUP:-none}"
-ABLATION_VALUE="${ABLATION_VALUE:-}"
+DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-4}"
+
 ROUTER_DISPATCH_MODE="${ROUTER_DISPATCH_MODE:-soft}"
 ROUTER_TEMPERATURE="${ROUTER_TEMPERATURE:-1.5}"
 ROUTER_ENTROPY_COEF="${ROUTER_ENTROPY_COEF:-0.005}"
@@ -62,54 +76,62 @@ ROUTER_JITTER_STD="${ROUTER_JITTER_STD:-0.02}"
 ROUTER_JITTER_FINAL_STD="${ROUTER_JITTER_FINAL_STD:-0.005}"
 ROUTER_JITTER_ANNEAL_EPOCHS="${ROUTER_JITTER_ANNEAL_EPOCHS:-30}"
 ROUTER_SOFT_WARMUP_EPOCHS="${ROUTER_SOFT_WARMUP_EPOCHS:-15}"
-MODEL_DIR="${MODEL_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/FACED_typed_moe_A1_A1_base}"
-ROUTING_EXPORT_DIR="${ROUTING_EXPORT_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/routing_record_dir/run_A1_A1_base_${SLURM_JOB_ID:-manual}}"
 
+ABLATION_GROUP="${ABLATION_GROUP:-none}"  # none | ema | grad | context
+ABLATION_VALUE="${ABLATION_VALUE:-}"
 ABLATION_TAG="stable"
 case "$ABLATION_GROUP" in
   none)
     ;;
-  grad)
-    if [[ -z "$ABLATION_VALUE" ]]; then
-      echo "[slurm] ABLATION_GROUP=grad requires ABLATION_VALUE in {detached,delayed_unfreeze,trainable}" >&2
-      exit 2
-    fi
+  ema)
     case "$ABLATION_VALUE" in
-      detached|delayed_unfreeze|trainable)
-        DEPTH_SUMMARY_MODE="attn_delta4"
-        DEPTH_SUMMARY_GRAD_MODE="$ABLATION_VALUE"
-        ABLATION_TAG="grad_${ABLATION_VALUE}"
+      on)
+        USE_EMA=1
+        ABLATION_TAG="ema_on"
+        ;;
+      off)
+        USE_EMA=0
+        ABLATION_TAG="ema_off"
         ;;
       *)
-        echo "[slurm] invalid ABLATION_VALUE for grad: $ABLATION_VALUE" >&2
+        echo "[isruc-slurm] ABLATION_GROUP=ema requires ABLATION_VALUE in {on,off}" >&2
         exit 2
         ;;
     esac
     ;;
-  content)
-    if [[ -z "$ABLATION_VALUE" ]]; then
-      echo "[slurm] ABLATION_GROUP=content requires ABLATION_VALUE in {attn_delta4,attn_mlp_balanced,attn_mlp_latemix}" >&2
-      exit 2
-    fi
+  grad)
     case "$ABLATION_VALUE" in
-      attn_delta4|attn_mlp_balanced|attn_mlp_latemix)
-        DEPTH_SUMMARY_MODE="$ABLATION_VALUE"
-        DEPTH_SUMMARY_GRAD_MODE="detached"
-        ABLATION_TAG="content_${ABLATION_VALUE}"
+      detached|delayed_unfreeze|trainable)
+        DEPTH_SUMMARY_GRAD_MODE="$ABLATION_VALUE"
+        ABLATION_TAG="grad_${ABLATION_VALUE}"
         ;;
       *)
-        echo "[slurm] invalid ABLATION_VALUE for content: $ABLATION_VALUE" >&2
+        echo "[isruc-slurm] ABLATION_GROUP=grad requires ABLATION_VALUE in {detached,delayed_unfreeze,trainable}" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  context)
+    case "$ABLATION_VALUE" in
+      compact_shared|block_shared_typed_proj|dual_query_block_typed_proj)
+        DEPTH_CONTEXT_MODE="$ABLATION_VALUE"
+        ABLATION_TAG="context_${ABLATION_VALUE}"
+        ;;
+      *)
+        echo "[isruc-slurm] ABLATION_GROUP=context requires ABLATION_VALUE in {compact_shared,block_shared_typed_proj,dual_query_block_typed_proj}" >&2
         exit 2
         ;;
     esac
     ;;
   *)
-    echo "[slurm] invalid ABLATION_GROUP: $ABLATION_GROUP (expected: none|grad|content)" >&2
+    echo "[isruc-slurm] invalid ABLATION_GROUP: $ABLATION_GROUP (expected: none|ema|grad|context)" >&2
     exit 2
     ;;
 esac
 
-RUN_NAME="${RUN_NAME:-${SLURM_JOB_ID:-manual}_A1_${ABLATION_TAG}_${ATTNRES_VARIANT}_${DEPTH_ROUTER}}"
+MODEL_DIR="${MODEL_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/ISRUC_typed_moe_A1_base}"
+RUN_NAME="${RUN_NAME:-${SLURM_JOB_ID:-manual}_isruc_${ABLATION_TAG}_${ATTNRES_VARIANT}_${DEPTH_ROUTER}}"
+mkdir -p "$MODEL_DIR"
 
 DEPTH_ROUTER_ARGS=()
 if [[ "$DEPTH_ROUTER" == "on" ]]; then
@@ -147,25 +169,17 @@ CLASS_WEIGHT_ARGS=(
   --effective_num_beta "$EFFECTIVE_NUM_BETA"
 )
 
-mkdir -p "$MODEL_DIR" "$ROUTING_EXPORT_DIR"
+echo "[isruc-slurm] dataset=$DATASET dir=$DATASET_DIR num_classes=$NUM_CLASSES" >&2
+echo "[isruc-slurm] ablation_group=$ABLATION_GROUP ablation_value=${ABLATION_VALUE:-NA} ablation_tag=$ABLATION_TAG" >&2
+echo "[isruc-slurm] depth_context_mode=$DEPTH_CONTEXT_MODE depth_summary_grad_mode=$DEPTH_SUMMARY_GRAD_MODE" >&2
+echo "[isruc-slurm] ema(use/decay/warmup/eval_only)=($USE_EMA/$EMA_DECAY/$EMA_WARMUP_STEPS/$EMA_EVAL_ONLY)" >&2
+echo "[isruc-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
 
-echo "[slurm] running A1_base only | epochs=$EPOCHS" >&2
-echo "[slurm] dataset=$DATASET num_classes=$NUM_CLASSES" >&2
-echo "[slurm] ablation_group=$ABLATION_GROUP ablation_value=${ABLATION_VALUE:-NA}" >&2
-echo "[slurm] attnres_variant=$ATTNRES_VARIANT depth_router=$DEPTH_ROUTER dispatch=$ROUTER_DISPATCH_MODE" >&2
-echo "[slurm] depth_context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary_mode=$DEPTH_SUMMARY_MODE probe_mlp_for_router=$DEPTH_PROBE_MLP_FOR_ROUTER" >&2
-echo "[slurm] depth_summary_grad_mode=$DEPTH_SUMMARY_GRAD_MODE depth_summary_unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
-echo "[slurm] ema(use/decay/warmup/eval_only)=($USE_EMA/$EMA_DECAY/$EMA_WARMUP_STEPS/$EMA_EVAL_ONLY)" >&2
-echo "[slurm] loss(label_smoothing/class_weight_mode/clip_min/clip_max/effective_num_beta)=($LABEL_SMOOTHING/$CLASS_WEIGHT_MODE/$CLASS_WEIGHT_CLIP_MIN/$CLASS_WEIGHT_CLIP_MAX/$EFFECTIVE_NUM_BETA)" >&2
-echo "[slurm] router_temp=$ROUTER_TEMPERATURE entropy=$ROUTER_ENTROPY_COEF bal_kl=$ROUTER_BALANCE_KL_COEF" >&2
-echo "[slurm] model_dir=$MODEL_DIR" >&2
-echo "[slurm] routing_export_dir=$ROUTING_EXPORT_DIR | run_name=$RUN_NAME" >&2
-
-python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/finetune_main.py \
+python "$REPO_DIR/finetune_main.py" \
   --seed 42 \
   --cuda 0 \
   --epochs "$EPOCHS" \
-  --batch_size 32 \
+  --batch_size "$BATCH_SIZE" \
   --lr 2e-4 \
   --weight_decay 2e-2 \
   --optimizer AdamW \
@@ -177,7 +191,7 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/finetune_main.
   --num_of_classes "$NUM_CLASSES" \
   --model_dir "$MODEL_DIR" \
   --label_smoothing "$LABEL_SMOOTHING" \
-  --num_workers 4 \
+  --num_workers "$NUM_WORKERS" \
   --attnres_variant "$ATTNRES_VARIANT" \
   --attnres_start_layer 0 \
   --use_pretrained_weights \
@@ -200,11 +214,7 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/finetune_main.
   --moe_router_jitter_final_std "$ROUTER_JITTER_FINAL_STD" \
   --moe_router_jitter_anneal_epochs "$ROUTER_JITTER_ANNEAL_EPOCHS" \
   --moe_router_soft_warmup_epochs "$ROUTER_SOFT_WARMUP_EPOCHS" \
-  --routing_export_dir "$ROUTING_EXPORT_DIR" \
-  --routing_export_splits val,test \
-  --faced_meta_csv "$FACED_META_CSV" \
   --routing_run_name "$RUN_NAME" \
   "${EMA_ARGS[@]}" \
   "${CLASS_WEIGHT_ARGS[@]}" \
-  --no-tqdm 
-
+  --no-tqdm

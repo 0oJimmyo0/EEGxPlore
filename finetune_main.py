@@ -5,9 +5,9 @@ import random
 import numpy as np
 import torch
 
-from datasets import faced_dataset, seedv_dataset
+from datasets import faced_dataset, isruc_dataset, seedv_dataset
 from finetune_trainer import Trainer
-from models import model_for_faced, model_for_seedv
+from models import model_for_faced, model_for_isruc, model_for_seedv
 
 
 def add_shared_args(parser: argparse.ArgumentParser) -> None:
@@ -57,7 +57,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         ],
     )
 
-    parser.add_argument('--downstream_dataset', type=str, default='FACED', choices=['FACED', 'SEED-V'])
+    parser.add_argument('--downstream_dataset', type=str, default='FACED', choices=['FACED', 'SEED-V', 'ISRUC'])
     parser.add_argument('--datasets_dir', type=str, required=True)
     parser.add_argument('--num_of_classes', type=int, required=True)
     parser.add_argument('--model_dir', type=str, required=True)
@@ -355,6 +355,8 @@ def validate_args(args: argparse.Namespace) -> None:
         print(f"[FACED] warning: expected num_of_classes=9, got {args.num_of_classes}")
     if args.downstream_dataset == 'SEED-V' and args.num_of_classes != 5:
         print(f"[SEED-V] warning: expected num_of_classes=5, got {args.num_of_classes}")
+    if args.downstream_dataset == 'ISRUC' and args.num_of_classes != 5:
+        print(f"[ISRUC] warning: expected num_of_classes=5 for standard sleep staging, got {args.num_of_classes}")
 
 
 def build_dataset(args: argparse.Namespace):
@@ -383,6 +385,15 @@ def build_dataset(args: argparse.Namespace):
 
         return seedv_dataset.LoadDataset(args).get_data_loader()
 
+    if args.downstream_dataset == 'ISRUC':
+        args.return_sample_keys = False
+        args.return_domain_ids = False
+        if args.moe_domain_bias:
+            print('[ISRUC] warning: --moe_domain_bias is ignored; ISRUC loader does not provide domain metadata.')
+        if getattr(args, 'routing_export_dir', ''):
+            print('[ISRUC] warning: routing_export_dir is FACED-only; ISRUC run will skip per-sample routing export.')
+        return isruc_dataset.LoadDataset(args).get_data_loader()
+
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')
 
 
@@ -391,6 +402,8 @@ def build_model(args: argparse.Namespace):
         return model_for_faced.Model(args)
     if args.downstream_dataset == 'SEED-V':
         return model_for_seedv.Model(args)
+    if args.downstream_dataset == 'ISRUC':
+        return model_for_isruc.Model(args)
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')
 
 
@@ -403,7 +416,7 @@ def setup_seed(seed: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='FACED + SEED-V finetuning')
+    parser = argparse.ArgumentParser(description='FACED + SEED-V + ISRUC finetuning')
     add_shared_args(parser)
     add_faced_args(parser)
     add_seedv_args(parser)

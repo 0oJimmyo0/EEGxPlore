@@ -3,7 +3,6 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from utils.util import to_tensor
 import os
-import random
 
 
 
@@ -71,8 +70,6 @@ class LoadDataset(object):
 
     def load_path(self):
         seqs_labels_path_pair = []
-        # subject_nums = os.listdir(self.seqs_dir)
-        # print(subject_nums)
         subject_dirs_seq = []
         subject_dirs_labels = []
         for subject_num in range(1, 101):
@@ -80,15 +77,32 @@ class LoadDataset(object):
             subject_dirs_labels.append(os.path.join(self.labels_dir, f'ISRUC-group1-{subject_num}'))
 
         for subject_seq, subject_label in zip(subject_dirs_seq, subject_dirs_labels):
-            # print(subject_seq, subject_label)
+            if not os.path.isdir(subject_seq):
+                raise FileNotFoundError(f'[ISRUC] missing seq subject dir: {subject_seq}')
+            if not os.path.isdir(subject_label):
+                raise FileNotFoundError(f'[ISRUC] missing label subject dir: {subject_label}')
+
             subject_pairs = []
-            seq_fnames = os.listdir(subject_seq)
-            label_fnames = os.listdir(subject_label)
-            # print(seq_fnames)
+            seq_fnames = sorted(os.listdir(subject_seq))
+            label_fnames = sorted(os.listdir(subject_label))
+
+            if len(seq_fnames) != len(label_fnames):
+                raise RuntimeError(
+                    '[ISRUC] seq/label file count mismatch: '
+                    f'{subject_seq} ({len(seq_fnames)}) vs {subject_label} ({len(label_fnames)})'
+                )
+
             for seq_fname, label_fname in zip(seq_fnames, label_fnames):
+                seq_stem, _ = os.path.splitext(seq_fname)
+                label_stem, _ = os.path.splitext(label_fname)
+                if seq_stem != label_stem:
+                    raise RuntimeError(
+                        '[ISRUC] seq/label filename mismatch in subject pair: '
+                        f'{subject_seq} -> {seq_fname} vs {subject_label} -> {label_fname}'
+                    )
                 subject_pairs.append((os.path.join(subject_seq, seq_fname), os.path.join(subject_label, label_fname)))
             seqs_labels_path_pair.append(subject_pairs)
-        # print(seqs_labels_path_pair)
+
         return seqs_labels_path_pair
 
     def split_dataset(self, seqs_labels_path_pair):
@@ -103,5 +117,5 @@ class LoadDataset(object):
                 val_pairs.extend(seqs_labels_path_pair[i])
             else:
                 test_pairs.extend(seqs_labels_path_pair[i])
-        # print(train_pairs, val_pairs, test_pairs)
+
         return train_pairs, val_pairs, test_pairs
