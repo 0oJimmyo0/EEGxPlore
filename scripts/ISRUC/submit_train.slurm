@@ -51,7 +51,7 @@ EMA_EVAL_ONLY="${EMA_EVAL_ONLY:-1}"
 
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-pre_attn}"
 DEPTH_ROUTER="${DEPTH_ROUTER:-on}"
-DEPTH_CONTEXT_MODE="${DEPTH_CONTEXT_MODE:-compact_shared}"  # compact_shared | block_shared_typed_proj | dual_query_block_typed_proj
+DEPTH_CONTEXT_MODE="${DEPTH_CONTEXT_MODE:-dual_query_block_typed_proj}"  # compact_shared | block_shared_typed_proj | dual_query_block_typed_proj
 DEPTH_BLOCK_COUNT="${DEPTH_BLOCK_COUNT:-4}"
 if [[ -z "${DEPTH_ROUTER_DIM:-}" ]]; then
   if [[ "$ATTNRES_VARIANT" == "pre_attn" ]]; then
@@ -180,7 +180,7 @@ python "$REPO_DIR/finetune_main.py" \
   --cuda 0 \
   --epochs "$EPOCHS" \
   --batch_size "$BATCH_SIZE" \
-  --lr 5e-5 \
+  --lr 3e-5 \
   --weight_decay 2e-2 \
   --optimizer AdamW \
   --clip_value 1.0 \
