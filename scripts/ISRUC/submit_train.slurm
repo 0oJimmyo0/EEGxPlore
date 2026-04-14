@@ -180,7 +180,7 @@ python "$REPO_DIR/finetune_main.py" \
   --cuda 0 \
   --epochs "$EPOCHS" \
   --batch_size "$BATCH_SIZE" \
-  --lr 1e-4 \
+  --lr 5e-5 \
   --weight_decay 2e-2 \
   --optimizer AdamW \
   --clip_value 1.0 \
@@ -214,6 +214,10 @@ python "$REPO_DIR/finetune_main.py" \
   --moe_router_jitter_final_std "$ROUTER_JITTER_FINAL_STD" \
   --moe_router_jitter_anneal_epochs "$ROUTER_JITTER_ANNEAL_EPOCHS" \
   --moe_router_soft_warmup_epochs "$ROUTER_SOFT_WARMUP_EPOCHS" \
+  --moe_uniform_dispatch_warmup_epochs 3 \
+  --moe_shared_blend_warmup_epochs 5 \
+  --moe_shared_blend_start=1.0 \
+  --moe_shared_blend_end=0.0 \
   --routing_run_name "$RUN_NAME" \
   "${EMA_ARGS[@]}" \
   "${CLASS_WEIGHT_ARGS[@]}" \
