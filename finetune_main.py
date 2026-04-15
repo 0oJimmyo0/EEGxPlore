@@ -5,9 +5,9 @@ import random
 import numpy as np
 import torch
 
-from datasets import faced_dataset, isruc_dataset, seedv_dataset
+from datasets import faced_dataset, isruc_dataset, physio_dataset, seedv_dataset
 from finetune_trainer import Trainer
-from models import model_for_faced, model_for_isruc, model_for_seedv
+from models import model_for_faced, model_for_isruc, model_for_physio, model_for_seedv
 
 
 def add_shared_args(parser: argparse.ArgumentParser) -> None:
@@ -57,7 +57,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         ],
     )
 
-    parser.add_argument('--downstream_dataset', type=str, default='FACED', choices=['FACED', 'SEED-V', 'ISRUC'])
+    parser.add_argument('--downstream_dataset', type=str, default='FACED', choices=['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI'])
     parser.add_argument('--datasets_dir', type=str, required=True)
     parser.add_argument('--num_of_classes', type=int, required=True)
     parser.add_argument('--model_dir', type=str, required=True)
@@ -394,6 +394,12 @@ def build_dataset(args: argparse.Namespace):
             print('[ISRUC] warning: routing_export_dir is FACED-only; ISRUC run will skip per-sample routing export.')
         return isruc_dataset.LoadDataset(args).get_data_loader()
 
+    if args.downstream_dataset == 'PhysioNet-MI':
+        args.return_sample_keys = False
+        args.return_domain_ids = False
+        print('[PhysioNet-MI] using physio_dataset.LoadDataset in selective-adaptation finetune pipeline.')
+        return physio_dataset.LoadDataset(args).get_data_loader()
+
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')
 
 
@@ -404,6 +410,9 @@ def build_model(args: argparse.Namespace):
         return model_for_seedv.Model(args)
     if args.downstream_dataset == 'ISRUC':
         return model_for_isruc.Model(args)
+    if args.downstream_dataset == 'PhysioNet-MI':
+        print('[PhysioNet-MI] building model_for_physio.Model')
+        return model_for_physio.Model(args)
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')
 
 
