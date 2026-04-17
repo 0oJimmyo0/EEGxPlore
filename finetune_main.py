@@ -5,9 +5,9 @@ import random
 import numpy as np
 import torch
 
-from datasets import faced_dataset, isruc_dataset, physio_dataset, seedv_dataset
+from datasets import faced_dataset, isruc_dataset, mumtaz_dataset, physio_dataset, seedv_dataset
 from finetune_trainer import Trainer
-from models import model_for_faced, model_for_isruc, model_for_physio, model_for_seedv
+from models import model_for_faced, model_for_isruc, model_for_mumtaz, model_for_physio, model_for_seedv
 
 
 def add_shared_args(parser: argparse.ArgumentParser) -> None:
@@ -57,7 +57,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         ],
     )
 
-    parser.add_argument('--downstream_dataset', type=str, default='FACED', choices=['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI'])
+    parser.add_argument(
+        '--downstream_dataset',
+        type=str,
+        default='FACED',
+        choices=['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI', 'Mumtaz2016'],
+    )
     parser.add_argument('--datasets_dir', type=str, required=True)
     parser.add_argument('--num_of_classes', type=int, required=True)
     parser.add_argument('--model_dir', type=str, required=True)
@@ -211,8 +216,10 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--moe_router_balance_kl_coef_spatial', type=float, default=-1.0)
     parser.add_argument('--moe_router_balance_kl_coef_spectral', type=float, default=-1.0)
     parser.add_argument('--moe_specialist_branch_mode', type=str, default='both', choices=['both', 'spatial_only', 'spectral_only'])
-    parser.add_argument('--moe_router_compact_feature_mode', type=str, default='none', choices=['none', 'eeg_summary', 'psd_summary'])
+    parser.add_argument('--moe_router_compact_feature_mode', type=str, default='eeg_summary', choices=['none', 'eeg_summary', 'psd_summary'])
     parser.add_argument('--moe_router_compact_feature_dim', type=int, default=8)
+    parser.add_argument('--moe_router_compact_warmup_epochs', type=int, default=0)
+    parser.add_argument('--moe_router_compact_gate_init', type=float, default=1.0)
     parser.add_argument('--moe_expert_init_noise_std', type=float, default=0.0)
 
     parser.add_argument('--use_component_lr', action=argparse.BooleanOptionalAction, default=False)
@@ -330,6 +337,10 @@ def validate_args(args: argparse.Namespace) -> None:
             args.moe_attnres_depth_probe_mlp_for_router = False
     if args.moe_router_compact_feature_dim <= 0:
         raise ValueError('--moe_router_compact_feature_dim must be > 0.')
+    if args.moe_router_compact_warmup_epochs < 0:
+        raise ValueError('--moe_router_compact_warmup_epochs must be >= 0.')
+    if args.moe_router_compact_gate_init <= 0:
+        raise ValueError('--moe_router_compact_gate_init must be > 0.')
     if args.moe_expert_init_noise_std < 0:
         raise ValueError('--moe_expert_init_noise_std must be >= 0.')
     if args.moe_router_entropy_coef_spatial < 0 and args.moe_router_entropy_coef_spatial != -1.0:
@@ -357,6 +368,8 @@ def validate_args(args: argparse.Namespace) -> None:
         print(f"[SEED-V] warning: expected num_of_classes=5, got {args.num_of_classes}")
     if args.downstream_dataset == 'ISRUC' and args.num_of_classes != 5:
         print(f"[ISRUC] warning: expected num_of_classes=5 for standard sleep staging, got {args.num_of_classes}")
+    if args.downstream_dataset == 'Mumtaz2016' and args.num_of_classes != 2:
+        print(f"[Mumtaz2016] warning: expected num_of_classes=2 for MDD-vs-control, got {args.num_of_classes}")
 
 
 def build_dataset(args: argparse.Namespace):
@@ -400,6 +413,15 @@ def build_dataset(args: argparse.Namespace):
         print('[PhysioNet-MI] using physio_dataset.LoadDataset in selective-adaptation finetune pipeline.')
         return physio_dataset.LoadDataset(args).get_data_loader()
 
+    if args.downstream_dataset == 'Mumtaz2016':
+        args.return_sample_keys = False
+        args.return_domain_ids = False
+        if args.moe_domain_bias:
+            print('[Mumtaz2016] warning: --moe_domain_bias is ignored; Mumtaz loader does not provide domain metadata.')
+        if getattr(args, 'routing_export_dir', ''):
+            print('[Mumtaz2016] warning: routing_export_dir is FACED-only; Mumtaz run will skip per-sample routing export.')
+        return mumtaz_dataset.LoadDataset(args).get_data_loader()
+
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')
 
 
@@ -413,6 +435,9 @@ def build_model(args: argparse.Namespace):
     if args.downstream_dataset == 'PhysioNet-MI':
         print('[PhysioNet-MI] building model_for_physio.Model')
         return model_for_physio.Model(args)
+    if args.downstream_dataset == 'Mumtaz2016':
+        print('[Mumtaz2016] building model_for_mumtaz.Model')
+        return model_for_mumtaz.Model(args)
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')
 
 
@@ -425,7 +450,7 @@ def setup_seed(seed: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='FACED + SEED-V + ISRUC finetuning')
+    parser = argparse.ArgumentParser(description='FACED + SEED-V + ISRUC + PhysioNet-MI + Mumtaz2016 finetuning')
     add_shared_args(parser)
     add_faced_args(parser)
     add_seedv_args(parser)
@@ -441,7 +466,11 @@ def main() -> None:
     data_loader = build_dataset(args)
     model = build_model(args)
     trainer = Trainer(args, data_loader, model)
-    trainer.train_for_multiclass()
+    if args.downstream_dataset == 'Mumtaz2016' and args.num_of_classes == 2:
+        print('[Mumtaz2016] using binary training loop (AUROC-oriented selection).')
+        trainer.train_for_binaryclass()
+    else:
+        trainer.train_for_multiclass()
     print('Done!!!!!')
 
 

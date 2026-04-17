@@ -72,23 +72,46 @@ class Evaluator:
             if len(batch) >= 4 and isinstance(batch[3], dict):
                 batch_meta = {k: v.cuda(non_blocking=True) for k, v in batch[3].items() if torch.is_tensor(v)}
             pred = _forward_with_optional_meta(model, x, batch_meta)
-            score_y = torch.sigmoid(pred)
-            pred_y = torch.gt(score_y, 0.5).long()
-            truths += y.long().cpu().squeeze().numpy().tolist()
-            preds += pred_y.cpu().squeeze().numpy().tolist()
-            scores += score_y.cpu().numpy().tolist()
+
+            # Support both single-logit (BCE-style) and 2-logit (CE-style) binary heads.
+            if pred.ndim == 1:
+                pos_scores = torch.sigmoid(pred)
+                pred_y = torch.ge(pos_scores, 0.5).long()
+            elif pred.ndim >= 2 and pred.shape[-1] == 1:
+                logits = pred.squeeze(-1)
+                pos_scores = torch.sigmoid(logits)
+                pred_y = torch.ge(pos_scores, 0.5).long()
+            elif pred.ndim >= 2 and pred.shape[-1] == 2:
+                probs = torch.softmax(pred, dim=-1)
+                pos_scores = probs[..., 1]
+                pred_y = torch.argmax(pred, dim=-1).long()
+            else:
+                raise ValueError(
+                    f"Binary evaluator expects model outputs with last dim 1 or 2; got shape={tuple(pred.shape)}"
+                )
+
+            truths.extend(np.asarray(y.long().detach().cpu().numpy()).reshape(-1).tolist())
+            preds.extend(np.asarray(pred_y.detach().cpu().numpy()).reshape(-1).tolist())
+            scores.extend(np.asarray(pos_scores.detach().cpu().numpy()).reshape(-1).tolist())
 
         if epoch_for_log is not None:
             print(f"finished validation loop for epoch {epoch_for_log}", flush=True)
         print("starting confusion matrix / metrics aggregation", flush=True)
 
-        truths = np.array(truths)
-        preds = np.array(preds)
-        scores = np.array(scores)
+        truths = np.asarray(truths, dtype=np.int64)
+        preds = np.asarray(preds, dtype=np.int64)
+        scores = np.asarray(scores, dtype=np.float32)
         acc = balanced_accuracy_score(truths, preds)
-        roc_auc = roc_auc_score(truths, scores)
-        precision, recall, thresholds = precision_recall_curve(truths, scores, pos_label=1)
-        pr_auc = auc(recall, precision)
+
+        if np.unique(truths).size < 2:
+            print('[warn] Binary evaluation has a single class in labels; AUROC/PR-AUC set to NaN.')
+            roc_auc = float('nan')
+            pr_auc = float('nan')
+        else:
+            roc_auc = roc_auc_score(truths, scores)
+            precision, recall, _ = precision_recall_curve(truths, scores, pos_label=1)
+            pr_auc = auc(recall, precision)
+
         cm = confusion_matrix(truths, preds)
         return acc, pr_auc, roc_auc, cm
 

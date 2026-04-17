@@ -196,7 +196,7 @@ class Trainer(object):
 
         self.model = model.cuda()
         self._materialize_lazy_modules_from_train_batch()
-        if self.params.downstream_dataset in ['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI']:
+        if self.params.downstream_dataset in ['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI', 'Mumtaz2016']:
             class_weights = self._build_class_weights_from_train_split()
             label_smoothing = float(getattr(self.params, 'label_smoothing', 0.0))
             if class_weights is not None and label_smoothing > 0.05:
@@ -212,7 +212,7 @@ class Trainer(object):
         else:
             raise ValueError(
                 f"Unsupported downstream_dataset={self.params.downstream_dataset}. "
-                "This refactored branch supports FACED, SEED-V, ISRUC, and PhysioNet-MI only."
+                "This refactored branch supports FACED, SEED-V, ISRUC, PhysioNet-MI, and Mumtaz2016 only."
             )
 
         self.best_model_states = None
@@ -1416,7 +1416,7 @@ class Trainer(object):
     def train_for_binaryclass(self):
         md = self._model_dir()
         acc_best = 0
-        roc_auc_best = 0
+        auroc_best = 0
         pr_auc_best = 0
         cm_best = None
         best_f1_epoch = 0
@@ -1476,17 +1476,17 @@ class Trainer(object):
 
                 try:
                     with torch.no_grad():
-                        acc, pr_auc, roc_auc, cm = self.val_eval.get_metrics_for_binaryclass(
+                        acc, pr_auc, auroc, cm = self.val_eval.get_metrics_for_binaryclass(
                             self.model, epoch_for_log=epoch + 1
                         )
                     _mem_report(f"after_val_binary ep={epoch + 1}", md)
                     print(
-                        "Epoch {} : Training Loss: {:.5f}, acc: {:.5f}, pr_auc: {:.5f}, roc_auc: {:.5f}, LR: {:.5f}, Time elapsed {:.2f} mins".format(
+                        "Epoch {} : Training Loss: {:.5f}, acc: {:.5f}, pr_auc: {:.5f}, auroc: {:.5f}, LR: {:.5f}, Time elapsed {:.2f} mins".format(
                             epoch + 1,
                             np.mean(losses) if losses else float("nan"),
                             acc,
                             pr_auc,
-                            roc_auc,
+                            auroc,
                             lr_cur,
                             (timer() - start_time) / 60
                         )
@@ -1498,7 +1498,8 @@ class Trainer(object):
                         metrics={
                             'balanced_accuracy': float(acc),
                             'pr_auc': float(pr_auc),
-                            'roc_auc': float(roc_auc),
+                            'auroc': float(auroc),
+                            'roc_auc': float(auroc),
                             'lr': float(lr_cur),
                             'loss_mean': float(np.mean(losses) if losses else float('nan')),
                             'lr_groups': lr_by_group,
@@ -1509,22 +1510,22 @@ class Trainer(object):
                     self._export_depth_context_diagnostics(epoch + 1, 'val')
                     print("starting MoE diagnostics", flush=True)
                     self._log_moe_diagnostics()
-                    if roc_auc > roc_auc_best:
-                        print("roc_auc increasing....saving weights !! ")
-                        print("Val Evaluation: acc: {:.5f}, pr_auc: {:.5f}, roc_auc: {:.5f}".format(
+                    if auroc > auroc_best:
+                        print("auroc increasing....saving weights !! ")
+                        print("Val Evaluation: acc: {:.5f}, pr_auc: {:.5f}, auroc: {:.5f}".format(
                             acc,
                             pr_auc,
-                            roc_auc,
+                            auroc,
                         ))
                         best_f1_epoch = epoch + 1
                         acc_best = acc
                         pr_auc_best = pr_auc
-                        roc_auc_best = roc_auc
+                        auroc_best = auroc
                         cm_best = cm
                         self.best_model_states = _state_dict_to_cpu(self.model)
                         est_b = _estimate_state_dict_cpu_bytes(self.best_model_states)
                         print(
-                            f"[checkpoint] best val roc_auc improved -> CPU state_dict ~{est_b / (1024 ** 2):.1f} MiB",
+                            f"[checkpoint] best val auroc improved -> CPU state_dict ~{est_b / (1024 ** 2):.1f} MiB",
                             flush=True,
                         )
                         _mem_report(f"after_best_snapshot_binary ep={epoch + 1}", md)
@@ -1536,7 +1537,7 @@ class Trainer(object):
                 self._epoch_end_gc()
 
             if self.best_model_states is None:
-                print('Warning: val roc_auc never improved; using last epoch weights.')
+                print('Warning: val auroc never improved; using last epoch weights.')
                 self.best_model_states = _state_dict_to_cpu(self.model)
             self._warn_if_ema_never_updated()
             _mem_report("train_binary_done_pre_test", md)
@@ -1544,19 +1545,19 @@ class Trainer(object):
             self.model.load_state_dict(self.best_model_states)
             with torch.no_grad():
                 print("***************************Test************************")
-                acc, pr_auc, roc_auc, cm = self.test_eval.get_metrics_for_binaryclass(self.model)
+                acc, pr_auc, auroc, cm = self.test_eval.get_metrics_for_binaryclass(self.model)
                 print("***************************Test results************************")
                 print(
-                    "Test Evaluation: acc: {:.5f}, pr_auc: {:.5f}, roc_auc: {:.5f}".format(
+                    "Test Evaluation: acc: {:.5f}, pr_auc: {:.5f}, auroc: {:.5f}".format(
                         acc,
                         pr_auc,
-                        roc_auc,
+                        auroc,
                     )
                 )
                 print(cm)
                 if not os.path.isdir(self.params.model_dir):
                     os.makedirs(self.params.model_dir)
-                model_path = self.params.model_dir + "/epoch{}_acc_{:.5f}_pr_{:.5f}_roc_{:.5f}.pth".format(best_f1_epoch, acc, pr_auc, roc_auc)
+                model_path = self.params.model_dir + "/epoch{}_acc_{:.5f}_pr_{:.5f}_auroc_{:.5f}.pth".format(best_f1_epoch, acc, pr_auc, auroc)
                 torch.save(self.model.state_dict(), model_path)
                 print("model save in " + model_path)
         except Exception as e:

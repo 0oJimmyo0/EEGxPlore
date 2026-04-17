@@ -46,7 +46,7 @@ apply_bank_reg_first_try() {
     MOE_ROUTER_ENTROPY_COEF_SPECTRAL="0.01"
   fi
   if [[ "$MOE_ROUTER_BALANCE_KL_COEF_SPATIAL" == "-1.0" ]]; then
-    MOE_ROUTER_BALANCE_KL_COEF_SPATIAL="0.03"
+    MOE_ROUTER_BALANCE_KL_COEF_SPATIAL="0.3"
   fi
   if [[ "$MOE_ROUTER_BALANCE_KL_COEF_SPECTRAL" == "-1.0" ]]; then
     MOE_ROUTER_BALANCE_KL_COEF_SPECTRAL="0.015"
@@ -75,7 +75,7 @@ WEIGHT_DECAY="${WEIGHT_DECAY:-2e-2}"
 USE_EMA="${USE_EMA:-0}"
 EMA_DECAY="${EMA_DECAY:-0.999}"
 EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-1000}"
-EMA_EVAL_ONLY="${EMA_EVAL_ONLY:-1}"
+EMA_EVAL_ONLY="${EMA_EVAL_ONLY:-0}"
 
 # AttnRes + MoE base recipe (best-style downstream defaults).
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-pre_attn}"
@@ -111,11 +111,15 @@ DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-8}"
 ROUTER_TEMPERATURE="${ROUTER_TEMPERATURE:-1.5}"
 ROUTER_ENTROPY_COEF="${ROUTER_ENTROPY_COEF:-0.0}"
 ROUTER_BALANCE_KL_COEF="${ROUTER_BALANCE_KL_COEF:-0.0}"
-ROUTER_Z_LOSS_COEF="${ROUTER_Z_LOSS_COEF:-0.0001}"
+ROUTER_Z_LOSS_COEF="${ROUTER_Z_LOSS_COEF:-1e-4}"
 ROUTER_JITTER_STD="${ROUTER_JITTER_STD:-0.01}"
 ROUTER_JITTER_FINAL_STD="${ROUTER_JITTER_FINAL_STD:-0.003}"
 ROUTER_JITTER_ANNEAL_EPOCHS="${ROUTER_JITTER_ANNEAL_EPOCHS:-20}"
 ROUTER_SOFT_WARMUP_EPOCHS="${ROUTER_SOFT_WARMUP_EPOCHS:-8}"
+COMPACT_FEATURE_MODE="${COMPACT_FEATURE_MODE:-none}"  # none | eeg_summary | psd_summary
+COMPACT_FEATURE_DIM="${COMPACT_FEATURE_DIM:-8}"
+COMPACT_ROUTER_WARMUP_EPOCHS="${COMPACT_ROUTER_WARMUP_EPOCHS:-8}"
+COMPACT_ROUTER_GATE_INIT="${COMPACT_ROUTER_GATE_INIT:-1.0}"
 
 # Bank-specific router regularization switches. Keep -1.0 to fall back to globals.
 MOE_ROUTER_ENTROPY_COEF_SPATIAL="${MOE_ROUTER_ENTROPY_COEF_SPATIAL:--1.0}"
@@ -305,6 +309,7 @@ RUN_TAG_SUFFIX="$REG_LR_TAG"
 if [[ "$ABLATION_GROUP" != "none" ]]; then
   RUN_TAG_SUFFIX="${ABLATION_TAG}_${REG_LR_TAG}"
 fi
+RUN_TAG_SUFFIX="${RUN_TAG_SUFFIX}_compact-${COMPACT_FEATURE_MODE}"
 RUN_NAME="${RUN_NAME:-${SLURM_JOB_ID:-manual}_physio_${RUN_TAG_SUFFIX}_${ATTNRES_VARIANT}_${DEPTH_ROUTER}}"
 mkdir -p "$MODEL_DIR"
 
@@ -317,6 +322,7 @@ echo "[physio-slurm] ema(use/decay/warmup/eval_only)=($USE_EMA/$EMA_DECAY/$EMA_W
 echo "[physio-slurm] reg(global_entropy/global_kl)=($ROUTER_ENTROPY_COEF/$ROUTER_BALANCE_KL_COEF)" >&2
 echo "[physio-slurm] reg(bank_sp_entropy/bank_sc_entropy/bank_sp_kl/bank_sc_kl)=($MOE_ROUTER_ENTROPY_COEF_SPATIAL/$MOE_ROUTER_ENTROPY_COEF_SPECTRAL/$MOE_ROUTER_BALANCE_KL_COEF_SPATIAL/$MOE_ROUTER_BALANCE_KL_COEF_SPECTRAL)" >&2
 echo "[physio-slurm] component_lr=$COMPONENT_LR mults=($LR_BACKBONE_MULT/$LR_ROUTER_MULT/$LR_EXPERT_MULT/$LR_CLASSIFIER_MULT/$LR_OTHER_MULT)" >&2
+echo "[physio-slurm] compact_summary(mode/dim/warmup/gate)=($COMPACT_FEATURE_MODE/$COMPACT_FEATURE_DIM/$COMPACT_ROUTER_WARMUP_EPOCHS/$COMPACT_ROUTER_GATE_INIT)" >&2
 echo "[physio-slurm] depth_summary_mode=$DEPTH_SUMMARY_MODE depth_probe_mlp_for_router=$DEPTH_PROBE_MLP_FOR_ROUTER" >&2
 echo "[physio-slurm] model_dir=$MODEL_DIR run_name=$RUN_NAME" >&2
 
@@ -365,6 +371,10 @@ python "$REPO_DIR/finetune_main.py" \
   --moe_router_jitter_final_std "$ROUTER_JITTER_FINAL_STD" \
   --moe_router_jitter_anneal_epochs "$ROUTER_JITTER_ANNEAL_EPOCHS" \
   --moe_router_soft_warmup_epochs "$ROUTER_SOFT_WARMUP_EPOCHS" \
+  --moe_router_compact_feature_mode "$COMPACT_FEATURE_MODE" \
+  --moe_router_compact_feature_dim "$COMPACT_FEATURE_DIM" \
+  --moe_router_compact_warmup_epochs "$COMPACT_ROUTER_WARMUP_EPOCHS" \
+  --moe_router_compact_gate_init "$COMPACT_ROUTER_GATE_INIT" \
   --moe_uniform_dispatch_warmup_epochs "$MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS" \
   --moe_shared_blend_warmup_epochs "$MOE_SHARED_BLEND_WARMUP_EPOCHS" \
   --moe_shared_blend_start "$MOE_SHARED_BLEND_START" \

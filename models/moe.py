@@ -204,6 +204,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         use_attnres_depth_router_concat: bool = False,
         attnres_depth_router_dim: int = 0,
         eeg_summary_router_dim: int = 0,
+        compact_router_warmup_epochs: int = 0,
+        compact_router_gate_init: float = 1.0,
         router_concat_proj_dim: int = 16,
         linear_router_input_norm: bool = False,
         router_dispatch_mode: str = "hard_capacity",
@@ -276,6 +278,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.use_attnres_depth_router_concat = bool(use_attnres_depth_router_concat)
         self.attnres_depth_router_dim = int(attnres_depth_router_dim)
         self.eeg_summary_router_dim = int(eeg_summary_router_dim)
+        self.compact_router_warmup_epochs = int(max(0, compact_router_warmup_epochs))
+        self.compact_router_gate_init = float(compact_router_gate_init)
         self.router_concat_proj_dim = int(router_concat_proj_dim)
         self.linear_router_input_norm = bool(linear_router_input_norm)
         self.router_dispatch_mode = str(router_dispatch_mode)
@@ -333,6 +337,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             and self.eeg_summary_router_dim <= 0
         ):
             raise ValueError("EEG router concat requires eeg_summary_router_dim > 0")
+        if self.compact_router_gate_init <= 0:
+            raise ValueError("compact_router_gate_init must be > 0")
         if self.use_attnres_depth_router_concat and self.attnres_depth_router_dim <= 0:
             raise ValueError("use_attnres_depth_router_concat=True requires attnres_depth_router_dim > 0")
         self.load_balance_coef = float(load_balance_coef)
@@ -344,6 +350,8 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.subject_summary_router_proj_spectral = None
         self.eeg_summary_router_proj_spatial = None
         self.eeg_summary_router_proj_spectral = None
+        self.eeg_summary_router_gate_spatial = None
+        self.eeg_summary_router_gate_spectral = None
         self.attnres_depth_router_proj_spatial = None
         self.attnres_depth_router_proj_spectral = None
         self.attnres_depth_router_gate_spatial = None
@@ -372,6 +380,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 bias=True,
                 **factory_kwargs,
             )
+            gate_init = max(1e-8, self.compact_router_gate_init)
+            gate_raw_init = math.log(math.expm1(gate_init))
+            self.eeg_summary_router_gate_spatial = nn.Parameter(
+                torch.tensor(gate_raw_init, **factory_kwargs)
+            )
             spatial_extra += self.router_concat_proj_dim
         if self.use_eeg_summary_router_concat_spectral:
             self.eeg_summary_router_proj_spectral = nn.Linear(
@@ -379,6 +392,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                 self.router_concat_proj_dim,
                 bias=True,
                 **factory_kwargs,
+            )
+            gate_init = max(1e-8, self.compact_router_gate_init)
+            gate_raw_init = math.log(math.expm1(gate_init))
+            self.eeg_summary_router_gate_spectral = nn.Parameter(
+                torch.tensor(gate_raw_init, **factory_kwargs)
             )
             spectral_extra += self.router_concat_proj_dim
         if self.use_attnres_depth_router_concat:
@@ -1001,6 +1019,21 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         subj_sp, subj_sc = self._subject_summary_router_features(router_context, b, x.device, base_feat.dtype)
         eeg_sp, eeg_sc = self._eeg_summary_router_features(b, x.device, base_feat.dtype)
         depth_sp, depth_sc = self._attnres_depth_router_features(router_context, b, x.device, base_feat.dtype)
+        compact_path_scale = 1.0
+        compact_router_gate_spatial = None
+        compact_router_gate_spectral = None
+        if (self.use_eeg_summary_router_concat_spatial or self.use_eeg_summary_router_concat_spectral):
+            if self.compact_router_warmup_epochs > 0:
+                if cur_epoch <= 0:
+                    compact_path_scale = 0.0
+                else:
+                    compact_path_scale = min(1.0, float(cur_epoch) / float(self.compact_router_warmup_epochs))
+            if eeg_sp is not None and self.eeg_summary_router_gate_spatial is not None:
+                compact_router_gate_spatial = float(F.softplus(self.eeg_summary_router_gate_spatial).detach().item())
+                eeg_sp = eeg_sp * (compact_path_scale * compact_router_gate_spatial)
+            if eeg_sc is not None and self.eeg_summary_router_gate_spectral is not None:
+                compact_router_gate_spectral = float(F.softplus(self.eeg_summary_router_gate_spectral).detach().item())
+                eeg_sc = eeg_sc * (compact_path_scale * compact_router_gate_spectral)
         depth_path_scale = 1.0
         if self.use_attnres_depth_router_concat and self.router_soft_warmup_epochs > 0:
             if cur_epoch <= 0:
@@ -1370,6 +1403,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "subject_summary_router_concat": bool(self.use_subject_summary_router_concat),
             "eeg_summary_router_concat_spatial": bool(self.use_eeg_summary_router_concat_spatial),
             "eeg_summary_router_concat_spectral": bool(self.use_eeg_summary_router_concat_spectral),
+            "compact_router_warmup_epochs": int(self.compact_router_warmup_epochs),
+            "compact_router_path_scale": float(compact_path_scale),
+            "compact_router_gate_init": float(self.compact_router_gate_init),
+            "compact_router_gate_spatial": compact_router_gate_spatial,
+            "compact_router_gate_spectral": compact_router_gate_spectral,
             "attnres_depth_router_concat": bool(self.use_attnres_depth_router_concat),
             "attnres_depth_router_init": self.attnres_depth_router_init,
             "attnres_depth_router_norm_gate": bool(self.attnres_depth_router_norm_gate),
@@ -1634,6 +1672,13 @@ def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[s
             f"eeg_spatial={diag.get('eeg_summary_router_concat_spatial', False)}  "
             f"eeg_spectral={diag.get('eeg_summary_router_concat_spectral', False)}  "
             f"attnres_depth={diag.get('attnres_depth_router_concat', False)}"
+        ),
+        (
+            f"    compact_summary: scale={diag.get('compact_router_path_scale', 1.0):.4f}  "
+            f"warmup_epochs={diag.get('compact_router_warmup_epochs', 0)}  "
+            f"gate_init={diag.get('compact_router_gate_init', 1.0):.4f}  "
+            f"gate_sp={diag.get('compact_router_gate_spatial', 'NA')}  "
+            f"gate_sc={diag.get('compact_router_gate_spectral', 'NA')}"
         ),
         (
             f"    depth_summary: scale={diag.get('attnres_depth_path_scale', 1.0):.4f}  "
