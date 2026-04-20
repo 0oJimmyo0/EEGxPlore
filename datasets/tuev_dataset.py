@@ -3,10 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from utils.util import to_tensor
 import os
-import random
-import lmdb
 import pickle
-from scipy import signal
 
 
 class CustomDataset(Dataset):
@@ -24,10 +21,10 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx):
         file = self.files[idx]
-        data_dict = pickle.load(open(os.path.join(self.data_dir, file), "rb"))
+        with open(os.path.join(self.data_dir, file), "rb") as f:
+            data_dict = pickle.load(f)
         data = data_dict['signal']
         label = int(data_dict['label'][0]-1)
-        # data = signal.resample(data, 1000, axis=-1)
         data = data.reshape(16, 5, 200)
         return data/100, label
 
@@ -43,16 +40,27 @@ class LoadDataset(object):
         self.datasets_dir = params.datasets_dir
 
     def get_data_loader(self):
-        train_files = os.listdir(os.path.join(self.datasets_dir, "processed_train"))
-        val_files = os.listdir(os.path.join(self.datasets_dir, "processed_eval"))
-        test_files = os.listdir(os.path.join(self.datasets_dir, "processed_test"))
+        processed_root = self._resolve_processed_root(self.datasets_dir)
+        train_dir = os.path.join(processed_root, "processed_train")
+        val_dir = os.path.join(processed_root, "processed_eval")
+        test_dir = os.path.join(processed_root, "processed_test")
 
-        train_set = CustomDataset(os.path.join(self.datasets_dir, "processed_train"), train_files)
-        val_set = CustomDataset(os.path.join(self.datasets_dir, "processed_eval"), val_files)
-        test_set = CustomDataset(os.path.join(self.datasets_dir, "processed_test"), test_files)
+        train_files = sorted([f for f in os.listdir(train_dir) if f.endswith('.pkl')])
+        val_files = sorted([f for f in os.listdir(val_dir) if f.endswith('.pkl')])
+        test_files = sorted([f for f in os.listdir(test_dir) if f.endswith('.pkl')])
 
-        print(len(train_set), len(val_set), len(test_set))
-        print(len(train_set)+len(val_set)+len(test_set))
+        train_set = CustomDataset(train_dir, train_files)
+        val_set = CustomDataset(val_dir, val_files)
+        test_set = CustomDataset(test_dir, test_files)
+
+        num_workers = int(getattr(self.params, 'num_workers', 0))
+        pin_memory = bool(getattr(self.params, 'pin_memory', False))
+        persistent_workers = bool(getattr(self.params, 'persistent_workers', False) and num_workers > 0)
+
+        print(
+            f"[TUEV split] root={processed_root} train={len(train_set)} val={len(val_set)} "
+            f"test={len(test_set)} total={len(train_set) + len(val_set) + len(test_set)}"
+        )
 
         data_loader = {
             'train': DataLoader(
@@ -60,18 +68,46 @@ class LoadDataset(object):
                 batch_size=self.params.batch_size,
                 collate_fn=train_set.collate,
                 shuffle=True,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers,
             ),
             'val': DataLoader(
                 val_set,
                 batch_size=self.params.batch_size,
                 collate_fn=val_set.collate,
                 shuffle=False,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers,
             ),
             'test': DataLoader(
                 test_set,
                 batch_size=self.params.batch_size,
                 collate_fn=test_set.collate,
                 shuffle=False,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers,
             ),
         }
         return data_loader
+
+    @staticmethod
+    def _resolve_processed_root(datasets_dir):
+        candidates = [
+            datasets_dir,
+            os.path.join(datasets_dir, "processed"),
+        ]
+        for candidate in candidates:
+            required = [
+                os.path.join(candidate, "processed_train"),
+                os.path.join(candidate, "processed_eval"),
+                os.path.join(candidate, "processed_test"),
+            ]
+            if all(os.path.isdir(path) for path in required):
+                return candidate
+        raise FileNotFoundError(
+            "TUEV datasets_dir must contain processed_train/processed_eval/processed_test "
+            f"directly or under a nested 'processed' folder. Got: {datasets_dir}"
+        )

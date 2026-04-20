@@ -196,7 +196,7 @@ class Trainer(object):
 
         self.model = model.cuda()
         self._materialize_lazy_modules_from_train_batch()
-        if self.params.downstream_dataset in ['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI', 'Mumtaz2016']:
+        if self.params.downstream_dataset in ['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI', 'Mumtaz2016', 'TUEV']:
             class_weights = self._build_class_weights_from_train_split()
             label_smoothing = float(getattr(self.params, 'label_smoothing', 0.0))
             if class_weights is not None and label_smoothing > 0.05:
@@ -212,7 +212,7 @@ class Trainer(object):
         else:
             raise ValueError(
                 f"Unsupported downstream_dataset={self.params.downstream_dataset}. "
-                "This refactored branch supports FACED, SEED-V, ISRUC, PhysioNet-MI, and Mumtaz2016 only."
+                "This refactored branch supports FACED, SEED-V, ISRUC, PhysioNet-MI, Mumtaz2016, and TUEV only."
             )
 
         self.best_model_states = None
@@ -524,6 +524,45 @@ class Trainer(object):
             return loss
         aux = bb.moe_auxiliary_loss()
         return loss + aux
+
+    def _multiclass_selection_metric_name(self) -> str:
+        return str(getattr(self.params, 'selection_metric', 'kappa')).strip().lower()
+
+    def _multiclass_selection_value(self, acc: float, kappa: float, f1: float) -> float:
+        name = self._multiclass_selection_metric_name()
+        if name == 'balanced_accuracy':
+            return float(acc)
+        if name == 'weighted_f1':
+            return float(f1)
+        return float(kappa)
+
+    def _multiclass_is_better(
+        self,
+        candidate: Tuple[float, float, float],
+        incumbent: Tuple[float, float, float],
+    ) -> bool:
+        cand_acc, cand_kappa, cand_f1 = candidate
+        best_acc, best_kappa, best_f1 = incumbent
+        eps = 1e-12
+
+        cand_primary = self._multiclass_selection_value(cand_acc, cand_kappa, cand_f1)
+        best_primary = self._multiclass_selection_value(best_acc, best_kappa, best_f1)
+        if cand_primary > best_primary + eps:
+            return True
+        if cand_primary < best_primary - eps:
+            return False
+
+        # Stable tie-breakers: balanced accuracy, then weighted F1, then kappa.
+        for cand_metric, best_metric in [
+            (cand_acc, best_acc),
+            (cand_f1, best_f1),
+            (cand_kappa, best_kappa),
+        ]:
+            if cand_metric > best_metric + eps:
+                return True
+            if cand_metric < best_metric - eps:
+                return False
+        return False
 
     def _log_moe_diagnostics(self):
         if not getattr(self.params, 'moe_diagnostics', False) or not getattr(self.params, 'moe', False):
@@ -939,6 +978,7 @@ class Trainer(object):
         acc_best = float('-inf')
         best_f1_epoch = 0
         best_val_metrics = {}
+        selection_metric = self._multiclass_selection_metric_name()
 
         raw_kappa_best = float('-inf')
         raw_best_epoch = 0
@@ -1152,8 +1192,8 @@ class Trainer(object):
                         }
                         ema_best_model_states = self._snapshot_ema_state_dict_cpu()
 
-                    if kappa > kappa_best:
-                        print("kappa increasing....saving weights !! ")
+                    if self._multiclass_is_better((acc, kappa, f1), (acc_best, kappa_best, f1_best)):
+                        print(f"{selection_metric} improving....saving weights !! ")
                         print("Val Evaluation ({}): acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}".format(
                             selected_source,
                             acc,
@@ -1170,6 +1210,7 @@ class Trainer(object):
                             'kappa': float(kappa),
                             'weighted_f1': float(f1),
                             'eval_source': selected_source,
+                            'selection_metric': selection_metric,
                         }
                         if selected_source == 'ema':
                             self.best_model_states = self._snapshot_ema_state_dict_cpu()
@@ -1177,7 +1218,7 @@ class Trainer(object):
                             self.best_model_states = _state_dict_to_cpu(self.model)
                         est_b = _estimate_state_dict_cpu_bytes(self.best_model_states)
                         print(
-                            f"[checkpoint] best val kappa improved ({selected_source}) -> CPU state_dict ~{est_b / (1024 ** 2):.1f} MiB",
+                            f"[checkpoint] best val {selection_metric} improved ({selected_source}) -> CPU state_dict ~{est_b / (1024 ** 2):.1f} MiB",
                             flush=True,
                         )
                         _mem_report(f"after_best_snapshot ep={epoch + 1}", md)
@@ -1207,7 +1248,7 @@ class Trainer(object):
                 }
 
             if self.best_model_states is None:
-                print('Warning: val kappa never improved; using fallback weights for test/save.')
+                print(f'Warning: val {selection_metric} never improved; using fallback weights for test/save.')
                 if self._ema_eval_only and ema_best_model_states is not None:
                     self.best_model_states = ema_best_model_states
                 else:
@@ -1355,6 +1396,7 @@ class Trainer(object):
                             'kappa': float(kappa_best),
                             'weighted_f1': float(f1_best),
                             'eval_source': primary_source,
+                            'selection_metric': selection_metric,
                         }
                     self._write_run_summary(
                         task_type='multiclass',

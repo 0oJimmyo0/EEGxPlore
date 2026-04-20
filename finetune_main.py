@@ -5,9 +5,9 @@ import random
 import numpy as np
 import torch
 
-from datasets import faced_dataset, isruc_dataset, mumtaz_dataset, physio_dataset, seedv_dataset
+from datasets import faced_dataset, isruc_dataset, mumtaz_dataset, physio_dataset, seedv_dataset, tuev_dataset
 from finetune_trainer import Trainer
-from models import model_for_faced, model_for_isruc, model_for_mumtaz, model_for_physio, model_for_seedv
+from models import model_for_faced, model_for_isruc, model_for_mumtaz, model_for_physio, model_for_seedv, model_for_tuev
 
 
 def add_shared_args(parser: argparse.ArgumentParser) -> None:
@@ -61,7 +61,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         '--downstream_dataset',
         type=str,
         default='FACED',
-        choices=['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI', 'Mumtaz2016'],
+        choices=['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI', 'Mumtaz2016', 'TUEV'],
     )
     parser.add_argument('--datasets_dir', type=str, required=True)
     parser.add_argument('--num_of_classes', type=int, required=True)
@@ -228,6 +228,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--lr_expert_mult', type=float, default=1.5)
     parser.add_argument('--lr_classifier_mult', type=float, default=1.0)
     parser.add_argument('--lr_other_mult', type=float, default=1.0)
+    parser.add_argument(
+        '--selection_metric',
+        type=str,
+        default='kappa',
+        choices=['kappa', 'balanced_accuracy', 'weighted_f1'],
+        help='Validation metric used to select the primary multiclass checkpoint.',
+    )
 
     parser.add_argument('--tqdm', dest='use_tqdm', action='store_true')
     parser.add_argument('--no-tqdm', dest='use_tqdm', action='store_false')
@@ -370,6 +377,8 @@ def validate_args(args: argparse.Namespace) -> None:
         print(f"[ISRUC] warning: expected num_of_classes=5 for standard sleep staging, got {args.num_of_classes}")
     if args.downstream_dataset == 'Mumtaz2016' and args.num_of_classes != 2:
         print(f"[Mumtaz2016] warning: expected num_of_classes=2 for MDD-vs-control, got {args.num_of_classes}")
+    if args.downstream_dataset == 'TUEV' and args.num_of_classes != 6:
+        print(f"[TUEV] warning: expected num_of_classes=6 for event classification, got {args.num_of_classes}")
 
 
 def build_dataset(args: argparse.Namespace):
@@ -422,6 +431,15 @@ def build_dataset(args: argparse.Namespace):
             print('[Mumtaz2016] warning: routing_export_dir is FACED-only; Mumtaz run will skip per-sample routing export.')
         return mumtaz_dataset.LoadDataset(args).get_data_loader()
 
+    if args.downstream_dataset == 'TUEV':
+        args.return_sample_keys = False
+        args.return_domain_ids = False
+        if args.moe_domain_bias:
+            print('[TUEV] warning: --moe_domain_bias is ignored; TUEV loader does not provide domain metadata.')
+        if getattr(args, 'routing_export_dir', ''):
+            print('[TUEV] warning: routing_export_dir is FACED-only; TUEV run will skip per-sample routing export.')
+        return tuev_dataset.LoadDataset(args).get_data_loader()
+
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')
 
 
@@ -438,6 +456,9 @@ def build_model(args: argparse.Namespace):
     if args.downstream_dataset == 'Mumtaz2016':
         print('[Mumtaz2016] building model_for_mumtaz.Model')
         return model_for_mumtaz.Model(args)
+    if args.downstream_dataset == 'TUEV':
+        print('[TUEV] building model_for_tuev.Model')
+        return model_for_tuev.Model(args)
     raise ValueError(f'Unsupported downstream_dataset: {args.downstream_dataset}')
 
 
@@ -450,7 +471,7 @@ def setup_seed(seed: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description='FACED + SEED-V + ISRUC + PhysioNet-MI + Mumtaz2016 finetuning')
+    parser = argparse.ArgumentParser(description='FACED + SEED-V + ISRUC + PhysioNet-MI + Mumtaz2016 + TUEV finetuning')
     add_shared_args(parser)
     add_faced_args(parser)
     add_seedv_args(parser)
