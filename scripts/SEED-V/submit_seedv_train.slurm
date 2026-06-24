@@ -3,10 +3,10 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:h200:1
+#SBATCH --gres=gpu:l40s:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=48G
 #SBATCH --time=0-06:00:00
 
 set -euo pipefail
@@ -100,7 +100,7 @@ ROUTER_SOFT_WARMUP_EPOCHS="${ROUTER_SOFT_WARMUP_EPOCHS:-15}"
 DEPTH_ROUTER="${DEPTH_ROUTER:-on}"
 DEPTH_ROUTER_DIM="${DEPTH_ROUTER_DIM:-15}"
 DEPTH_CONTEXT_MODE="${DEPTH_CONTEXT_MODE:-block_shared_typed_proj}"
-DEPTH_QUERY_MODE="${DEPTH_QUERY_MODE:-dual}"  # shared | dual
+DEPTH_QUERY_MODE="${DEPTH_QUERY_MODE:-shared}"  # shared | dual
 DEPTH_BLOCK_COUNT="${DEPTH_BLOCK_COUNT:-8}"
 DEPTH_SUMMARY_MODE="${DEPTH_SUMMARY_MODE:-attn_delta4}"
 DEPTH_PROBE_MLP_FOR_ROUTER="${DEPTH_PROBE_MLP_FOR_ROUTER:-on}"

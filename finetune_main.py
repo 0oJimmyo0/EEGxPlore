@@ -120,7 +120,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--attnres_start_layer', type=int, default=0)
 
     parser.add_argument('--moe', action='store_true')
-    parser.add_argument('--moe_num_layers', type=int, default=2)
+    parser.add_argument('--moe_num_layers', type=int, default=1)
     parser.add_argument('--moe_num_experts', type=int, default=4)
     parser.add_argument('--moe_route_mode', type=str, default='typed_capacity_domain', choices=['typed_capacity_domain'])
     parser.add_argument('--moe_capacity_factor', type=float, default=1.0)
@@ -135,7 +135,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         '--moe_attnres_depth_context_mode',
         type=str,
-        default='compact_shared',
+        default='block_shared_typed_proj',
         choices=['compact_shared', 'block_shared_typed_proj', 'dual_query_block_typed_proj'],
     )
     parser.add_argument('--moe_attnres_depth_block_count', type=int, default=4)
@@ -194,18 +194,18 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         default='delayed_unfreeze',
         choices=['detached', 'delayed_unfreeze', 'trainable'],
     )
-    parser.add_argument('--moe_attnres_depth_summary_unfreeze_epoch', type=int, default=8)
-    parser.add_argument('--moe_router_arch', type=str, default='linear', choices=['linear', 'mlp'])
+    parser.add_argument('--moe_attnres_depth_summary_unfreeze_epoch', type=int, default=1)
+    parser.add_argument('--moe_router_arch', type=str, default='mlp', choices=['linear', 'mlp'])
     parser.add_argument('--moe_router_mlp_hidden', type=int, default=128)
-    parser.add_argument('--moe_router_dispatch_mode', type=str, default='hard_capacity', choices=['hard_capacity', 'soft'])
-    parser.add_argument('--moe_router_temperature', type=float, default=1.0)
-    parser.add_argument('--moe_router_entropy_coef', type=float, default=0.0)
-    parser.add_argument('--moe_router_balance_kl_coef', type=float, default=0.0)
-    parser.add_argument('--moe_router_z_loss_coef', type=float, default=0.0)
-    parser.add_argument('--moe_router_jitter_std', type=float, default=0.0)
-    parser.add_argument('--moe_router_jitter_final_std', type=float, default=0.0)
-    parser.add_argument('--moe_router_jitter_anneal_epochs', type=int, default=0)
-    parser.add_argument('--moe_router_soft_warmup_epochs', type=int, default=0)
+    parser.add_argument('--moe_router_dispatch_mode', type=str, default='soft', choices=['hard_capacity', 'soft'])
+    parser.add_argument('--moe_router_temperature', type=float, default=1.5)
+    parser.add_argument('--moe_router_entropy_coef', type=float, default=0.001)
+    parser.add_argument('--moe_router_balance_kl_coef', type=float, default=0.002)
+    parser.add_argument('--moe_router_z_loss_coef', type=float, default=0.001)
+    parser.add_argument('--moe_router_jitter_std', type=float, default=0.005)
+    parser.add_argument('--moe_router_jitter_final_std', type=float, default=0.005)
+    parser.add_argument('--moe_router_jitter_anneal_epochs', type=int, default=30)
+    parser.add_argument('--moe_router_soft_warmup_epochs', type=int, default=15)
 
     parser.add_argument('--moe_uniform_dispatch_warmup_epochs', type=int, default=0)
     parser.add_argument('--moe_shared_blend_warmup_epochs', type=int, default=0)
@@ -216,7 +216,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--moe_router_balance_kl_coef_spatial', type=float, default=-1.0)
     parser.add_argument('--moe_router_balance_kl_coef_spectral', type=float, default=-1.0)
     parser.add_argument('--moe_specialist_branch_mode', type=str, default='both', choices=['both', 'spatial_only', 'spectral_only'])
-    parser.add_argument('--moe_router_compact_feature_mode', type=str, default='eeg_summary', choices=['none', 'eeg_summary', 'psd_summary'])
+    parser.add_argument('--moe_router_compact_feature_mode', type=str, default='none', choices=['none', 'eeg_summary', 'psd_summary'])
     parser.add_argument('--moe_router_compact_feature_dim', type=int, default=8)
     parser.add_argument('--moe_router_compact_warmup_epochs', type=int, default=0)
     parser.add_argument('--moe_router_compact_gate_init', type=float, default=1.0)

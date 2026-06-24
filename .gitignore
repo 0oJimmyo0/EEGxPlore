@@ -31,6 +31,7 @@ checkpoints/
 *.pt
 *.ckpt
 wandb/
+.quota_check
 
 # Large data (optional — uncomment if you never want dataset paths tracked)
 # *.lmdb
@@ -40,3 +41,9 @@ wandb/
 pretrained_weights/*.pth
 pretrained_weights/*.pt
 !pretrained_weights/README.md
+
+# Local generated figure snapshots in the root figure/ folder
+figure/*.pdf
+
+# Overleaf paper checkout is managed as a separate nested repo/workflow
+paper/

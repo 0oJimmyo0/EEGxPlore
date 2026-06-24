@@ -3,7 +3,7 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/FACED/out/faced_hier_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/FACED/err/faced_hier_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G

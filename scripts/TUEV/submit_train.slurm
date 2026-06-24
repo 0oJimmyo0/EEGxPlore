@@ -3,7 +3,7 @@
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/TUEV/out/tuev_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/TUEV/err/tuev_%j.err
 #SBATCH --partition=gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --gres=gpu:h100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
@@ -110,6 +110,8 @@ DEPTH_SUMMARY_MODE="${DEPTH_SUMMARY_MODE:-attn_delta4}"
 DEPTH_PROBE_MLP_FOR_ROUTER="${DEPTH_PROBE_MLP_FOR_ROUTER:-on}"
 DEPTH_SUMMARY_GRAD_MODE="${DEPTH_SUMMARY_GRAD_MODE:-delayed_unfreeze}"
 DEPTH_SUMMARY_UNFREEZE_EPOCH="${DEPTH_SUMMARY_UNFREEZE_EPOCH:-8}"
+DEPTH_BLOCK_SEPARATION_COEF="${DEPTH_BLOCK_SEPARATION_COEF:-0.0}"
+DEPTH_BLOCK_SEPARATION_TARGET_JS="${DEPTH_BLOCK_SEPARATION_TARGET_JS:-0.03}"
 DRY_RUN="${DRY_RUN:-0}"
 
 case "$CLASS_WEIGHT_MODE" in
@@ -203,6 +205,8 @@ if [[ "$USE_MOE" == "1" ]]; then
     --moe_attnres_depth_summary_mode "$DEPTH_SUMMARY_MODE"
     --moe_attnres_depth_summary_grad_mode "$DEPTH_SUMMARY_GRAD_MODE"
     --moe_attnres_depth_summary_unfreeze_epoch "$DEPTH_SUMMARY_UNFREEZE_EPOCH"
+    --moe_attnres_depth_block_separation_coef "$DEPTH_BLOCK_SEPARATION_COEF"
+    --moe_attnres_depth_block_separation_target_js "$DEPTH_BLOCK_SEPARATION_TARGET_JS"
     --moe_router_dispatch_mode "$ROUTER_DISPATCH_MODE"
     --moe_router_temperature "$ROUTER_TEMPERATURE"
     --moe_router_entropy_coef "$ROUTER_ENTROPY_COEF"
@@ -220,6 +224,9 @@ if [[ "$USE_MOE" == "1" ]]; then
     --moe_shared_blend_warmup_epochs 5
     --moe_shared_blend_start 1.0
     --moe_shared_blend_end 0.0
+    --moe_router_compact_warmup_epochs 0
+    --moe_router_compact_gate_init 1.0
+    --moe_expert_init_noise_std 0.0
   )
   if [[ "$DEPTH_PROBE_MLP_FOR_ROUTER" == "on" ]]; then
     MOE_ARGS+=(--moe_attnres_depth_probe_mlp_for_router)
@@ -233,7 +240,7 @@ echo "[tuev-slurm] ema use=$USE_EMA decay=$EMA_DECAY warmup=$EMA_WARMUP_STEPS ev
 echo "[tuev-slurm] class_weight_mode=$CLASS_WEIGHT_MODE clip=[$CLASS_WEIGHT_CLIP_MIN,$CLASS_WEIGHT_CLIP_MAX] beta=$EFFECTIVE_NUM_BETA" >&2
 echo "[tuev-slurm] component_lr use=$USE_COMPONENT_LR backbone=$LR_BACKBONE_MULT router=$LR_ROUTER_MULT experts=$LR_EXPERT_MULT classifier=$LR_CLASSIFIER_MULT other=$LR_OTHER_MULT" >&2
 echo "[tuev-slurm] router temp=$ROUTER_TEMPERATURE entropy=$ROUTER_ENTROPY_COEF balance_kl=$ROUTER_BALANCE_KL_COEF entropy_spatial=$ROUTER_ENTROPY_COEF_SPATIAL entropy_spectral=$ROUTER_ENTROPY_COEF_SPECTRAL balance_kl_spatial=$ROUTER_BALANCE_KL_COEF_SPATIAL balance_kl_spectral=$ROUTER_BALANCE_KL_COEF_SPECTRAL" >&2
-echo "[tuev-slurm] depth_summary grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH probe_mlp=$DEPTH_PROBE_MLP_FOR_ROUTER" >&2
+echo "[tuev-slurm] depth_summary grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH probe_mlp=$DEPTH_PROBE_MLP_FOR_ROUTER block_sep_coef=$DEPTH_BLOCK_SEPARATION_COEF block_sep_target_js=$DEPTH_BLOCK_SEPARATION_TARGET_JS" >&2
 
 PY_ARGS+=("${MOE_ARGS[@]}")
 

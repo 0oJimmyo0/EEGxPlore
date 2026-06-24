@@ -2,8 +2,8 @@
 #SBATCH --job-name=PHYSIO_MOE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/Phy_MI/out/physio_moe_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/Phy_MI/err/physio_moe_%j.err
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:h100:1
+#SBATCH --partition=gpu_devel
+#SBATCH --gres=gpu:a40:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
