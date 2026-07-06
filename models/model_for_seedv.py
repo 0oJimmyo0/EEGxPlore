@@ -3,22 +3,30 @@ import torch.nn as nn
 from einops.layers.torch import Rearrange
 
 from .cbramod import CBraMod, backbone_finetune_kwargs, load_foundation_into_backbone
+from .labram_backbone import LaBraMBackbone, load_labram_foundation_into_backbone
 
 
 class Model(nn.Module):
     def __init__(self, param):
         super().__init__()
 
-        self.backbone = CBraMod(
-            in_dim=200,
-            out_dim=200,
-            d_model=200,
-            dim_feedforward=800,
-            seq_len=30,
-            n_layer=12,
-            nhead=8,
-            **backbone_finetune_kwargs(param),
-        )
+        self.backbone_name = str(getattr(param, 'backbone', 'cbramod')).strip().lower()
+        if self.backbone_name == 'cbramod':
+            self.backbone = CBraMod(
+                in_dim=200,
+                out_dim=200,
+                d_model=200,
+                dim_feedforward=800,
+                seq_len=30,
+                n_layer=12,
+                nhead=8,
+                **backbone_finetune_kwargs(param),
+            )
+        elif self.backbone_name == 'labram':
+            self.backbone = LaBraMBackbone(param)
+        else:
+            raise ValueError(f"Unsupported backbone for SEED-V: {self.backbone_name}")
+        print(f"[SEED-V] backbone = {self.backbone_name}")
         print(f"[SEED-V] attnres_variant = {param.attnres_variant}")
         print(f"[SEED-V] attnres_gated = {param.attnres_gated}")
         print(f"[SEED-V] attnres_gate_init = {param.attnres_gate_init}")
@@ -57,6 +65,9 @@ class Model(nn.Module):
                 f"shared_blend_warmup_epochs={getattr(param, 'moe_shared_blend_warmup_epochs', 0)}, "
                 f"shared_blend_start={getattr(param, 'moe_shared_blend_start', 1.0)}, "
                 f"shared_blend_end={getattr(param, 'moe_shared_blend_end', 0.0)}, "
+                f"shared_output_scale={getattr(param, 'moe_shared_output_scale', 1.0)}, "
+                f"expert_output_scale={getattr(param, 'moe_expert_output_scale', 1.0)}, "
+                f"router_base_feature_mode={getattr(param, 'moe_router_base_feature_mode', 'full')}, "
                 f"branch_mode={getattr(param, 'moe_specialist_branch_mode', 'both')}, "
                 f"compact_router_mode={getattr(param, 'moe_router_compact_feature_mode', 'none')}, "
                 f"compact_router_dim={getattr(param, 'moe_router_compact_feature_dim', 8)}, "
@@ -70,13 +81,23 @@ class Model(nn.Module):
 
         if param.use_pretrained_weights:
             map_location = torch.device(f'cuda:{param.cuda}')
-            ckpt = torch.load(param.foundation_dir, map_location=map_location)
-            if isinstance(ckpt, dict) and "state_dict" in ckpt:
-                ckpt = ckpt["state_dict"]
-            loaded_bb = load_foundation_into_backbone(self.backbone, param, ckpt)
+            ckpt = torch.load(param.foundation_dir, map_location=map_location, weights_only=False)
+            if self.backbone_name == 'cbramod':
+                if isinstance(ckpt, dict) and "state_dict" in ckpt:
+                    ckpt = ckpt["state_dict"]
+                loaded_bb = load_foundation_into_backbone(self.backbone, param, ckpt)
+            else:
+                loaded_bb = load_labram_foundation_into_backbone(self.backbone, ckpt)
             self.pretrained_param_names = {f'backbone.{k}' for k in loaded_bb}
 
-            if param.attnres_variant == 'none' and not getattr(param, 'moe', False):
+            if self.backbone_name == 'labram':
+                if param.attnres_variant == 'none' and not getattr(param, 'moe', False):
+                    print("[SEED-V][LaBraM] dense baseline mode: loaded LaBraM foundation weights")
+                elif getattr(param, 'moe', False):
+                    print("[SEED-V][LaBraM] selective mode: loaded LaBraM foundation + CBraMod-style adapter stack")
+                else:
+                    print(f"[SEED-V][LaBraM] AttnRes mode ({param.attnres_variant}): loaded LaBraM foundation + adapter stack")
+            elif param.attnres_variant == 'none' and not getattr(param, 'moe', False):
                 print("[SEED-V] Baseline mode: strict foundation load")
             elif getattr(param, 'moe', False):
                 print("[SEED-V] MoE mode: partial load + dense FFN warm-start into experts")

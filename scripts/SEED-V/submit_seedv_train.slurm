@@ -1,24 +1,72 @@
 #!/bin/bash
+# ACCRE batch GPU training launcher for SEED-V.
+# Submit with your ACCRE GPU account, for example:
+#   sbatch /path/to/submit_seedv_train.slurm
+# ACCRE reference: https://help.accre.vanderbilt.edu/index.php?title=GPUs_at_ACCRE
 #SBATCH --job-name=SEEDV_TUNE
-#SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
-#SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
-#SBATCH --partition=gpu
-#SBATCH --gres=gpu:l40s:1
+#SBATCH --account=neurogroup_acc
+#SBATCH --output=/data/neurogroup/mingyangjiang/EEGxPlore/EEGxPlore/logs/SEED-V/out/seedv_%x_%j.out
+#SBATCH --error=/data/neurogroup/mingyangjiang/EEGxPlore/EEGxPlore/logs/SEED-V/err/seedv_%x_%j.err
+#SBATCH --partition=batch_gpu
+#SBATCH --gres=gpu:nvidia_rtx_a6000:1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=48G
-#SBATCH --time=0-06:00:00
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=0-12:00:00
 
 set -euo pipefail
 
-module load GCCcore/12.2.0
-module load CUDA/12.6.3
-module load miniconda/24.3.0
-conda activate cbramod
+USE_ACCRE_STACK="${USE_ACCRE_STACK:-0}"
+if [[ "$USE_ACCRE_STACK" == "1" ]]; then
+  set +u
+  export USER_IS_ROOT="${USER_IS_ROOT-}"
+  if ! type module >/dev/null 2>&1; then
+    source /etc/accre/lmod.sh
+  fi
+  set -u
+  module --force purge
+  if type setup_accre_software_stack >/dev/null 2>&1; then
+    setup_accre_software_stack
+  elif [[ -f /etc/accre/bashrc ]]; then
+    source /etc/accre/bashrc
+    setup_accre_software_stack
+  fi
+  module load python/3.11.5
+  module load scipy-stack/2026a
+fi
 
-REPO_DIR="/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore"
+unset PYTHONPATH
+unset PYTHONHOME
+VENV_PREFIX="${VENV_PREFIX:-/data/neurogroup/mingyangjiang/venvs/eegxplore-accre}"
+source "$VENV_PREFIX/bin/activate"
+export PYTHONNOUSERSITE=1
+PYTHON_IN_ENV=("$VENV_PREFIX/bin/python")
+
+REPO_DIR="/data/neurogroup/mingyangjiang/EEGxPlore/EEGxPlore"
 LOG_ROOT="$REPO_DIR/logs/SEED-V"
 mkdir -p "$LOG_ROOT/out" "$LOG_ROOT/err"
+
+if [[ ! -x "$VENV_PREFIX/bin/python" ]]; then
+  echo "[seedv-slurm] venv python not found: $VENV_PREFIX/bin/python" >&2
+  exit 2
+fi
+
+echo "[seedv-slurm] host=$(hostname) pwd=$(pwd)" >&2
+echo "[seedv-slurm] python=$("$VENV_PREFIX/bin/python" -c 'import sys; print(sys.executable)')" >&2
+"$VENV_PREFIX/bin/python" - <<'PY'
+import torch
+print(f"[seedv-slurm] torch_version={torch.__version__}")
+print(f"[seedv-slurm] cuda_available={torch.cuda.is_available()}")
+print(f"[seedv-slurm] cuda_device_count={torch.cuda.device_count()}")
+if torch.cuda.is_available():
+    try:
+        print(f"[seedv-slurm] cuda_device_0={torch.cuda.get_device_name(0)}")
+    except Exception as exc:
+        print(f"[seedv-slurm] cuda_device_name_error={exc}")
+PY
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi || true
+fi
 
 # Keep this launcher focused on SEED-V -> model_for_seedv only.
 DATASET="${DATASET:-SEED-V}"
@@ -30,12 +78,12 @@ fi
 SEEDV_PROTOCOL="${SEEDV_PROTOCOL:-cbramod_benchmark}"  # cbramod_benchmark | legacy_subject_disjoint_4x200
 case "$SEEDV_PROTOCOL" in
   cbramod_benchmark)
-    DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb}"
+    DATASET_DIR="${DATASET_DIR:-/data/neurogroup/mingyangjiang/data/SEED-V_processed_lmdb}"
     SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-}"
     ;;
   legacy_subject_disjoint_4x200)
-    DATASET_DIR="${DATASET_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/processed_raw_eeg_200hz_1to75_4x200_lmdb_v2}"
-    SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/data/SEED-V/subject_disjoint_manifest_balanced_v2.json}"
+    DATASET_DIR="${DATASET_DIR:-$REPO_DIR/data/SEED-V/processed_raw_eeg_200hz_1to75_4x200_lmdb_v2}"
+    SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-$REPO_DIR/data/SEED-V/subject_disjoint_manifest_balanced_v2.json}"
     ;;
   *)
     echo "[seedv-slurm] invalid SEEDV_PROTOCOL=$SEEDV_PROTOCOL (expected: cbramod_benchmark|legacy_subject_disjoint_4x200)" >&2
@@ -45,16 +93,27 @@ esac
 
 NUM_CLASSES="${NUM_CLASSES:-5}"
 
-MODEL_DIR="${MODEL_DIR:-/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/SEEDV_manual_${SLURM_JOB_ID:-manual}}"
+MODEL_DIR="${MODEL_DIR:-$REPO_DIR/output/seedv_train_${SLURM_JOB_ID:-manual}}"
 RUN_NAME="${RUN_NAME:-seedv_${SLURM_JOB_ID:-manual}}"
 
-FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
+FOUNDATION_DIR="${FOUNDATION_DIR:-/data/neurogroup/mingyangjiang/data/weights/pretrained_weights.pth}"
+BACKBONE="${BACKBONE:-cbramod}"
+LABRAM_REPO_DIR="${LABRAM_REPO_DIR:-/data/neurogroup/mingyangjiang/EEGxPlore/LaBraM}"
+LABRAM_MODEL_NAME="${LABRAM_MODEL_NAME:-labram_base_patch200_200}"
+LABRAM_ADAPTER_LAYERS="${LABRAM_ADAPTER_LAYERS:-4}"
+LABRAM_DROP_PATH_RATE="${LABRAM_DROP_PATH_RATE:-0.1}"
+LABRAM_LAYER_SCALE_INIT_VALUE="${LABRAM_LAYER_SCALE_INIT_VALUE:-0.1}"
+
+if [[ "$BACKBONE" == "labram" && "${FOUNDATION_DIR:-}" == "/data/neurogroup/mingyangjiang/data/weights/pretrained_weights.pth" ]]; then
+  FOUNDATION_DIR="$LABRAM_REPO_DIR/checkpoints/labram-base.pth"
+fi
 
 CUDA_ID="${CUDA_ID:-0}"
-EPOCHS="${EPOCHS:-25}"
+EPOCHS="${EPOCHS:-40}"
 SEED_LIST="${SEED_LIST:-3407}"  # space/comma separated
 BATCH_SIZE="${BATCH_SIZE:-64}"
-NUM_WORKERS="${NUM_WORKERS:-4}"
+NUM_WORKERS="${NUM_WORKERS:-}"
+LABRAM_SAFE_NUM_WORKERS="${LABRAM_SAFE_NUM_WORKERS:-2}"
 
 LR="${LR:-3e-5}"
 MIN_LR="${MIN_LR:-5e-6}"
@@ -126,6 +185,9 @@ MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS="${MOE_UNIFORM_DISPATCH_WARMUP_EPOCHS:-0}"
 MOE_SHARED_BLEND_WARMUP_EPOCHS="${MOE_SHARED_BLEND_WARMUP_EPOCHS:-0}"
 MOE_SHARED_BLEND_START="${MOE_SHARED_BLEND_START:-1.0}"
 MOE_SHARED_BLEND_END="${MOE_SHARED_BLEND_END:-0.0}"
+MOE_SHARED_OUTPUT_SCALE="${MOE_SHARED_OUTPUT_SCALE:-1.0}"
+MOE_EXPERT_OUTPUT_SCALE="${MOE_EXPERT_OUTPUT_SCALE:-1.0}"
+MOE_ROUTER_BASE_FEATURE_MODE="${MOE_ROUTER_BASE_FEATURE_MODE:-full}"
 MOE_ROUTER_ENTROPY_COEF_SPATIAL="${MOE_ROUTER_ENTROPY_COEF_SPATIAL:--1.0}"
 MOE_ROUTER_ENTROPY_COEF_SPECTRAL="${MOE_ROUTER_ENTROPY_COEF_SPECTRAL:--1.0}"
 MOE_ROUTER_BALANCE_KL_COEF_SPATIAL="${MOE_ROUTER_BALANCE_KL_COEF_SPATIAL:--1.0}"
@@ -162,11 +224,24 @@ case "$RUN_MODE" in
     ;;
 esac
 
+if [[ -z "${NUM_WORKERS}" ]]; then
+  if [[ "$BACKBONE" == "labram" ]]; then
+    NUM_WORKERS="$LABRAM_SAFE_NUM_WORKERS"
+    echo "[seedv-slurm] NUM_WORKERS not provided; using safer LaBraM default NUM_WORKERS=$NUM_WORKERS on ACCRE" >&2
+  else
+    NUM_WORKERS="8"
+  fi
+fi
+
+if [[ "$BACKBONE" == "labram" && "$NUM_WORKERS" -gt 4 ]]; then
+  echo "[seedv-slurm][warn] LaBraM + SEED-V has shown ACCRE DataLoader worker instability with NUM_WORKERS=$NUM_WORKERS; consider NUM_WORKERS<=4." >&2
+fi
+
 if [[ "$A1_STRICT_BLOCK_ABLATION" == "1" ]]; then
   if [[ "$SEEDV_PROTOCOL" != "cbramod_benchmark" ]]; then
     echo "[seedv-slurm][warn] A1_STRICT_BLOCK_ABLATION=1 expects CBraMod cohort; forcing SEEDV_PROTOCOL=cbramod_benchmark" >&2
     SEEDV_PROTOCOL="cbramod_benchmark"
-    DATASET_DIR="/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb"
+    DATASET_DIR="/data/neurogroup/mingyangjiang/data/SEED-V_processed_lmdb"
     SEEDV_SPLIT_MANIFEST=""
   fi
   if [[ -n "$SEEDV_SPLIT_MANIFEST" ]]; then
@@ -284,6 +359,9 @@ if [[ "$USE_MOE" == "1" ]]; then
   MOE_ARGS+=(--moe_shared_blend_warmup_epochs "$MOE_SHARED_BLEND_WARMUP_EPOCHS")
   MOE_ARGS+=(--moe_shared_blend_start "$MOE_SHARED_BLEND_START")
   MOE_ARGS+=(--moe_shared_blend_end "$MOE_SHARED_BLEND_END")
+  MOE_ARGS+=(--moe_shared_output_scale "$MOE_SHARED_OUTPUT_SCALE")
+  MOE_ARGS+=(--moe_expert_output_scale "$MOE_EXPERT_OUTPUT_SCALE")
+  MOE_ARGS+=(--moe_router_base_feature_mode "$MOE_ROUTER_BASE_FEATURE_MODE")
   MOE_ARGS+=(--moe_router_entropy_coef_spatial "$MOE_ROUTER_ENTROPY_COEF_SPATIAL")
   MOE_ARGS+=(--moe_router_entropy_coef_spectral "$MOE_ROUTER_ENTROPY_COEF_SPECTRAL")
   MOE_ARGS+=(--moe_router_balance_kl_coef_spatial "$MOE_ROUTER_BALANCE_KL_COEF_SPATIAL")
@@ -323,6 +401,7 @@ elif [[ "$DEPTH_CONTEXT_MODE" == "dual_query_block_typed_proj" ]]; then
 fi
 
 echo "[seedv-slurm] dataset=$DATASET dataset_dir=$DATASET_DIR num_classes=$NUM_CLASSES" >&2
+echo "[seedv-slurm] backbone=$BACKBONE foundation_dir=$FOUNDATION_DIR" >&2
 echo "[seedv-slurm] seedv_protocol=$SEEDV_PROTOCOL" >&2
 echo "[seedv-slurm] run_mode=$RUN_MODE" >&2
 echo "[seedv-slurm] a1_strict_block_ablation=$A1_STRICT_BLOCK_ABLATION" >&2
@@ -334,6 +413,7 @@ echo "[seedv-slurm] loss(label_smoothing/class_weight_mode/clip_min/clip_max/eff
 echo "[seedv-slurm] ema(use/decay/warmup/eval_only)=($USE_EMA/$EMA_DECAY/$EMA_WARMUP_STEPS/$EMA_EVAL_ONLY)" >&2
 echo "[seedv-slurm] router_arch=$ROUTER_ARCH dispatch=$ROUTER_DISPATCH_MODE temp=$ROUTER_TEMPERATURE" >&2
 echo "[seedv-slurm] router_soft_warmup_epochs=$ROUTER_SOFT_WARMUP_EPOCHS (soft-dispatch runs use warmup blending in MoE router)" >&2
+echo "[seedv-slurm] moe_shared_output_scale=$MOE_SHARED_OUTPUT_SCALE moe_expert_output_scale=$MOE_EXPERT_OUTPUT_SCALE router_base_feature_mode=$MOE_ROUTER_BASE_FEATURE_MODE shared_blend=(warmup:$MOE_SHARED_BLEND_WARMUP_EPOCHS,start:$MOE_SHARED_BLEND_START,end:$MOE_SHARED_BLEND_END)" >&2
 echo "[seedv-slurm] depth_router=$DEPTH_ROUTER depth_dim=$DEPTH_ROUTER_DIM context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_summary=$DEPTH_SUMMARY_LABEL depth_proj_init=$DEPTH_ROUTER_INIT depth_norm_gate=$DEPTH_ROUTER_NORM_GATE depth_norm_eps=$DEPTH_ROUTER_NORM_EPS depth_gate_init=$DEPTH_ROUTER_GATE_INIT depth_sep_coef=$DEPTH_BLOCK_SEP_COEF depth_sep_target_js=$DEPTH_BLOCK_SEP_TARGET_JS" >&2
 echo "[seedv-slurm] depth_grad_mode=$DEPTH_SUMMARY_GRAD_MODE unfreeze_epoch=$DEPTH_SUMMARY_UNFREEZE_EPOCH" >&2
 echo "[seedv-slurm] split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>} component_lr=$USE_COMPONENT_LR lr_mults=(bb:$LR_BACKBONE_MULT,router:$LR_ROUTER_MULT,expert:$LR_EXPERT_MULT,clf:$LR_CLASSIFIER_MULT,other:$LR_OTHER_MULT)" >&2
@@ -344,7 +424,7 @@ for SEED in "${SEEDS[@]}"; do
   mkdir -p "$RUN_MODEL_DIR"
 
   echo "[seedv-slurm] starting seed=$SEED model_dir=$RUN_MODEL_DIR run_name=$RUN_RUN_NAME" >&2
-  time python "$REPO_DIR/finetune_main.py" \
+  time "${PYTHON_IN_ENV[@]}" "$REPO_DIR/finetune_main.py" \
     --seed "$SEED" \
     --cuda "$CUDA_ID" \
     --epochs "$EPOCHS" \
@@ -364,7 +444,13 @@ for SEED in "${SEEDS[@]}"; do
     --num_workers "$NUM_WORKERS" \
     --attnres_variant "$ATTNRES_VARIANT" \
     --attnres_start_layer "$ATTNRES_START_LAYER" \
+    --backbone "$BACKBONE" \
     --foundation_dir "$FOUNDATION_DIR" \
+    --labram_repo_dir "$LABRAM_REPO_DIR" \
+    --labram_model_name "$LABRAM_MODEL_NAME" \
+    --labram_adapter_layers "$LABRAM_ADAPTER_LAYERS" \
+    --labram_drop_path_rate "$LABRAM_DROP_PATH_RATE" \
+    --labram_layer_scale_init_value "$LABRAM_LAYER_SCALE_INIT_VALUE" \
     --routing_run_name "$RUN_RUN_NAME" \
     --use_pretrained_weights \
     --no-tqdm \

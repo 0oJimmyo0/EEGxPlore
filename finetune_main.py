@@ -17,6 +17,8 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--min_lr', type=float, default=5e-6)
+    parser.add_argument('--warmup_epochs', type=int, default=0)
+    parser.add_argument('--warmup_start_factor', type=float, default=0.002)
     parser.add_argument('--weight_decay', type=float, default=5e-2)
     parser.add_argument('--optimizer', type=str, default='AdamW', choices=['AdamW', 'SGD'])
     parser.add_argument('--clip_value', type=float, default=1.0)
@@ -54,6 +56,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
             'all_patch_reps_twolayer',
             'all_patch_reps_onelayer',
             'avgpooling_patch_reps',
+            'labram_pooled_linear',
         ],
     )
 
@@ -64,10 +67,18 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         choices=['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI', 'Mumtaz2016', 'TUEV'],
     )
     parser.add_argument('--datasets_dir', type=str, required=True)
+    parser.add_argument(
+        '--input_scale_divisor',
+        type=float,
+        default=100.0,
+        help='Dataset tensor divisor applied in downstream loaders. Use 1.0 to preserve stored LMDB amplitude scale.',
+    )
     parser.add_argument('--num_of_classes', type=int, required=True)
     parser.add_argument('--model_dir', type=str, required=True)
 
     parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--pin_memory', action='store_true')
+    parser.add_argument('--persistent_workers', action='store_true')
     parser.add_argument('--label_smoothing', type=float, default=0.1)
     parser.add_argument(
         '--class_weight_mode',
@@ -103,9 +114,46 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--frozen', action='store_true')
     parser.add_argument('--use_pretrained_weights', action='store_true')
     parser.add_argument(
+        '--backbone',
+        type=str,
+        default='cbramod',
+        choices=['cbramod', 'labram'],
+        help='Backbone family for downstream finetuning. LaBraM is currently integrated for SEED-V first.',
+    )
+    parser.add_argument(
         '--foundation_dir',
         type=str,
         default='/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth',
+    )
+    parser.add_argument(
+        '--labram_repo_dir',
+        type=str,
+        default='/data/neurogroup/mingyangjiang/EEGxPlore/LaBraM',
+        help='Path to the sibling LaBraM repository used for backbone import.',
+    )
+    parser.add_argument(
+        '--labram_model_name',
+        type=str,
+        default='labram_base_patch200_200',
+        help='LaBraM constructor name inside modeling_finetune.py.',
+    )
+    parser.add_argument(
+        '--labram_adapter_layers',
+        type=int,
+        default=4,
+        help='Number of CBraMod-style selective adaptation layers stacked on top of LaBraM features when adaptation is requested.',
+    )
+    parser.add_argument(
+        '--labram_drop_path_rate',
+        type=float,
+        default=0.1,
+        help='Drop-path rate used when instantiating LaBraM inside EEGxPlore.',
+    )
+    parser.add_argument(
+        '--labram_layer_scale_init_value',
+        type=float,
+        default=0.1,
+        help='LayerScale init value passed to the LaBraM backbone constructor.',
     )
 
     parser.add_argument('--attnres_final_output', type=str, default='attnres', choices=['attnres', 'last_source'])
@@ -211,6 +259,15 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--moe_shared_blend_warmup_epochs', type=int, default=0)
     parser.add_argument('--moe_shared_blend_start', type=float, default=1.0)
     parser.add_argument('--moe_shared_blend_end', type=float, default=0.0)
+    parser.add_argument('--moe_shared_output_scale', type=float, default=1.0)
+    parser.add_argument('--moe_expert_output_scale', type=float, default=1.0)
+    parser.add_argument(
+        '--moe_router_base_feature_mode',
+        type=str,
+        default='full',
+        choices=['full', 'delta_only', 'attnres_only', 'baseline_only'],
+        help='Router input simplification: use full baseline+attnres+delta summary, or a reduced single-source variant.',
+    )
     parser.add_argument('--moe_router_entropy_coef_spatial', type=float, default=-1.0)
     parser.add_argument('--moe_router_entropy_coef_spectral', type=float, default=-1.0)
     parser.add_argument('--moe_router_balance_kl_coef_spatial', type=float, default=-1.0)
@@ -297,6 +354,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError('--moe_shared_blend_start must be in [0, 1].')
     if not (0.0 <= args.moe_shared_blend_end <= 1.0):
         raise ValueError('--moe_shared_blend_end must be in [0, 1].')
+    if args.moe_shared_output_scale < 0.0:
+        raise ValueError('--moe_shared_output_scale must be >= 0.')
+    if args.moe_expert_output_scale < 0.0:
+        raise ValueError('--moe_expert_output_scale must be >= 0.')
     if args.moe_attnres_depth_summary_unfreeze_epoch < 1:
         raise ValueError('--moe_attnres_depth_summary_unfreeze_epoch must be >= 1.')
     if (
@@ -379,6 +440,13 @@ def validate_args(args: argparse.Namespace) -> None:
         print(f"[Mumtaz2016] warning: expected num_of_classes=2 for MDD-vs-control, got {args.num_of_classes}")
     if args.downstream_dataset == 'TUEV' and args.num_of_classes != 6:
         print(f"[TUEV] warning: expected num_of_classes=6 for event classification, got {args.num_of_classes}")
+    if args.backbone == 'labram' and args.downstream_dataset not in {'SEED-V', 'FACED'}:
+        raise ValueError(
+            "--backbone labram is currently wired for SEED-V and FACED. "
+            "Use --downstream_dataset SEED-V or FACED for the current backbone substitution experiments."
+        )
+    if args.backbone == 'labram' and args.labram_adapter_layers < 0:
+        raise ValueError('--labram_adapter_layers must be >= 0.')
 
 
 def build_dataset(args: argparse.Namespace):

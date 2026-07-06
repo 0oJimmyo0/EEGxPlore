@@ -14,6 +14,7 @@ from torch import Tensor
 MOE_ROUTE_MODES = ("typed_capacity_domain",)
 MOE_ROUTER_ARCHS = ("linear", "mlp")
 MOE_ROUTER_DISPATCH_MODES = ("hard_capacity", "soft")
+MOE_ROUTER_BASE_FEATURE_MODES = ("full", "delta_only", "attnres_only", "baseline_only")
 PSD_ROUTER_DIM = 5
 
 # Optional multiclass labels [B] for diagnostics.
@@ -149,6 +150,21 @@ def _attnres_base_features(baseline: Tensor, attnres: Tensor) -> Tensor:
     )
 
 
+def _router_base_features(baseline: Tensor, attnres: Tensor, mode: str) -> Tensor:
+    mode = str(mode).strip().lower()
+    if mode == "full":
+        return _attnres_base_features(baseline, attnres)
+    if mode == "delta_only":
+        return _spatial_mean_bc_sd(attnres - baseline)
+    if mode == "attnres_only":
+        return _spatial_mean_bc_sd(attnres)
+    if mode == "baseline_only":
+        return _spatial_mean_bc_sd(baseline)
+    raise ValueError(
+        f"router_base_feature_mode must be one of {MOE_ROUTER_BASE_FEATURE_MODES}, got {mode!r}"
+    )
+
+
 class ExpertFFN(nn.Module):
     def __init__(
         self,
@@ -221,6 +237,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         shared_blend_warmup_epochs: int = 0,
         shared_blend_start: float = 1.0,
         shared_blend_end: float = 0.0,
+        shared_output_scale: float = 1.0,
+        expert_output_scale: float = 1.0,
+        router_base_feature_mode: str = "full",
         router_entropy_coef_spatial: Optional[float] = None,
         router_entropy_coef_spectral: Optional[float] = None,
         router_balance_kl_coef_spatial: Optional[float] = None,
@@ -295,8 +314,20 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         self.shared_blend_warmup_epochs = int(max(0, shared_blend_warmup_epochs))
         self.shared_blend_start = float(shared_blend_start)
         self.shared_blend_end = float(shared_blend_end)
+        self.shared_output_scale = float(shared_output_scale)
+        self.expert_output_scale = float(expert_output_scale)
+        self.router_base_feature_mode = str(router_base_feature_mode).strip().lower()
         if not (0.0 <= self.shared_blend_start <= 1.0 and 0.0 <= self.shared_blend_end <= 1.0):
             raise ValueError("shared_blend_start/end must be in [0, 1]")
+        if self.router_base_feature_mode not in MOE_ROUTER_BASE_FEATURE_MODES:
+            raise ValueError(
+                "router_base_feature_mode must be one of "
+                f"{MOE_ROUTER_BASE_FEATURE_MODES}, got {self.router_base_feature_mode!r}"
+            )
+        if self.shared_output_scale < 0.0:
+            raise ValueError("shared_output_scale must be >= 0")
+        if self.expert_output_scale < 0.0:
+            raise ValueError("expert_output_scale must be >= 0")
         self.router_entropy_coef_spatial = (
             None if router_entropy_coef_spatial is None else float(router_entropy_coef_spatial)
         )
@@ -423,8 +454,9 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             spatial_extra += self.router_concat_proj_dim
             spectral_extra += self.router_concat_proj_dim
 
-        spatial_in = 3 * d_model + spatial_extra
-        spectral_in = 3 * d_model + (PSD_ROUTER_DIM if self.use_psd_router_features else 0) + spectral_extra
+        base_router_dim = d_model if self.router_base_feature_mode != "full" else 3 * d_model
+        spatial_in = base_router_dim + spatial_extra
+        spectral_in = base_router_dim + (PSD_ROUTER_DIM if self.use_psd_router_features else 0) + spectral_extra
         self.spatial_router = _make_router_head(
             spatial_in, num_specialists, router_arch, self.router_mlp_hidden, factory_kwargs
         )
@@ -1015,7 +1047,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
                     v = router_context.get("attnres_depth_router_normed_spectral_norm")
                     depth_router_normed_spectral_norm = None if v is None else float(v)
 
-        base_feat = _attnres_base_features(baseline, attnres)
+        base_feat = _router_base_features(baseline, attnres, self.router_base_feature_mode)
         subj_sp, subj_sc = self._subject_summary_router_features(router_context, b, x.device, base_feat.dtype)
         eeg_sp, eeg_sc = self._eeg_summary_router_features(b, x.device, base_feat.dtype)
         depth_sp, depth_sc = self._attnres_depth_router_features(router_context, b, x.device, base_feat.dtype)
@@ -1073,7 +1105,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             depth_proj_l2 = float((dsp - dsc).norm(dim=-1).mean().item())
 
         shared_blend = self._shared_blend_value(cur_epoch)
-        expert_residual_scale = 1.0 - shared_blend
+        expert_residual_scale = self.expert_output_scale * (1.0 - shared_blend)
 
         spatial_parts = [base_feat]
         spectral_parts = [base_feat]
@@ -1271,7 +1303,7 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             else:
                 res_sc = torch.zeros_like(x_flat)
 
-        out = h_shared + expert_residual_scale * (res_sp + res_sc)
+        out = self.shared_output_scale * h_shared + expert_residual_scale * (res_sp + res_sc)
 
         lb_sp = self._bank_load_balance(probs_sp, raw_top1_sp) if self.use_spatial_specialists else probs_sp.new_zeros(())
         lb_sc = self._bank_load_balance(probs_sc, raw_top1_sc) if self.use_spectral_specialists else probs_sc.new_zeros(())
@@ -1462,8 +1494,11 @@ class TypedCapacityDomainMoEFFN(nn.Module):
             "spectral_bank_enabled": bool(self.use_spectral_specialists),
             "uniform_dispatch_warmup_epochs": int(self.uniform_dispatch_warmup_epochs),
             "uniform_dispatch_warmup_active": bool(uniform_dispatch_active),
+            "router_base_feature_mode": self.router_base_feature_mode,
             "shared_blend": float(shared_blend),
+            "shared_output_scale": float(self.shared_output_scale),
             "expert_residual_scale": float(expert_residual_scale),
+            "expert_output_scale": float(self.expert_output_scale),
             "mean_shared_output_norm": float(h_shared.float().norm(dim=-1).mean().item()),
             "mean_spatial_residual_norm": float(res_sp.float().norm(dim=-1).mean().item()),
             "mean_spectral_residual_norm": float(res_sc.float().norm(dim=-1).mean().item()),

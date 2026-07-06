@@ -82,6 +82,9 @@ class CBraMod(nn.Module):
         moe_shared_blend_warmup_epochs: int = 0,
         moe_shared_blend_start: float = 1.0,
         moe_shared_blend_end: float = 0.0,
+        moe_shared_output_scale: float = 1.0,
+        moe_expert_output_scale: float = 1.0,
+        moe_router_base_feature_mode: str = "full",
         moe_router_entropy_coef_spatial: Optional[float] = None,
         moe_router_entropy_coef_spectral: Optional[float] = None,
         moe_router_balance_kl_coef_spatial: Optional[float] = None,
@@ -184,6 +187,9 @@ class CBraMod(nn.Module):
                         shared_blend_warmup_epochs=moe_shared_blend_warmup_epochs,
                         shared_blend_start=moe_shared_blend_start,
                         shared_blend_end=moe_shared_blend_end,
+                        shared_output_scale=moe_shared_output_scale,
+                        expert_output_scale=moe_expert_output_scale,
+                        router_base_feature_mode=moe_router_base_feature_mode,
                         router_entropy_coef_spatial=moe_router_entropy_coef_spatial,
                         router_entropy_coef_spectral=moe_router_entropy_coef_spectral,
                         router_balance_kl_coef_spatial=moe_router_balance_kl_coef_spatial,
@@ -431,6 +437,9 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_shared_blend_warmup_epochs': getattr(param, 'moe_shared_blend_warmup_epochs', 0),
         'moe_shared_blend_start': getattr(param, 'moe_shared_blend_start', 1.0),
         'moe_shared_blend_end': getattr(param, 'moe_shared_blend_end', 0.0),
+        'moe_shared_output_scale': getattr(param, 'moe_shared_output_scale', 1.0),
+        'moe_expert_output_scale': getattr(param, 'moe_expert_output_scale', 1.0),
+        'moe_router_base_feature_mode': getattr(param, 'moe_router_base_feature_mode', 'full'),
         'moe_router_entropy_coef_spatial': (
             None if getattr(param, 'moe_router_entropy_coef_spatial', -1.0) < 0
             else getattr(param, 'moe_router_entropy_coef_spatial', -1.0)

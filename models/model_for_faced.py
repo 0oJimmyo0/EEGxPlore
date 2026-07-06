@@ -2,22 +2,30 @@ import torch
 import torch.nn as nn
 from einops.layers.torch import Rearrange
 from .cbramod import CBraMod, backbone_finetune_kwargs, load_foundation_into_backbone
+from .labram_backbone import LaBraMBackbone, load_labram_foundation_into_backbone
 
 
 class Model(nn.Module):
     def __init__(self, param):
         super().__init__()
 
-        self.backbone = CBraMod(
-            in_dim=200,
-            out_dim=200,
-            d_model=200,
-            dim_feedforward=800,
-            seq_len=30,
-            n_layer=12,
-            nhead=8,
-            **backbone_finetune_kwargs(param),
-        )
+        self.backbone_name = str(getattr(param, 'backbone', 'cbramod')).strip().lower()
+        if self.backbone_name == 'cbramod':
+            self.backbone = CBraMod(
+                in_dim=200,
+                out_dim=200,
+                d_model=200,
+                dim_feedforward=800,
+                seq_len=30,
+                n_layer=12,
+                nhead=8,
+                **backbone_finetune_kwargs(param),
+            )
+        elif self.backbone_name == 'labram':
+            self.backbone = LaBraMBackbone(param)
+        else:
+            raise ValueError(f"Unsupported backbone for FACED: {self.backbone_name}")
+        print(f"[FACED] backbone = {self.backbone_name}")
         print(f"[FACED] attnres_variant = {param.attnres_variant}")
         print(f"[FACED] attnres_gated = {param.attnres_gated}")
         print(f"[FACED] attnres_gate_init = {param.attnres_gate_init}")
@@ -48,16 +56,25 @@ class Model(nn.Module):
         self.pretrained_param_names = set()
 
         if param.use_pretrained_weights:
-            map_location = torch.device(f'cuda:{param.cuda}')
-            ckpt = torch.load(param.foundation_dir, map_location=map_location)
+            map_location = torch.device(f'cuda:{param.cuda}') if torch.cuda.is_available() else torch.device('cpu')
+            ckpt = torch.load(param.foundation_dir, map_location=map_location, weights_only=False)
 
-            if isinstance(ckpt, dict) and "state_dict" in ckpt:
-                ckpt = ckpt["state_dict"]
-
-            loaded_bb = load_foundation_into_backbone(self.backbone, param, ckpt)
+            if self.backbone_name == 'cbramod':
+                if isinstance(ckpt, dict) and "state_dict" in ckpt:
+                    ckpt = ckpt["state_dict"]
+                loaded_bb = load_foundation_into_backbone(self.backbone, param, ckpt)
+            else:
+                loaded_bb = load_labram_foundation_into_backbone(self.backbone, ckpt)
             self.pretrained_param_names = {f'backbone.{k}' for k in loaded_bb}
 
-            if param.attnres_variant == 'none' and not getattr(param, 'moe', False):
+            if self.backbone_name == 'labram':
+                if param.attnres_variant == 'none' and not getattr(param, 'moe', False):
+                    print("[FACED][LaBraM] dense baseline mode: loaded LaBraM foundation weights")
+                elif getattr(param, 'moe', False):
+                    print("[FACED][LaBraM] selective mode: loaded LaBraM foundation + CBraMod-style adapter stack")
+                else:
+                    print(f"[FACED][LaBraM] AttnRes mode ({param.attnres_variant}): loaded LaBraM foundation + adapter stack")
+            elif param.attnres_variant == 'none' and not getattr(param, 'moe', False):
                 print("[FACED] Baseline mode: strict foundation load")
             elif getattr(param, 'moe', False):
                 print(f"[FACED] MoE mode: partial load + dense FFN warm-start into experts")
@@ -69,31 +86,41 @@ class Model(nn.Module):
             print(f"[FACED] Backbone tensors marked pretrained: {len(self.pretrained_param_names)}")
 
         self.backbone.proj_out = nn.Identity()
+        classifier_name = str(param.classifier)
+        if self.backbone_name == 'labram':
+            if classifier_name != 'labram_pooled_linear':
+                print(
+                    f"[FACED][LaBraM] remapping classifier {classifier_name!r} -> "
+                    "'labram_pooled_linear' to match the original LaBraM pooled-head finetuning path"
+                )
+            classifier_name = 'labram_pooled_linear'
 
-        if param.classifier == 'avgpooling_patch_reps':
+        if classifier_name == 'labram_pooled_linear':
+            self.classifier = nn.Linear(200, param.num_of_classes)
+        elif classifier_name == 'avgpooling_patch_reps':
             self.classifier = nn.Sequential(
                 Rearrange('b c s d -> b d c s'),
                 nn.AdaptiveAvgPool2d((1, 1)),
                 nn.Flatten(),
                 nn.Linear(200, param.num_of_classes),
             )
-        elif param.classifier == 'all_patch_reps_onelayer':
+        elif classifier_name == 'all_patch_reps_onelayer':
             self.classifier = nn.Sequential(
                 Rearrange('b c s d -> b (c s d)'),
-                nn.Linear(32 * 10 * 200, param.num_of_classes),
+                nn.LazyLinear(param.num_of_classes),
             )
-        elif param.classifier == 'all_patch_reps_twolayer':
+        elif classifier_name == 'all_patch_reps_twolayer':
             self.classifier = nn.Sequential(
                 Rearrange('b c s d -> b (c s d)'),
-                nn.Linear(32 * 10 * 200, 200),
+                nn.LazyLinear(200),
                 nn.ELU(),
                 nn.Dropout(param.dropout),
                 nn.Linear(200, param.num_of_classes),
             )
-        elif param.classifier == 'all_patch_reps':
+        elif classifier_name == 'all_patch_reps':
             self.classifier = nn.Sequential(
                 Rearrange('b c s d -> b (c s d)'),
-                nn.Linear(32 * 10 * 200, 10 * 200),
+                nn.LazyLinear(10 * 200),
                 nn.ELU(),
                 nn.Dropout(param.dropout),
                 nn.Linear(10 * 200, 200),
@@ -102,7 +129,7 @@ class Model(nn.Module):
                 nn.Linear(200, param.num_of_classes),
             )
         else:
-            raise ValueError(f"Unknown classifier: {param.classifier}")
+            raise ValueError(f"Unknown classifier: {classifier_name}")
 
         all_param_names = {n for n, _ in self.named_parameters()}
         self.new_param_names = all_param_names - self.pretrained_param_names

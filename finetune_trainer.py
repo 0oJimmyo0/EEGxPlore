@@ -267,12 +267,46 @@ class Trainer(object):
                     self.model.parameters(), lr=self.params.lr, momentum=0.9,
                     weight_decay=self.params.weight_decay)
 
-        # Original CBraMod finetune: cosine over full run, per optimizer step
-        self.optimizer_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer,
-            T_max=self.params.epochs * self.data_length,
-            eta_min=float(getattr(self.params, 'min_lr', 5e-6)),
-        )
+        total_steps = max(int(self.params.epochs * self.data_length), 1)
+        warmup_epochs = max(int(getattr(self.params, 'warmup_epochs', 0)), 0)
+        warmup_steps = min(max(warmup_epochs * self.data_length, 0), max(total_steps - 1, 0))
+        eta_min = float(getattr(self.params, 'min_lr', 5e-6))
+        if warmup_steps > 0:
+            start_factor = float(getattr(self.params, 'warmup_start_factor', 0.002))
+            start_factor = min(max(start_factor, 1e-6), 1.0)
+            cosine_steps = max(total_steps - warmup_steps, 1)
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                self.optimizer,
+                start_factor=start_factor,
+                end_factor=1.0,
+                total_iters=warmup_steps,
+            )
+            cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=cosine_steps,
+                eta_min=eta_min,
+            )
+            self.optimizer_scheduler = torch.optim.lr_scheduler.SequentialLR(
+                self.optimizer,
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps],
+            )
+            print(
+                f"[sched] warmup+cosine enabled: total_steps={total_steps} warmup_steps={warmup_steps} "
+                f"warmup_start_factor={start_factor:.6f} eta_min={eta_min:.6g}",
+                flush=True,
+            )
+        else:
+            # Original CBraMod finetune: cosine over full run, per optimizer step
+            self.optimizer_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                self.optimizer,
+                T_max=total_steps,
+                eta_min=eta_min,
+            )
+            print(
+                f"[sched] cosine-only enabled: total_steps={total_steps} eta_min={eta_min:.6g}",
+                flush=True,
+            )
 
         if getattr(self.params, 'use_component_lr', False):
             for i, g in enumerate(self.optimizer.param_groups):
@@ -458,8 +492,14 @@ class Trainer(object):
             return 'classifier'
         if 'backbone' not in name:
             return 'other'
-        if 'moe_ffn.' not in name:
-            return 'backbone'
+        # Keep pretrained LaBraM foundation weights on the backbone LR, but let
+        # selective adapter paths use their own multiplier via the "other"
+        # group. This avoids under-training the added adaptation modules.
+        is_selective_adapter = (
+            name.startswith('backbone.adapter.')
+            or name.startswith('backbone.encoder.')
+            or '.adapter.' in name
+        )
         router_keys = (
             'spatial_router',
             'spectral_router',
@@ -478,10 +518,16 @@ class Trainer(object):
             'spatial_specialists',
             'spectral_specialists',
         )
+        if 'moe_ffn.' not in name:
+            if is_selective_adapter:
+                return 'other'
+            return 'backbone'
         if any(k in name for k in router_keys):
             return 'router'
         if any(k in name for k in expert_keys):
             return 'experts'
+        if is_selective_adapter:
+            return 'other'
         return 'backbone'
 
     def _build_component_optimizer(self, grouped: Dict[str, List[torch.nn.Parameter]], kind: str):
@@ -966,6 +1012,119 @@ class Trainer(object):
         print(f"[summary] wrote {json_path}", flush=True)
         print(f"[summary] appended {csv_path}", flush=True)
 
+    def _write_adaptation_diagnosis(
+        self,
+        epoch_history: List[Dict[str, Any]],
+        best_epoch: int,
+        best_val_metrics: Dict[str, Any],
+        test_metrics: Dict[str, Any],
+    ) -> None:
+        md = self._model_dir()
+        os.makedirs(md, exist_ok=True)
+        if not epoch_history:
+            return
+
+        def _avg(vals: List[float]) -> float:
+            vv = [float(v) for v in vals if v is not None]
+            return float(sum(vv) / len(vv)) if vv else 0.0
+
+        def _last_non_none(vals: List[Any]) -> Any:
+            for v in reversed(vals):
+                if v is not None:
+                    return v
+            return None
+
+        grad_backbone = [row.get('grad_norms', {}).get('backbone', 0.0) for row in epoch_history]
+        grad_router = [row.get('grad_norms', {}).get('router', 0.0) for row in epoch_history]
+        grad_experts = [row.get('grad_norms', {}).get('experts', 0.0) for row in epoch_history]
+        grad_depth = [row.get('grad_norms', {}).get('depth_summary_path', 0.0) for row in epoch_history]
+        grad_classifier = [row.get('grad_norms', {}).get('classifier', 0.0) for row in epoch_history]
+
+        grad_ratio_router_vs_backbone = []
+        grad_ratio_experts_vs_backbone = []
+        grad_ratio_depth_vs_backbone = []
+        for row in epoch_history:
+            g = row.get('grad_norms', {})
+            bb = float(g.get('backbone', 0.0))
+            if bb > 0:
+                grad_ratio_router_vs_backbone.append(float(g.get('router', 0.0)) / bb)
+                grad_ratio_experts_vs_backbone.append(float(g.get('experts', 0.0)) / bb)
+                grad_ratio_depth_vs_backbone.append(float(g.get('depth_summary_path', 0.0)) / bb)
+
+        moe_rows = [row for row in epoch_history if row.get('moe')]
+        sp_eff = [row.get('moe', {}).get('specialization_effective_experts_post_spatial') for row in moe_rows]
+        sc_eff = [row.get('moe', {}).get('specialization_effective_experts_post_spectral') for row in moe_rows]
+        sp_entropy = [row.get('moe', {}).get('routing_entropy_post_spatial') for row in moe_rows]
+        sc_entropy = [row.get('moe', {}).get('routing_entropy_post_spectral') for row in moe_rows]
+        sp_collapsed = [row.get('moe', {}).get('collapsed_experts_spatial') for row in moe_rows]
+        sc_collapsed = [row.get('moe', {}).get('collapsed_experts_spectral') for row in moe_rows]
+        depth_sep_term = [row.get('moe', {}).get('depth_sep_term') for row in moe_rows]
+        depth_sep_js = [row.get('moe', {}).get('depth_sep_js') for row in moe_rows]
+        depth_top2_mass = [row.get('moe', {}).get('depth_block_top2_mass_spatial') for row in moe_rows]
+        depth_dist_sp = _last_non_none([row.get('moe', {}).get('depth_block_weight_dist_spatial') for row in moe_rows])
+        depth_dist_sc = _last_non_none([row.get('moe', {}).get('depth_block_weight_dist_spectral') for row in moe_rows])
+
+        diagnosis = {
+            'backbone': str(getattr(self.params, 'backbone', 'cbramod')),
+            'attnres_variant': str(getattr(self.params, 'attnres_variant', 'none')),
+            'moe': bool(getattr(self.params, 'moe', False)),
+            'labram_adapter_layers': int(getattr(self.params, 'labram_adapter_layers', 0)),
+            'best_epoch': int(best_epoch),
+            'best_val_metrics': _to_jsonable(best_val_metrics),
+            'test_metrics': _to_jsonable(test_metrics),
+            'final_epoch_metrics': _to_jsonable(epoch_history[-1].get('metrics', {})),
+            'grad_activity': {
+                'avg_backbone': _avg(grad_backbone),
+                'avg_router': _avg(grad_router),
+                'avg_experts': _avg(grad_experts),
+                'avg_depth_summary_path': _avg(grad_depth),
+                'avg_classifier': _avg(grad_classifier),
+                'avg_router_vs_backbone': _avg(grad_ratio_router_vs_backbone),
+                'avg_experts_vs_backbone': _avg(grad_ratio_experts_vs_backbone),
+                'avg_depth_vs_backbone': _avg(grad_ratio_depth_vs_backbone),
+                'last_backbone': float(grad_backbone[-1]),
+                'last_router': float(grad_router[-1]),
+                'last_experts': float(grad_experts[-1]),
+                'last_depth_summary_path': float(grad_depth[-1]),
+                'last_classifier': float(grad_classifier[-1]),
+            },
+            'moe_effectiveness': {
+                'avg_effective_experts_spatial': _avg(sp_eff),
+                'avg_effective_experts_spectral': _avg(sc_eff),
+                'last_effective_experts_spatial': _last_non_none(sp_eff),
+                'last_effective_experts_spectral': _last_non_none(sc_eff),
+                'avg_routing_entropy_post_spatial': _avg(sp_entropy),
+                'avg_routing_entropy_post_spectral': _avg(sc_entropy),
+                'avg_collapsed_experts_spatial': _avg(sp_collapsed),
+                'avg_collapsed_experts_spectral': _avg(sc_collapsed),
+                'avg_depth_sep_term': _avg(depth_sep_term),
+                'avg_depth_sep_js': _avg(depth_sep_js),
+                'avg_depth_block_top2_mass_spatial': _avg(depth_top2_mass),
+                'last_depth_block_weight_dist_spatial': depth_dist_sp,
+                'last_depth_block_weight_dist_spectral': depth_dist_sc,
+            },
+        }
+
+        observations = []
+        if diagnosis['grad_activity']['avg_router_vs_backbone'] < 0.05 and bool(getattr(self.params, 'moe', False)):
+            observations.append('Router gradients are much smaller than backbone gradients; routing may be too weak to strongly affect downstream performance.')
+        if diagnosis['grad_activity']['avg_experts_vs_backbone'] < 0.02 and bool(getattr(self.params, 'moe', False)):
+            observations.append('Expert gradients are tiny relative to the backbone; specialists may be under-trained or too lightly used.')
+        if diagnosis['moe_effectiveness']['avg_depth_block_top2_mass_spatial'] > 0.95:
+            observations.append('Depth-summary routing is heavily concentrated in the top two blocks, so later blocks contribute very little.')
+        if bool(getattr(self.params, 'moe', False)) and diagnosis['moe_effectiveness']['avg_depth_sep_term'] <= 1e-8 and float(getattr(self.params, 'moe_attnres_depth_block_separation_coef', 0.0)) > 0:
+            observations.append('Depth block-separation regularizer was configured but effectively inactive; the current penalty is not pushing block diversification.')
+        if bool(getattr(self.params, 'moe', False)) and diagnosis['moe_effectiveness']['avg_effective_experts_spatial'] >= 3.0:
+            observations.append('Spatial routing does use multiple experts, so the main issue is not total expert collapse.')
+        if not bool(getattr(self.params, 'moe', False)) and str(getattr(self.params, 'attnres_variant', 'none')) != 'none':
+            observations.append('AttnRes-only run isolates residual adaptation from routing; compare directly against dense LaBraM to estimate pure residual-path benefit.')
+        diagnosis['observations'] = observations
+
+        path = os.path.join(md, 'adaptation_diagnosis.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(_to_jsonable(diagnosis), f, indent=2, ensure_ascii=True, sort_keys=True)
+        print(f"[summary] wrote {path}", flush=True)
+
     def train_for_multiclass(self):
         """Same optimizer/schedule for baseline (--attnres_variant none) and AttnRes variants.
 
@@ -991,6 +1150,7 @@ class Trainer(object):
         ema_best_model_states: Optional[Dict[str, Any]] = None
 
         train_steps = 0
+        epoch_history: List[Dict[str, Any]] = []
 
         self._print_slurm_oom_hints()
 
@@ -1167,6 +1327,42 @@ class Trainer(object):
                         grad_norms=grad_norms,
                         cm=np.asarray(cm),
                     )
+                    moe_layers = self._collect_layer_moe_diagnostics()
+                    moe_summary: Dict[str, Any] = {}
+                    if moe_layers:
+                        last_diag = (moe_layers[-1].get('diag', {}) or {})
+                        spatial_diag = last_diag.get('spatial', {}) or {}
+                        spectral_diag = last_diag.get('spectral', {}) or {}
+                        sp_assigned = spatial_diag.get('assigned_count_per_expert') or []
+                        sc_assigned = spectral_diag.get('assigned_count_per_expert') or []
+                        sp_depth_dist = last_diag.get('attnres_depth_block_weight_dist_spatial') or []
+                        sc_depth_dist = last_diag.get('attnres_depth_block_weight_dist_spectral') or []
+                        moe_summary = {
+                            'layer': int(moe_layers[-1].get('layer', -1)),
+                            'specialization_effective_experts_post_spatial': last_diag.get('specialization_effective_experts_post_spatial'),
+                            'specialization_effective_experts_post_spectral': last_diag.get('specialization_effective_experts_post_spectral'),
+                            'routing_entropy_post_spatial': spatial_diag.get('routing_entropy_post_assignment'),
+                            'routing_entropy_post_spectral': spectral_diag.get('routing_entropy_post_assignment'),
+                            'collapsed_experts_spatial': int(sum(1 for v in sp_assigned if int(v) == 0)),
+                            'collapsed_experts_spectral': int(sum(1 for v in sc_assigned if int(v) == 0)),
+                            'depth_sep_term': last_diag.get('aux_depth_block_sep_term'),
+                            'depth_sep_js': last_diag.get('aux_depth_block_sep_js'),
+                            'depth_block_weight_dist_spatial': sp_depth_dist,
+                            'depth_block_weight_dist_spectral': sc_depth_dist,
+                            'depth_block_top2_mass_spatial': float(sum(sorted([float(x) for x in sp_depth_dist], reverse=True)[:2])) if sp_depth_dist else None,
+                            'depth_block_top2_mass_spectral': float(sum(sorted([float(x) for x in sc_depth_dist], reverse=True)[:2])) if sc_depth_dist else None,
+                        }
+                    epoch_history.append({
+                        'epoch': int(epoch + 1),
+                        'metrics': {
+                            'balanced_accuracy': float(acc),
+                            'kappa': float(kappa),
+                            'weighted_f1': float(f1),
+                            'eval_source': selected_source,
+                        },
+                        'grad_norms': _to_jsonable(grad_norms),
+                        'moe': _to_jsonable(moe_summary),
+                    })
                     self._export_depth_context_diagnostics(epoch + 1, 'val')
                     self._warn_depth_summary_flow(epoch + 1, grad_norms)
                     print("starting MoE diagnostics", flush=True)
@@ -1408,6 +1604,16 @@ class Trainer(object):
                             'weighted_f1': float(primary_f1),
                         },
                         model_path=model_path,
+                    )
+                    self._write_adaptation_diagnosis(
+                        epoch_history=epoch_history,
+                        best_epoch=primary_epoch,
+                        best_val_metrics=primary_val_metrics,
+                        test_metrics={
+                            'balanced_accuracy': float(primary_acc),
+                            'kappa': float(primary_kappa),
+                            'weighted_f1': float(primary_f1),
+                        },
                     )
 
                     if ema_test_acc is not None:

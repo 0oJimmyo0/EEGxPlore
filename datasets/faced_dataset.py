@@ -17,34 +17,57 @@ class CustomDataset(Dataset):
             return_keys: bool = False,
             return_domain_ids: bool = False,
             domain_maps=None,
+            input_scale_divisor: float = 100.0,
     ):
         super(CustomDataset, self).__init__()
+        self.data_dir = data_dir
         self.return_keys = return_keys
         self.return_domain_ids = return_domain_ids
         self.domain_maps = domain_maps or {}
-        self.db = lmdb.open(data_dir, readonly=True, lock=False, readahead=True, meminit=False)
-        with self.db.begin(write=False) as txn:
+        self.input_scale_divisor = float(input_scale_divisor)
+        if self.input_scale_divisor <= 0:
+            raise ValueError(f"input_scale_divisor must be > 0, got {self.input_scale_divisor}")
+        self.db = None
+        with lmdb.open(data_dir, readonly=True, lock=False, readahead=False, meminit=False).begin(write=False) as txn:
             self.keys = pickle.loads(txn.get('__keys__'.encode()))[mode]
 
     def __len__(self):
         return len((self.keys))
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["db"] = None
+        return state
+
+    def _get_db(self):
+        if self.db is None:
+            self.db = lmdb.open(
+                self.data_dir,
+                readonly=True,
+                lock=False,
+                readahead=False,
+                meminit=False,
+                max_readers=512,
+            )
+        return self.db
+
     def __getitem__(self, idx):
         key = self.keys[idx]
         enc = key.encode() if isinstance(key, str) else key
-        with self.db.begin(write=False) as txn:
+        with self._get_db().begin(write=False) as txn:
             pair = pickle.loads(txn.get(enc))
         data = pair['sample']
         label = pair['label']
+        data = data / self.input_scale_divisor
         kstr = key.decode() if isinstance(key, bytes) else str(key)
         if self.return_keys or self.return_domain_ids:
-            out = [data / 100, label]
+            out = [data, label]
             if self.return_keys:
                 out.append(kstr)
             if self.return_domain_ids:
                 out.append(lmdb_key_to_domain_ids(kstr, self.domain_maps))
             return tuple(out)
-        return data / 100, label
+        return data, label
 
     def collate(self, batch):
         x_data = np.array([x[0] for x in batch])
@@ -85,6 +108,11 @@ class LoadDataset(object):
             and route_mode == 'typed_capacity_domain'
         )
         domain_maps = build_faced_domain_maps(getattr(self.params, 'faced_meta_csv', '')) if return_domain_ids else {}
+        num_workers = int(getattr(self.params, 'num_workers', 0))
+        persistent_workers = bool(getattr(self.params, 'persistent_workers', False) and num_workers > 0)
+        pin_memory = bool(getattr(self.params, 'pin_memory', False))
+        input_scale_divisor = float(getattr(self.params, 'input_scale_divisor', 100.0))
+        print(f"[FACED] input_scale_divisor={input_scale_divisor}", flush=True)
 
         train_set = CustomDataset(
             self.datasets_dir,
@@ -92,6 +120,7 @@ class LoadDataset(object):
             return_keys=rk,
             return_domain_ids=return_domain_ids,
             domain_maps=domain_maps,
+            input_scale_divisor=input_scale_divisor,
         )
         val_set = CustomDataset(
             self.datasets_dir,
@@ -99,6 +128,7 @@ class LoadDataset(object):
             return_keys=rk,
             return_domain_ids=return_domain_ids,
             domain_maps=domain_maps,
+            input_scale_divisor=input_scale_divisor,
         )
         test_set = CustomDataset(
             self.datasets_dir,
@@ -106,6 +136,7 @@ class LoadDataset(object):
             return_keys=rk,
             return_domain_ids=return_domain_ids,
             domain_maps=domain_maps,
+            input_scale_divisor=input_scale_divisor,
         )
         print(len(train_set), len(val_set), len(test_set))
         print(len(train_set)+len(val_set)+len(test_set))
@@ -115,18 +146,27 @@ class LoadDataset(object):
                 batch_size=self.params.batch_size,
                 collate_fn=train_set.collate,
                 shuffle=True,
+                num_workers=num_workers,
+                persistent_workers=persistent_workers,
+                pin_memory=pin_memory,
             ),
             'val': DataLoader(
                 val_set,
                 batch_size=self.params.batch_size,
                 collate_fn=val_set.collate,
                 shuffle=False,
+                num_workers=num_workers,
+                persistent_workers=persistent_workers,
+                pin_memory=pin_memory,
             ),
             'test': DataLoader(
                 test_set,
                 batch_size=self.params.batch_size,
                 collate_fn=test_set.collate,
                 shuffle=False,
+                num_workers=num_workers,
+                persistent_workers=persistent_workers,
+                pin_memory=pin_memory,
             ),
         }
         return data_loader

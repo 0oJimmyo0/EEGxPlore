@@ -1,5 +1,73 @@
 # EEGxPlore Next-Step Plan
 
+## Current Status
+
+We have now shown that the current ACCRE setup can run:
+
+- the original `EEGxPlore` SEED-V pipeline,
+- LaBraM baseline finetuning on our existing SEED-V data format,
+- LaBraM + EEGxPlore-style selective adaptation blocks on the same data.
+
+The practical meaning of this is important:
+
+- the infrastructure question is mostly solved for SEED-V,
+- backbone substitution is feasible in code,
+- the main remaining problem is now scientific and architectural rather than environment-related.
+
+At the moment, the most honest summary is:
+
+- `AttnRes`-style adaptation is stable and usually competitive,
+- the full selective MoE path is feasible but fragile,
+- gains over a dense LaBraM baseline are currently modest and configuration-sensitive on SEED-V.
+
+That does **not** invalidate the project direction.
+It just means the strongest paper claim should currently be:
+
+> Our adaptation block is useful as a lightweight EEG-backbone adaptation mechanism, and it can provide gains on existing EEG backbones, but the expert-routing part still needs refinement to become consistently reliable.
+
+---
+
+## Immediate Challenge
+
+The current challenge is **not** “can we run LaBraM?”.
+We can.
+
+The current challenge is:
+
+> Why does the selective adaptation path sometimes underperform or become fragile relative to dense finetuning, and which part of the adaptation block is responsible?
+
+The main symptoms seen so far on SEED-V are:
+
+- specialist gradients are often much smaller than backbone gradients,
+- routing tends to become shortcut-prone or collapse-prone,
+- the shared FFN path may dominate too strongly,
+- extra routing context can add complexity without guaranteed benefit.
+
+So the next stage should focus on three direct hypotheses:
+
+1. the shared path may be overpowering the specialists,
+2. the experts may be too weak to matter even when they are selected,
+3. the current router target may be more complicated than SEED-V needs.
+
+---
+
+## Immediate Engineering Response
+
+The codebase should now support direct tests for:
+
+- reduced shared-path dominance,
+- increased expert contribution,
+- simplified router input targets.
+
+Concretely, the next LaBraM-on-SEED-V diagnosis runs should prioritize:
+
+- lower shared-path contribution,
+- higher effective expert contribution,
+- simpler router inputs such as `delta_only` rather than the full baseline+attnres+delta summary,
+- depth-router off vs on only when the comparison is paired and controlled.
+
+We should treat these as **mechanism diagnosis** runs, not headline-result runs.
+
 ## Objective
 
 The immediate priority is **not** to add more backbones.

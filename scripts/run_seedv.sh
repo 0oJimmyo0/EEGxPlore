@@ -6,10 +6,12 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CUDA_ID="${CUDA_ID:-0}"
-DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/SEED-V/processed_lmdb}"
-FOUNDATION_DIR="${FOUNDATION_DIR:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/others/pretrained_weights.pth}"
+DATASET_DIR="${DATASET_DIR:-/data/neurogroup/mingyangjiang/data/SEED-V_processed_lmdb}"
+FOUNDATION_DIR="${FOUNDATION_DIR:-/data/neurogroup/mingyangjiang/data/weights/pretrained_weights.pth}"
+CONDA_ENV_PREFIX="${CONDA_ENV_PREFIX:-}"
 SEEDV_SPLIT_MANIFEST="${SEEDV_SPLIT_MANIFEST:-}"
 MODEL_DIR="${MODEL_DIR:-$REPO_DIR/output/seedv_refactor_anchor}"
+SMOKE_TEST="${SMOKE_TEST:-0}"
 
 EPOCHS="${EPOCHS:-40}"
 BATCH_SIZE="${BATCH_SIZE:-32}"
@@ -35,6 +37,31 @@ LR_EXPERT_MULT="${LR_EXPERT_MULT:-1.0}"
 LR_CLASSIFIER_MULT="${LR_CLASSIFIER_MULT:-1.0}"
 LR_OTHER_MULT="${LR_OTHER_MULT:-1.0}"
 
+if [[ ! -d "$DATASET_DIR" ]]; then
+  echo "[run_seedv] dataset dir not found: $DATASET_DIR" >&2
+  exit 2
+fi
+
+if [[ ! -f "$FOUNDATION_DIR" ]]; then
+  echo "[run_seedv] foundation checkpoint not found: $FOUNDATION_DIR" >&2
+  exit 2
+fi
+
+PYTHON_BIN=(python)
+if [[ -n "$CONDA_ENV_PREFIX" ]]; then
+  if [[ ! -x "$CONDA_ENV_PREFIX/bin/python" ]]; then
+    echo "[run_seedv] conda env python not found: $CONDA_ENV_PREFIX/bin/python" >&2
+    exit 2
+  fi
+  PYTHON_BIN=(conda run --no-capture-output -p "$CONDA_ENV_PREFIX" python)
+fi
+
+if [[ "$SMOKE_TEST" == "1" ]]; then
+  EPOCHS="${EPOCHS:-1}"
+  BATCH_SIZE="${BATCH_SIZE:-8}"
+  NUM_WORKERS="${NUM_WORKERS:-0}"
+fi
+
 case "$DEPTH_QUERY_MODE" in
   shared|dual)
     ;;
@@ -58,14 +85,16 @@ mkdir -p "$MODEL_DIR"
 
 echo "[run_seedv] cohort=CBraMod benchmark (LMDB __keys__)" >&2
 echo "[run_seedv] dataset_dir=$DATASET_DIR" >&2
+echo "[run_seedv] foundation_dir=$FOUNDATION_DIR" >&2
 echo "[run_seedv] split_manifest=${SEEDV_SPLIT_MANIFEST:-<none>}" >&2
+echo "[run_seedv] smoke_test=$SMOKE_TEST epochs=$EPOCHS batch_size=$BATCH_SIZE num_workers=$NUM_WORKERS" >&2
 echo "[run_seedv] attnres_variant=$ATTNRES_VARIANT use_moe=$USE_MOE" >&2
 echo "[run_seedv] lr=$LR min_lr=$MIN_LR component_lr=$USE_COMPONENT_LR lr_mults=(bb:$LR_BACKBONE_MULT,router:$LR_ROUTER_MULT,expert:$LR_EXPERT_MULT,clf:$LR_CLASSIFIER_MULT,other:$LR_OTHER_MULT)" >&2
 echo "[run_seedv] router_soft_warmup_epochs=15 (soft-dispatch runs use warmup blending in MoE router)" >&2
 echo "[run_seedv] a1_strict=$A1_STRICT_BLOCK_ABLATION depth_query_mode=$DEPTH_QUERY_MODE depth_context_mode=$DEPTH_CONTEXT_MODE block_count=$DEPTH_BLOCK_COUNT depth_dim=$DEPTH_ROUTER_DIM depth_norm_gate=$DEPTH_ROUTER_NORM_GATE depth_norm_eps=$DEPTH_ROUTER_NORM_EPS depth_gate_init=$DEPTH_ROUTER_GATE_INIT depth_sep_coef=$DEPTH_BLOCK_SEP_COEF depth_sep_target_js=$DEPTH_BLOCK_SEP_TARGET_JS" >&2
 
 CMD=(
-  python "$REPO_DIR/finetune_main.py"
+  "${PYTHON_BIN[@]}" "$REPO_DIR/finetune_main.py"
   --seed 42
   --cuda "$CUDA_ID"
   --epochs "$EPOCHS"

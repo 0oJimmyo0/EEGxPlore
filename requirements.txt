@@ -9,6 +9,7 @@ ptflops
 pyEDFlib
 scikit_learn
 scipy
+timm
 torchinfo
 tqdm
 umap_learn
