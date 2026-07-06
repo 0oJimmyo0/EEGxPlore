@@ -1,4 +1,5 @@
 import importlib
+import importlib.util
 import os
 import sys
 from typing import Any, Dict, Optional, Set, Tuple
@@ -39,10 +40,18 @@ def _import_labram_ctor(repo_dir: str, model_name: str):
     repo_dir = os.path.abspath(repo_dir)
     if not os.path.isdir(repo_dir):
         raise FileNotFoundError(f"LaBraM repo dir not found: {repo_dir}")
-    if repo_dir not in sys.path:
-        sys.path.insert(0, repo_dir)
+    module_path = os.path.join(repo_dir, "modeling_finetune.py")
+    if not os.path.isfile(module_path):
+        raise FileNotFoundError(f"LaBraM modeling_finetune.py not found: {module_path}")
     try:
-        module = importlib.import_module("modeling_finetune")
+        spec = importlib.util.spec_from_file_location("labram_modeling_finetune", module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not build module spec for {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        if repo_dir not in sys.path:
+            sys.path.insert(0, repo_dir)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
     except ImportError as exc:
         raise ImportError(
             "Failed to import LaBraM modeling_finetune. Ensure the active EEGxPlore "
@@ -52,6 +61,27 @@ def _import_labram_ctor(repo_dir: str, model_name: str):
         return getattr(module, model_name)
     except AttributeError as exc:
         raise AttributeError(f"LaBraM model constructor not found: {model_name}") from exc
+
+
+def _import_labram_utils(repo_dir: str):
+    repo_dir = os.path.abspath(repo_dir)
+    if not os.path.isdir(repo_dir):
+        raise FileNotFoundError(f"LaBraM repo dir not found: {repo_dir}")
+    module_path = os.path.join(repo_dir, "utils.py")
+    if not os.path.isfile(module_path):
+        raise FileNotFoundError(f"LaBraM utils.py not found: {module_path}")
+    try:
+        spec = importlib.util.spec_from_file_location("labram_repo_utils", module_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not build module spec for {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        if repo_dir not in sys.path:
+            sys.path.insert(0, repo_dir)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    except ImportError as exc:
+        raise ImportError("Failed to import LaBraM utils for input_chans resolution.") from exc
 
 
 def _extract_labram_state_dict(ckpt_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,6 +136,18 @@ class LaBraMBackbone(nn.Module):
         self.proj_out = nn.Identity()
         self.output_mode = "pooled"
         self.feature_dim = int(getattr(self.foundation, "embed_dim", 200))
+        self.channel_names = list(getattr(param, "labram_channel_names", []) or [])
+        self.input_chans = None
+        if self.channel_names:
+            labram_utils = _import_labram_utils(repo_dir)
+            self.input_chans = labram_utils.get_input_chans(self.channel_names)
+            print(
+                f"[LaBraM] input_chans resolved from manifest: n={len(self.channel_names)} "
+                f"tail_names={self.channel_names[-4:]} tail_indices={self.input_chans[-4:]}",
+                flush=True,
+            )
+        else:
+            print("[LaBraM] no channel manifest provided; using stored tensor slot positions.", flush=True)
 
         selective_requested = bool(getattr(param, "moe", False)) or getattr(param, "attnres_variant", "none") != "none"
         adapter_layers = int(getattr(param, "labram_adapter_layers", 4))
@@ -141,7 +183,15 @@ class LaBraMBackbone(nn.Module):
 
     def _foundation_features(self, x: torch.Tensor) -> torch.Tensor:
         batch_size, channels, patches, _ = x.shape
-        patch_tokens = self.foundation.forward_features(x, return_patch_tokens=True)
+        if self.input_chans is not None and len(self.input_chans) != channels + 1:
+            raise ValueError(
+                f"LaBraM input_chans length mismatch: expected {channels + 1}, got {len(self.input_chans)}"
+            )
+        patch_tokens = self.foundation.forward_features(
+            x,
+            input_chans=self.input_chans,
+            return_patch_tokens=True,
+        )
         if patch_tokens.shape[1] != channels * patches:
             raise ValueError(
                 f"LaBraM patch token count mismatch: expected {channels * patches}, "
@@ -180,7 +230,15 @@ class LaBraMBackbone(nn.Module):
             if self.adapter is None:
                 # Dense LaBraM path: mirror the original finetune recipe and return
                 # the pooled fc_norm feature that normally feeds LaBraM's linear head.
-                return self.foundation.forward_features(x, return_patch_tokens=False)
+                if self.input_chans is not None and len(self.input_chans) != x.shape[1] + 1:
+                    raise ValueError(
+                        f"LaBraM input_chans length mismatch: expected {x.shape[1] + 1}, got {len(self.input_chans)}"
+                    )
+                return self.foundation.forward_features(
+                    x,
+                    input_chans=self.input_chans,
+                    return_patch_tokens=False,
+                )
 
             feats = self._foundation_features(x)
             feats = self.adapter.encoder(feats)

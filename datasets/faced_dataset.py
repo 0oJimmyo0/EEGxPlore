@@ -6,8 +6,76 @@ import os
 import random
 import lmdb
 import pickle
+import json
+from typing import Optional, List
 
 from utils.faced_meta import build_faced_domain_maps, lmdb_key_to_domain_ids
+from utils.faced_channel_manifest import normalize_faced_channel_names
+
+
+def _extract_channel_names_from_payload(payload) -> Optional[List[str]]:
+    if isinstance(payload, dict):
+        if "labram_channel_names" in payload:
+            return payload["labram_channel_names"]
+        for field in ("channel_names", "ch_names", "channels", "stored_channel_names"):
+            if field in payload:
+                return payload[field]
+    elif isinstance(payload, (list, tuple)):
+        return list(payload)
+    return None
+
+
+def read_faced_channel_names(root: str) -> Optional[List[str]]:
+    candidate_keys = [
+        b"__channel_manifest__",
+        b"__channel_names__",
+        b"channel_names",
+        b"ch_names",
+        b"channels",
+    ]
+    candidate_files = [
+        os.path.join(root, "channel_manifest.json"),
+        os.path.join(root, "channel_names.json"),
+        root + "_channel_manifest.json",
+        root + "_channel_names.json",
+    ]
+
+    try:
+        db = lmdb.open(root, readonly=True, lock=False, readahead=False, meminit=False)
+        with db.begin(write=False) as txn:
+            for key in candidate_keys:
+                raw = txn.get(key)
+                if raw is None:
+                    continue
+                try:
+                    payload = pickle.loads(raw)
+                except Exception:
+                    try:
+                        payload = json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        payload = None
+                channel_names = _extract_channel_names_from_payload(payload)
+                if channel_names is not None:
+                    channel_names = normalize_faced_channel_names(list(channel_names))
+                    if len(channel_names) == 32:
+                        return channel_names
+    except Exception:
+        pass
+
+    for path in candidate_files:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            continue
+        channel_names = _extract_channel_names_from_payload(payload)
+        if channel_names is not None:
+            channel_names = normalize_faced_channel_names(list(channel_names))
+            if len(channel_names) == 32:
+                return channel_names
+    return None
 
 class CustomDataset(Dataset):
     def __init__(
@@ -28,6 +96,7 @@ class CustomDataset(Dataset):
         if self.input_scale_divisor <= 0:
             raise ValueError(f"input_scale_divisor must be > 0, got {self.input_scale_divisor}")
         self.db = None
+        self.channel_names = read_faced_channel_names(data_dir)
         with lmdb.open(data_dir, readonly=True, lock=False, readahead=False, meminit=False).begin(write=False) as txn:
             self.keys = pickle.loads(txn.get('__keys__'.encode()))[mode]
 
@@ -94,6 +163,9 @@ class CustomDataset(Dataset):
             return to_tensor(x_data), to_tensor(y_label).long(), domain_meta
         return to_tensor(x_data), to_tensor(y_label).long()
 
+    def get_ch_names(self):
+        return self.channel_names
+
 
 class LoadDataset(object):
     def __init__(self, params):
@@ -138,6 +210,16 @@ class LoadDataset(object):
             domain_maps=domain_maps,
             input_scale_divisor=input_scale_divisor,
         )
+        if train_set.get_ch_names() is not None:
+            self.params.labram_channel_names = train_set.get_ch_names()
+            print(
+                f"[FACED] loaded channel manifest with {len(self.params.labram_channel_names)} names; "
+                f"tail={self.params.labram_channel_names[-4:]}",
+                flush=True,
+            )
+        else:
+            self.params.labram_channel_names = None
+            print("[FACED] warning: no channel manifest found; LaBraM will fall back to positional slot order.", flush=True)
         print(len(train_set), len(val_set), len(test_set))
         print(len(train_set)+len(val_set)+len(test_set))
         data_loader = {
