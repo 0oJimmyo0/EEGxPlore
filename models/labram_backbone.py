@@ -264,5 +264,12 @@ class LaBraMBackbone(nn.Module):
 
     def no_weight_decay(self) -> Set[str]:
         if hasattr(self.foundation, "no_weight_decay"):
-            return {f"foundation.{name}" for name in self.foundation.no_weight_decay()}
+            names = set(self.foundation.no_weight_decay())
+            # EEGxPlore trainer compares against full model.named_parameters() names,
+            # which are rooted at "backbone.foundation.*" inside the wrapper model.
+            out = {f"backbone.foundation.{name}" for name in names}
+            # Keep the shorter alias too so other helper code can still match if it
+            # ever inspects names relative to the backbone module itself.
+            out.update({f"foundation.{name}" for name in names})
+            return out
         return set()

@@ -32,7 +32,9 @@ DROPOUT="${DROPOUT:-0.0}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.1}"
 CLASSIFIER="${CLASSIFIER:-labram_pooled_linear}"
 BACKBONE="${BACKBONE:-labram}"
-INPUT_SCALE_DIVISOR="${INPUT_SCALE_DIVISOR:-1.0}"
+# Match the original LaBraM finetune path, which divides FACED LMDB amplitudes
+# by 100 inside engine_for_finetuning.py before patchification.
+INPUT_SCALE_DIVISOR="${INPUT_SCALE_DIVISOR:-100.0}"
 FROZEN="${FROZEN:-0}"
 LABRAM_ADAPTER_LAYERS="${LABRAM_ADAPTER_LAYERS:-0}"
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-none}"

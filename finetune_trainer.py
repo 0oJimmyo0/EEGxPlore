@@ -239,6 +239,17 @@ class Trainer(object):
         self.data_length = len(self.data_loader['train'])
         if getattr(self.params, 'use_component_lr', False) and getattr(self.params, 'multi_lr', False):
             print('[opt] use_component_lr=True overrides multi_lr=True.', flush=True)
+        if (
+            str(getattr(self.params, 'backbone', 'cbramod')).strip().lower() == 'labram'
+            and getattr(self.params, 'use_component_lr', False)
+            and float(getattr(self.params, 'labram_layer_decay', 1.0)) < 1.0
+        ):
+            print(
+                '[opt] warning: use_component_lr=True currently overrides LaBraM '
+                'layer-wise LR decay. This run will use component groups instead of '
+                f'labram_layer_decay={float(getattr(self.params, "labram_layer_decay", 1.0)):.4f}.',
+                flush=True,
+            )
 
         if self.params.optimizer == 'AdamW':
             if getattr(self.params, 'use_component_lr', False):
