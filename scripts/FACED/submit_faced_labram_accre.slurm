@@ -32,9 +32,12 @@ DROPOUT="${DROPOUT:-0.0}"
 LABEL_SMOOTHING="${LABEL_SMOOTHING:-0.1}"
 CLASSIFIER="${CLASSIFIER:-labram_pooled_linear}"
 BACKBONE="${BACKBONE:-labram}"
-# Match the original LaBraM finetune path, which divides FACED LMDB amplitudes
-# by 100 inside engine_for_finetuning.py before patchification.
+# Current EEGxPlore FACED LaBraM sweeps perform best with the LaBraM-style
+# scale100 setting, which also matches the original LaBraM finetune path that
+# divides LMDB amplitudes by 100 before patchification.
 INPUT_SCALE_DIVISOR="${INPUT_SCALE_DIVISOR:-100.0}"
+LABRAM_TOKEN_POOL_NO_ADAPTER="${LABRAM_TOKEN_POOL_NO_ADAPTER:-0}"
+LABRAM_FORCE_ADAPTER="${LABRAM_FORCE_ADAPTER:-0}"
 FROZEN="${FROZEN:-0}"
 LABRAM_ADAPTER_LAYERS="${LABRAM_ADAPTER_LAYERS:-0}"
 ATTNRES_VARIANT="${ATTNRES_VARIANT:-none}"
@@ -107,7 +110,7 @@ print("lmdb:", lmdb.__file__)
 PY
 nvidia-smi || true
 echo "EEGxPlore FACED LaBraM launch: RUN_NAME=$RUN_NAME BATCH_SIZE=$BATCH_SIZE NUM_WORKERS=$NUM_WORKERS LR=$LR EPOCHS=$EPOCHS" >&2
-echo "BACKBONE=$BACKBONE ADAPTER_LAYERS=$LABRAM_ADAPTER_LAYERS ATTNRES_VARIANT=$ATTNRES_VARIANT ATTNRES_GATED=$ATTNRES_GATED ATTNRES_GATE_INIT=$ATTNRES_GATE_INIT USE_MOE=$USE_MOE LABRAM_LAYER_DECAY=$LABRAM_LAYER_DECAY" >&2
+echo "BACKBONE=$BACKBONE ADAPTER_LAYERS=$LABRAM_ADAPTER_LAYERS ATTNRES_VARIANT=$ATTNRES_VARIANT ATTNRES_GATED=$ATTNRES_GATED ATTNRES_GATE_INIT=$ATTNRES_GATE_INIT USE_MOE=$USE_MOE LABRAM_LAYER_DECAY=$LABRAM_LAYER_DECAY TOKEN_POOL_NO_ADAPTER=$LABRAM_TOKEN_POOL_NO_ADAPTER FORCE_ADAPTER=$LABRAM_FORCE_ADAPTER" >&2
 
 EXTRA_ARGS=()
 PYTHON_ARGS=()
@@ -170,6 +173,12 @@ if [[ "$PIN_MEMORY" == "1" ]]; then
 fi
 if [[ "$PERSISTENT_WORKERS" == "1" ]]; then
   PYTHON_ARGS+=(--persistent_workers)
+fi
+if [[ "$LABRAM_TOKEN_POOL_NO_ADAPTER" == "1" ]]; then
+  PYTHON_ARGS+=(--labram_token_pool_no_adapter)
+fi
+if [[ "$LABRAM_FORCE_ADAPTER" == "1" ]]; then
+  PYTHON_ARGS+=(--labram_force_adapter)
 fi
 
 python "$REPO_DIR/finetune_main.py" \

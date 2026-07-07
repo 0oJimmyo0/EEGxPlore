@@ -245,14 +245,19 @@ class Trainer(object):
             and float(getattr(self.params, 'labram_layer_decay', 1.0)) < 1.0
         ):
             print(
-                '[opt] warning: use_component_lr=True currently overrides LaBraM '
-                'layer-wise LR decay. This run will use component groups instead of '
-                f'labram_layer_decay={float(getattr(self.params, "labram_layer_decay", 1.0)):.4f}.',
+                '[opt] LaBraM combined optimizer requested: component LR multipliers '
+                'will be applied on top of layer-wise LR decay.',
                 flush=True,
             )
 
         if self.params.optimizer == 'AdamW':
-            if getattr(self.params, 'use_component_lr', False):
+            if (
+                getattr(self.params, 'use_component_lr', False)
+                and str(getattr(self.params, 'backbone', 'cbramod')).strip().lower() == 'labram'
+                and float(getattr(self.params, 'labram_layer_decay', 1.0)) < 1.0
+            ):
+                self.optimizer = self._build_labram_combined_optimizer(kind='adamw')
+            elif getattr(self.params, 'use_component_lr', False):
                 self.optimizer = self._build_component_optimizer(grouped, kind='adamw')
             elif (
                 str(getattr(self.params, 'backbone', 'cbramod')).strip().lower() == 'labram'
@@ -270,7 +275,13 @@ class Trainer(object):
                     self.model.parameters(), lr=self.params.lr,
                     weight_decay=self.params.weight_decay)
         else:
-            if getattr(self.params, 'use_component_lr', False):
+            if (
+                getattr(self.params, 'use_component_lr', False)
+                and str(getattr(self.params, 'backbone', 'cbramod')).strip().lower() == 'labram'
+                and float(getattr(self.params, 'labram_layer_decay', 1.0)) < 1.0
+            ):
+                self.optimizer = self._build_labram_combined_optimizer(kind='sgd')
+            elif getattr(self.params, 'use_component_lr', False):
                 self.optimizer = self._build_component_optimizer(grouped, kind='sgd')
             elif (
                 str(getattr(self.params, 'backbone', 'cbramod')).strip().lower() == 'labram'
@@ -635,6 +646,69 @@ class Trainer(object):
                 flush=True,
             )
         if self.params.optimizer == 'AdamW':
+            return torch.optim.AdamW(groups)
+        return torch.optim.SGD(groups, momentum=0.9)
+
+    def _build_labram_combined_optimizer(self, kind: str):
+        bb = getattr(self.model, 'backbone', None)
+        if bb is None or not hasattr(bb, 'get_num_layers'):
+            raise RuntimeError('Combined LaBraM optimizer requested but model.backbone does not expose get_num_layers().')
+
+        layer_decay = float(getattr(self.params, 'labram_layer_decay', 1.0))
+        if not (0.0 < layer_decay <= 1.0):
+            raise ValueError(f'labram_layer_decay must be in (0, 1], got {layer_decay}')
+
+        num_layers = int(bb.get_num_layers())
+        layer_values = [layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2)]
+        no_decay = set(bb.no_weight_decay()) if hasattr(bb, 'no_weight_decay') else set()
+        component_mults = {
+            'backbone': float(getattr(self.params, 'lr_backbone_mult', 1.0)),
+            'router': float(getattr(self.params, 'lr_router_mult', 1.0)),
+            'experts': float(getattr(self.params, 'lr_expert_mult', 1.0)),
+            'classifier': float(getattr(self.params, 'lr_classifier_mult', 1.0)),
+            'other': float(getattr(self.params, 'lr_other_mult', 1.0)),
+        }
+        base_lr = float(self.params.lr)
+
+        groups_by_name: Dict[str, Dict[str, object]] = {}
+        for name, param in self._named_trainable_params:
+            if not param.requires_grad:
+                continue
+            component = self._component_name_for_param(name)
+            is_foundation = name.startswith('backbone.foundation.')
+            if is_foundation:
+                layer_id = self._labram_layer_id_for_name(name, num_layers)
+                lr = base_lr * layer_values[layer_id] * component_mults['backbone']
+                layer_tag = f'layer_{layer_id}'
+            else:
+                lr = base_lr * component_mults.get(component, 1.0)
+                layer_tag = 'nonfoundation'
+
+            is_no_decay = param.ndim <= 1 or name.endswith('.bias') or name in no_decay
+            decay_tag = 'no_decay' if is_no_decay else 'decay'
+            group_name = f'{component}_{layer_tag}_{decay_tag}'
+            if group_name not in groups_by_name:
+                groups_by_name[group_name] = {
+                    'params': [],
+                    'lr': lr,
+                    'weight_decay': 0.0 if is_no_decay else float(self.params.weight_decay),
+                    'name': group_name,
+                }
+            groups_by_name[group_name]['params'].append(param)
+
+        groups = list(groups_by_name.values())
+        print(
+            f"[opt] LaBraM combined optimizer enabled decay={layer_decay} "
+            f"num_layers={num_layers} base_lr={base_lr:.6g} component_mults={component_mults}",
+            flush=True,
+        )
+        for g in groups:
+            print(
+                f"[opt] group={g['name']} lr={float(g['lr']):.6g} wd={float(g['weight_decay']):.6g} "
+                f"num_params={len(g['params'])}",
+                flush=True,
+            )
+        if kind == 'adamw':
             return torch.optim.AdamW(groups)
         return torch.optim.SGD(groups, momentum=0.9)
 

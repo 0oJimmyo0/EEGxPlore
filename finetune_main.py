@@ -144,6 +144,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         help='Number of CBraMod-style selective adaptation layers stacked on top of LaBraM features when adaptation is requested.',
     )
     parser.add_argument(
+        '--labram_force_adapter',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='For LaBraM only: build the CBraMod-style adapter stack even when no AttnRes/MoE variant is enabled. Useful as a control run.',
+    )
+    parser.add_argument(
         '--labram_drop_path_rate',
         type=float,
         default=0.1,
@@ -160,6 +166,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=1.0,
         help='Optional layer-wise LR decay for LaBraM backbone blocks. Use 0.65 to mirror the original LaBraM finetune recipe.',
+    )
+    parser.add_argument(
+        '--labram_token_pool_no_adapter',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='For LaBraM only: bypass pooled foundation readout and instead mean-pool patch tokens directly, without any adapter transform.',
     )
 
     parser.add_argument('--attnres_final_output', type=str, default='attnres', choices=['attnres', 'last_source'])

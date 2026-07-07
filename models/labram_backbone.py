@@ -113,9 +113,37 @@ def load_labram_foundation_into_backbone(backbone: "LaBraMBackbone", ckpt_state:
         k: v for k, v in state.items()
         if k in foundation_sd and foundation_sd[k].shape == v.shape
     }
+    missing = sorted(k for k in foundation_sd.keys() if k not in loadable)
+    unexpected = sorted(k for k in state.keys() if k not in foundation_sd)
+    shape_mismatch = sorted(
+        k for k, v in state.items()
+        if k in foundation_sd and foundation_sd[k].shape != v.shape
+    )
     if not loadable:
         raise RuntimeError("No matching LaBraM tensors could be loaded into the EEGxPlore LaBraM backbone.")
     backbone.foundation.load_state_dict(loadable, strict=False)
+    def _count_with(substr: str, keys) -> int:
+        return sum(substr in k for k in keys)
+    print(
+        "[LaBraM][load] "
+        f"checkpoint_keys={len(state)} loaded={len(loadable)} missing={len(missing)} "
+        f"unexpected={len(unexpected)} shape_mismatch={len(shape_mismatch)} "
+        f"q_bias_loaded={_count_with('q_bias', loadable.keys())} "
+        f"v_bias_loaded={_count_with('v_bias', loadable.keys())} "
+        f"pos_embed_loaded={_count_with('pos_embed', loadable.keys())} "
+        f"time_embed_loaded={_count_with('time_embed', loadable.keys())}",
+        flush=True,
+    )
+    if missing:
+        print(f"[LaBraM][load] sample_missing={missing[:8]}", flush=True)
+    if unexpected:
+        print(f"[LaBraM][load] sample_unexpected={unexpected[:8]}", flush=True)
+    if shape_mismatch:
+        sample = [
+            (k, tuple(state[k].shape), tuple(foundation_sd[k].shape))
+            for k in shape_mismatch[:8]
+        ]
+        print(f"[LaBraM][load] sample_shape_mismatch={sample}", flush=True)
     return {f"foundation.{k}" for k in loadable.keys()}
 
 
@@ -136,6 +164,7 @@ class LaBraMBackbone(nn.Module):
         self.proj_out = nn.Identity()
         self.output_mode = "pooled"
         self.feature_dim = int(getattr(self.foundation, "embed_dim", 200))
+        self.token_pool_no_adapter = bool(getattr(param, "labram_token_pool_no_adapter", False))
         self.channel_names = list(getattr(param, "labram_channel_names", []) or [])
         self.input_chans = None
         if self.channel_names:
@@ -149,7 +178,11 @@ class LaBraMBackbone(nn.Module):
         else:
             print("[LaBraM] no channel manifest provided; using stored tensor slot positions.", flush=True)
 
-        selective_requested = bool(getattr(param, "moe", False)) or getattr(param, "attnres_variant", "none") != "none"
+        selective_requested = (
+            bool(getattr(param, "moe", False))
+            or getattr(param, "attnres_variant", "none") != "none"
+            or bool(getattr(param, "labram_force_adapter", False))
+        )
         adapter_layers = int(getattr(param, "labram_adapter_layers", 4))
         self.adapter: Optional[CBraMod]
         if selective_requested and adapter_layers > 0:
@@ -170,7 +203,8 @@ class LaBraMBackbone(nn.Module):
             print(
                 f"[LaBraM] selective adapter enabled: layers={adapter_layers}, "
                 f"attnres_variant={getattr(param, 'attnres_variant', 'none')}, "
-                f"moe={getattr(param, 'moe', False)}"
+                f"moe={getattr(param, 'moe', False)}, "
+                f"force_adapter={getattr(param, 'labram_force_adapter', False)}"
             )
         else:
             self.adapter = None
@@ -228,6 +262,10 @@ class LaBraMBackbone(nn.Module):
             tok_meta = set_moe_faced_metadata(batch_meta)
         try:
             if self.adapter is None:
+                if self.token_pool_no_adapter:
+                    # Diagnostic path: keep LaBraM patch-token features but do not
+                    # pass them through any selective adapter stack.
+                    return self._pool_token_grid(self._foundation_features(x))
                 # Dense LaBraM path: mirror the original finetune recipe and return
                 # the pooled fc_norm feature that normally feeds LaBraM's linear head.
                 if self.input_chans is not None and len(self.input_chans) != x.shape[1] + 1:
