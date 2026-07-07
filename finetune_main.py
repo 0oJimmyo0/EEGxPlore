@@ -155,6 +155,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         default=0.1,
         help='LayerScale init value passed to the LaBraM backbone constructor.',
     )
+    parser.add_argument(
+        '--labram_layer_decay',
+        type=float,
+        default=1.0,
+        help='Optional layer-wise LR decay for LaBraM backbone blocks. Use 0.65 to mirror the original LaBraM finetune recipe.',
+    )
 
     parser.add_argument('--attnres_final_output', type=str, default='attnres', choices=['attnres', 'last_source'])
     parser.add_argument(

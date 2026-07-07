@@ -256,3 +256,13 @@ class LaBraMBackbone(nn.Module):
             device = next(self.foundation.parameters()).device
             return torch.zeros((), device=device, dtype=torch.float32)
         return self.adapter.moe_auxiliary_loss()
+
+    def get_num_layers(self) -> int:
+        if hasattr(self.foundation, "get_num_layers"):
+            return int(self.foundation.get_num_layers())
+        return int(len(getattr(self.foundation, "blocks", [])))
+
+    def no_weight_decay(self) -> Set[str]:
+        if hasattr(self.foundation, "no_weight_decay"):
+            return {f"foundation.{name}" for name in self.foundation.no_weight_decay()}
+        return set()

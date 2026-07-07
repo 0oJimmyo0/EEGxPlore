@@ -243,6 +243,11 @@ class Trainer(object):
         if self.params.optimizer == 'AdamW':
             if getattr(self.params, 'use_component_lr', False):
                 self.optimizer = self._build_component_optimizer(grouped, kind='adamw')
+            elif (
+                str(getattr(self.params, 'backbone', 'cbramod')).strip().lower() == 'labram'
+                and float(getattr(self.params, 'labram_layer_decay', 1.0)) < 1.0
+            ):
+                self.optimizer = self._build_labram_layer_decay_optimizer()
             elif self.params.multi_lr:
                 self.optimizer = torch.optim.AdamW([
                     {'params': grouped['backbone'], 'lr': self.params.lr},
@@ -256,6 +261,11 @@ class Trainer(object):
         else:
             if getattr(self.params, 'use_component_lr', False):
                 self.optimizer = self._build_component_optimizer(grouped, kind='sgd')
+            elif (
+                str(getattr(self.params, 'backbone', 'cbramod')).strip().lower() == 'labram'
+                and float(getattr(self.params, 'labram_layer_decay', 1.0)) < 1.0
+            ):
+                self.optimizer = self._build_labram_layer_decay_optimizer()
             elif self.params.multi_lr:
                 self.optimizer = torch.optim.SGD([
                     {'params': grouped['backbone'], 'lr': self.params.lr},
@@ -554,6 +564,68 @@ class Trainer(object):
         if kind == 'adamw':
             return torch.optim.AdamW(groups, weight_decay=self.params.weight_decay)
         return torch.optim.SGD(groups, momentum=0.9, weight_decay=self.params.weight_decay)
+
+    @staticmethod
+    def _labram_layer_id_for_name(name: str, num_layers: int) -> int:
+        prefix = 'backbone.foundation.'
+        if not name.startswith(prefix):
+            return num_layers + 1
+        inner = name[len(prefix):]
+        if inner in ('cls_token', 'mask_token', 'pos_embed', 'time_embed'):
+            return 0
+        if inner.startswith('patch_embed'):
+            return 0
+        if inner.startswith('rel_pos_bias'):
+            return num_layers
+        if inner.startswith('blocks.'):
+            parts = inner.split('.')
+            if len(parts) > 1 and parts[1].isdigit():
+                return int(parts[1]) + 1
+        return num_layers
+
+    def _build_labram_layer_decay_optimizer(self):
+        bb = getattr(self.model, 'backbone', None)
+        if bb is None or not hasattr(bb, 'get_num_layers'):
+            raise RuntimeError('LaBraM layer decay requested but model.backbone does not expose get_num_layers().')
+
+        layer_decay = float(getattr(self.params, 'labram_layer_decay', 1.0))
+        if not (0.0 < layer_decay <= 1.0):
+            raise ValueError(f'labram_layer_decay must be in (0, 1], got {layer_decay}')
+
+        num_layers = int(bb.get_num_layers())
+        values = [layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2)]
+        no_decay = set()
+        if hasattr(bb, 'no_weight_decay'):
+            no_decay = set(bb.no_weight_decay())
+
+        groups_by_name: Dict[str, Dict[str, object]] = {}
+        for name, param in self._named_trainable_params:
+            if not param.requires_grad:
+                continue
+            layer_id = self._labram_layer_id_for_name(name, num_layers)
+            is_no_decay = param.ndim <= 1 or name.endswith('.bias') or name in no_decay
+            decay_tag = 'no_decay' if is_no_decay else 'decay'
+            group_name = f'layer_{layer_id}_{decay_tag}'
+            if group_name not in groups_by_name:
+                groups_by_name[group_name] = {
+                    'params': [],
+                    'lr': float(self.params.lr) * values[layer_id],
+                    'weight_decay': 0.0 if is_no_decay else float(self.params.weight_decay),
+                    'name': group_name,
+                }
+            groups_by_name[group_name]['params'].append(param)
+
+        groups = list(groups_by_name.values())
+        print(f"[opt] LaBraM layer decay enabled decay={layer_decay} num_layers={num_layers} values={values}", flush=True)
+        for g in groups:
+            print(
+                f"[opt] group={g['name']} lr={float(g['lr']):.6g} wd={float(g['weight_decay']):.6g} "
+                f"num_params={len(g['params'])}",
+                flush=True,
+            )
+        if self.params.optimizer == 'AdamW':
+            return torch.optim.AdamW(groups)
+        return torch.optim.SGD(groups, momentum=0.9)
 
     def _current_lr_by_group(self) -> Dict[str, float]:
         out = {}
