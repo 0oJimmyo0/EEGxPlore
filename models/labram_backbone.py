@@ -160,6 +160,9 @@ class LaBraMBackbone(nn.Module):
             use_mean_pooling=True,
             init_values=float(getattr(param, "labram_layer_scale_init_value", 0.1)),
             drop_path_rate=float(getattr(param, "labram_drop_path_rate", 0.1)),
+            qkv_bias=bool(getattr(param, "labram_qkv_bias", False)),
+            use_abs_pos_emb=bool(getattr(param, "labram_use_abs_pos_emb", True)),
+            use_rel_pos_bias=bool(getattr(param, "labram_use_rel_pos_bias", False)),
         )
         self.proj_out = nn.Identity()
         self.output_mode = "pooled"
@@ -185,6 +188,8 @@ class LaBraMBackbone(nn.Module):
         )
         adapter_layers = int(getattr(param, "labram_adapter_layers", 4))
         self.adapter: Optional[CBraMod]
+        self.residual_adapter_proj: Optional[nn.Linear]
+        self.residual_gamma = float(getattr(param, "labram_residual_gamma_init", 1.0))
         if selective_requested and adapter_layers > 0:
             self.adapter = CBraMod(
                 in_dim=200,
@@ -200,14 +205,19 @@ class LaBraMBackbone(nn.Module):
             for p in self.adapter.patch_embedding.parameters():
                 p.requires_grad = False
             self.encoder = self.adapter.encoder
+            self.residual_adapter_proj = nn.Linear(self.feature_dim, self.feature_dim)
+            nn.init.zeros_(self.residual_adapter_proj.weight)
+            nn.init.zeros_(self.residual_adapter_proj.bias)
             print(
                 f"[LaBraM] selective adapter enabled: layers={adapter_layers}, "
                 f"attnres_variant={getattr(param, 'attnres_variant', 'none')}, "
                 f"moe={getattr(param, 'moe', False)}, "
-                f"force_adapter={getattr(param, 'labram_force_adapter', False)}"
+                f"force_adapter={getattr(param, 'labram_force_adapter', False)}, "
+                f"residual_gamma={self.residual_gamma}"
             )
         else:
             self.adapter = None
+            self.residual_adapter_proj = None
             self.encoder = _EncoderView(self.foundation.blocks)
             if selective_requested and adapter_layers <= 0:
                 print(
@@ -278,9 +288,18 @@ class LaBraMBackbone(nn.Module):
                     return_patch_tokens=False,
                 )
 
+            dense_feat = self.foundation.forward_features(
+                x,
+                input_chans=self.input_chans,
+                return_patch_tokens=False,
+            )
             feats = self._foundation_features(x)
             feats = self.adapter.encoder(feats)
-            return self._pool_token_grid(feats)
+            delta_feat = self._pool_token_grid(feats)
+            if self.residual_adapter_proj is None:
+                raise RuntimeError("Residual LaBraM adapter path expected residual_adapter_proj to be initialized.")
+            delta_feat = self.residual_adapter_proj(delta_feat)
+            return dense_feat + (self.residual_gamma * delta_feat)
         finally:
             if tok_psd is not None:
                 reset_moe_psd_router_features(tok_psd)

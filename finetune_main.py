@@ -162,10 +162,34 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         help='LayerScale init value passed to the LaBraM backbone constructor.',
     )
     parser.add_argument(
+        '--labram_qkv_bias',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Explicitly control LaBraM qkv_bias constructor parity. Local FACED baseline uses --disable_qkv_bias.',
+    )
+    parser.add_argument(
+        '--labram_use_abs_pos_emb',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Explicitly control LaBraM absolute positional embedding constructor parity.',
+    )
+    parser.add_argument(
+        '--labram_use_rel_pos_bias',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Explicitly control LaBraM relative positional bias constructor parity.',
+    )
+    parser.add_argument(
         '--labram_layer_decay',
         type=float,
         default=1.0,
         help='Optional layer-wise LR decay for LaBraM backbone blocks. Use 0.65 to mirror the original LaBraM finetune recipe.',
+    )
+    parser.add_argument(
+        '--labram_residual_gamma_init',
+        type=float,
+        default=1.0,
+        help='Scalar multiplier on the residual adapter correction added on top of native dense LaBraM features.',
     )
     parser.add_argument(
         '--labram_token_pool_no_adapter',
