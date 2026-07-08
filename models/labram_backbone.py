@@ -168,6 +168,7 @@ class LaBraMBackbone(nn.Module):
         self.output_mode = "pooled"
         self.feature_dim = int(getattr(self.foundation, "embed_dim", 200))
         self.token_pool_no_adapter = bool(getattr(param, "labram_token_pool_no_adapter", False))
+        self.gamma_zero_skip_branch = bool(getattr(param, "labram_gamma_zero_skip_branch", False))
         self.channel_names = list(getattr(param, "labram_channel_names", []) or [])
         self.input_chans = None
         if self.channel_names:
@@ -206,14 +207,20 @@ class LaBraMBackbone(nn.Module):
                 p.requires_grad = False
             self.encoder = self.adapter.encoder
             self.residual_adapter_proj = nn.Linear(self.feature_dim, self.feature_dim)
-            nn.init.zeros_(self.residual_adapter_proj.weight)
+            residual_proj_init_std = float(getattr(param, "labram_residual_proj_init_std", 0.0))
+            if residual_proj_init_std > 0.0:
+                nn.init.normal_(self.residual_adapter_proj.weight, mean=0.0, std=residual_proj_init_std)
+            else:
+                nn.init.zeros_(self.residual_adapter_proj.weight)
             nn.init.zeros_(self.residual_adapter_proj.bias)
             print(
                 f"[LaBraM] selective adapter enabled: layers={adapter_layers}, "
                 f"attnres_variant={getattr(param, 'attnres_variant', 'none')}, "
                 f"moe={getattr(param, 'moe', False)}, "
                 f"force_adapter={getattr(param, 'labram_force_adapter', False)}, "
-                f"residual_gamma={self.residual_gamma}"
+                f"residual_gamma={self.residual_gamma}, "
+                f"gamma_zero_skip_branch={self.gamma_zero_skip_branch}, "
+                f"residual_proj_init_std={residual_proj_init_std}"
             )
         else:
             self.adapter = None
@@ -293,6 +300,8 @@ class LaBraMBackbone(nn.Module):
                 input_chans=self.input_chans,
                 return_patch_tokens=False,
             )
+            if self.gamma_zero_skip_branch and abs(self.residual_gamma) == 0.0:
+                return dense_feat
             feats = self._foundation_features(x)
             feats = self.adapter.encoder(feats)
             delta_feat = self._pool_token_grid(feats)

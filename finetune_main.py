@@ -192,6 +192,18 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         help='Scalar multiplier on the residual adapter correction added on top of native dense LaBraM features.',
     )
     parser.add_argument(
+        '--labram_residual_proj_init_std',
+        type=float,
+        default=0.0,
+        help='Stddev for random normal init of the LaBraM residual projection. Keep 0.0 for exact zero init.',
+    )
+    parser.add_argument(
+        '--labram_gamma_zero_skip_branch',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='If true and labram_residual_gamma_init==0, return the native dense LaBraM feature early instead of computing the residual adapter branch.',
+    )
+    parser.add_argument(
         '--labram_token_pool_no_adapter',
         action=argparse.BooleanOptionalAction,
         default=False,
