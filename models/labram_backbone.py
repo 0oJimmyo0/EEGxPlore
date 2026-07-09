@@ -350,6 +350,18 @@ class LaBraMBackbone(nn.Module):
                 f"residual_proj_init_std={residual_proj_init_std}, "
                 f"native_depth_mode={self.native_depth_mode}, native_depth_k={self.native_depth_k}"
             )
+            if self.adapter_type == "native_axis_residual":
+                alpha_info = []
+                for name in ("alpha_channel", "alpha_patch", "alpha_token"):
+                    if hasattr(self.adapter, name):
+                        alpha_info.append(f"{name}={float(getattr(self.adapter, name).detach().cpu()):.6g}")
+                print(
+                    "[LaBraM] native residual adapter active: "
+                    f"class={self.adapter.__class__.__name__} "
+                    f"delta_pool_fc_norm=False "
+                    f"{' '.join(alpha_info)}",
+                    flush=True,
+                )
         else:
             self.adapter = None
             self.residual_adapter_proj = None
@@ -385,6 +397,11 @@ class LaBraMBackbone(nn.Module):
         if getattr(self.foundation, "fc_norm", None) is not None:
             pooled = self.foundation.fc_norm(pooled)
         return pooled
+
+    def _pool_delta_grid(self, delta: torch.Tensor) -> torch.Tensor:
+        if delta.dim() != 4:
+            raise ValueError(f"Expected delta grid [B,C,S,D], got {tuple(delta.shape)}")
+        return delta.reshape(delta.shape[0], -1, delta.shape[-1]).mean(dim=1)
 
     def _foundation_dense_tokens_depth(
         self,
@@ -423,9 +440,14 @@ class LaBraMBackbone(nn.Module):
         depth_stats = []
         use_depth = self.native_depth_mode == "lastk_delta"
         start_idx = max(0, len(self.foundation.blocks) - self.native_depth_k)
+        rel_pos_bias = None
+        if bool(getattr(self.foundation, "use_rel_pos_bias", False)):
+            rel_pos_bias = getattr(self.foundation, "rel_pos_bias", None)
+            if callable(rel_pos_bias):
+                rel_pos_bias = rel_pos_bias()
         for idx, blk in enumerate(self.foundation.blocks):
             prev_tokens = tokens
-            tokens = blk(tokens, rel_pos_bias=None)
+            tokens = blk(tokens, rel_pos_bias=rel_pos_bias)
             if use_depth and idx >= start_idx:
                 depth_stats.append((tokens[:, 1:, :] - prev_tokens[:, 1:, :]).mean(dim=1))
 
@@ -488,18 +510,20 @@ class LaBraMBackbone(nn.Module):
                     return_patch_tokens=False,
                 )
 
-            dense_feat = self.foundation.forward_features(
-                x,
-                input_chans=self.input_chans,
-                return_patch_tokens=False,
-            )
-            if self.gamma_zero_skip_branch and abs(self.residual_gamma) == 0.0:
-                return dense_feat
             if self.adapter_type == "native_axis_residual":
-                _, token_grid, depth_summary = self._foundation_dense_tokens_depth(x)
+                dense_feat, token_grid, depth_summary = self._foundation_dense_tokens_depth(x)
+                if self.gamma_zero_skip_branch and abs(self.residual_gamma) == 0.0:
+                    return dense_feat
                 delta_grid = self.adapter(token_grid, depth_summary=depth_summary)
-                delta_feat = self._pool_token_grid(delta_grid)
+                delta_feat = self._pool_delta_grid(delta_grid)
             else:
+                dense_feat = self.foundation.forward_features(
+                    x,
+                    input_chans=self.input_chans,
+                    return_patch_tokens=False,
+                )
+                if self.gamma_zero_skip_branch and abs(self.residual_gamma) == 0.0:
+                    return dense_feat
                 feats = self._foundation_features(x)
                 feats = self.adapter.encoder(feats)
                 delta_feat = self._pool_token_grid(feats)
