@@ -36,6 +36,110 @@ class _EncoderView(nn.Module):
         self.num_layers = len(layers)
 
 
+class LaBraMNativeAxisResidualAdapter(nn.Module):
+    """Small residual correction over LaBraM token grids [B, C, S, D]."""
+
+    def __init__(
+        self,
+        dim: int = 200,
+        bottleneck: int = 64,
+        num_heads: int = 4,
+        dropout: float = 0.0,
+        init_alpha: float = 1e-3,
+        use_channel_mixer: bool = True,
+        use_patch_mixer: bool = True,
+        use_token_mlp: bool = True,
+        depth_dim: int = 0,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.use_channel_mixer = bool(use_channel_mixer)
+        self.use_patch_mixer = bool(use_patch_mixer)
+        self.use_token_mlp = bool(use_token_mlp)
+        self.depth_dim = int(depth_dim)
+
+        if self.use_channel_mixer:
+            self.channel_norm = nn.LayerNorm(dim)
+            self.channel_attn = nn.MultiheadAttention(
+                embed_dim=dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.alpha_channel = nn.Parameter(torch.tensor(float(init_alpha)))
+
+        if self.use_patch_mixer:
+            self.patch_norm = nn.LayerNorm(dim)
+            self.patch_attn = nn.MultiheadAttention(
+                embed_dim=dim,
+                num_heads=num_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.alpha_patch = nn.Parameter(torch.tensor(float(init_alpha)))
+
+        if self.use_token_mlp:
+            hidden = max(1, int(bottleneck))
+            self.token_norm = nn.LayerNorm(dim)
+            self.token_mlp = nn.Sequential(
+                nn.Linear(dim, hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, dim),
+            )
+            self.alpha_token = nn.Parameter(torch.tensor(float(init_alpha)))
+
+        if self.depth_dim > 0:
+            self.depth_gate = nn.Sequential(
+                nn.LayerNorm(self.depth_dim),
+                nn.Linear(self.depth_dim, dim),
+                nn.Tanh(),
+            )
+            nn.init.zeros_(self.depth_gate[1].weight)
+            nn.init.zeros_(self.depth_gate[1].bias)
+        else:
+            self.depth_gate = None
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        depth_summary: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"Expected [B,C,S,D], got {tuple(x.shape)}")
+
+        batch_size, channels, patches, dim = x.shape
+        delta = torch.zeros_like(x)
+
+        if self.use_channel_mixer:
+            xc = x.permute(0, 2, 1, 3).reshape(batch_size * patches, channels, dim)
+            xc_norm = self.channel_norm(xc)
+            yc, _ = self.channel_attn(xc_norm, xc_norm, xc_norm, need_weights=False)
+            yc = yc.reshape(batch_size, patches, channels, dim).permute(0, 2, 1, 3)
+            delta = delta + (self.alpha_channel * yc)
+
+        if self.use_patch_mixer:
+            xp = x.reshape(batch_size * channels, patches, dim)
+            xp_norm = self.patch_norm(xp)
+            yp, _ = self.patch_attn(xp_norm, xp_norm, xp_norm, need_weights=False)
+            yp = yp.reshape(batch_size, channels, patches, dim)
+            delta = delta + (self.alpha_patch * yp)
+
+        if self.use_token_mlp:
+            yt = self.token_mlp(self.token_norm(x))
+            delta = delta + (self.alpha_token * yt)
+
+        if self.depth_gate is not None and depth_summary is not None:
+            if depth_summary.dim() != 2 or depth_summary.shape[0] != batch_size:
+                raise ValueError(
+                    f"Expected depth_summary [B,{self.depth_dim}], got {tuple(depth_summary.shape)}"
+                )
+            gate = 1.0 + (0.1 * self.depth_gate(depth_summary)).view(batch_size, 1, 1, dim)
+            delta = delta * gate
+
+        return delta
+
+
 def _import_labram_ctor(repo_dir: str, model_name: str):
     repo_dir = os.path.abspath(repo_dir)
     if not os.path.isdir(repo_dir):
@@ -169,6 +273,9 @@ class LaBraMBackbone(nn.Module):
         self.feature_dim = int(getattr(self.foundation, "embed_dim", 200))
         self.token_pool_no_adapter = bool(getattr(param, "labram_token_pool_no_adapter", False))
         self.gamma_zero_skip_branch = bool(getattr(param, "labram_gamma_zero_skip_branch", False))
+        self.adapter_type = str(getattr(param, "labram_adapter_type", "cbramod_stack")).strip().lower()
+        self.native_depth_mode = str(getattr(param, "labram_native_depth_mode", "none")).strip().lower()
+        self.native_depth_k = max(1, int(getattr(param, "labram_native_depth_k", 4)))
         self.channel_names = list(getattr(param, "labram_channel_names", []) or [])
         self.input_chans = None
         if self.channel_names:
@@ -188,39 +295,60 @@ class LaBraMBackbone(nn.Module):
             or bool(getattr(param, "labram_force_adapter", False))
         )
         adapter_layers = int(getattr(param, "labram_adapter_layers", 4))
-        self.adapter: Optional[CBraMod]
+        self.adapter: Optional[nn.Module]
         self.residual_adapter_proj: Optional[nn.Linear]
         self.residual_gamma = float(getattr(param, "labram_residual_gamma_init", 1.0))
+        self.native_depth_dim = self.feature_dim if self.native_depth_mode != "none" else 0
         if selective_requested and adapter_layers > 0:
-            self.adapter = CBraMod(
-                in_dim=200,
-                out_dim=200,
-                d_model=200,
-                dim_feedforward=800,
-                seq_len=1,
-                n_layer=adapter_layers,
-                nhead=8,
-                **backbone_finetune_kwargs(param),
-            )
-            self.adapter.proj_out = nn.Identity()
-            for p in self.adapter.patch_embedding.parameters():
-                p.requires_grad = False
-            self.encoder = self.adapter.encoder
-            self.residual_adapter_proj = nn.Linear(self.feature_dim, self.feature_dim)
             residual_proj_init_std = float(getattr(param, "labram_residual_proj_init_std", 0.0))
+            if self.adapter_type == "native_axis_residual":
+                self.adapter = LaBraMNativeAxisResidualAdapter(
+                    dim=self.feature_dim,
+                    bottleneck=int(getattr(param, "labram_native_bottleneck", 64)),
+                    num_heads=int(getattr(param, "labram_native_heads", 4)),
+                    dropout=float(getattr(param, "labram_native_dropout", 0.0)),
+                    init_alpha=float(getattr(param, "labram_native_init_alpha", 1e-3)),
+                    use_channel_mixer=bool(getattr(param, "labram_native_use_channel_mixer", True)),
+                    use_patch_mixer=bool(getattr(param, "labram_native_use_patch_mixer", True)),
+                    use_token_mlp=bool(getattr(param, "labram_native_use_token_mlp", True)),
+                    depth_dim=self.native_depth_dim,
+                )
+                self.encoder = _EncoderView(self.foundation.blocks)
+                if residual_proj_init_std == 0.0:
+                    residual_proj_init_std = 1e-5
+            elif self.adapter_type == "cbramod_stack":
+                self.adapter = CBraMod(
+                    in_dim=200,
+                    out_dim=200,
+                    d_model=200,
+                    dim_feedforward=800,
+                    seq_len=1,
+                    n_layer=adapter_layers,
+                    nhead=8,
+                    **backbone_finetune_kwargs(param),
+                )
+                self.adapter.proj_out = nn.Identity()
+                for p in self.adapter.patch_embedding.parameters():
+                    p.requires_grad = False
+                self.encoder = self.adapter.encoder
+            else:
+                raise ValueError(f"Unsupported LaBraM adapter type: {self.adapter_type!r}")
+
+            self.residual_adapter_proj = nn.Linear(self.feature_dim, self.feature_dim)
             if residual_proj_init_std > 0.0:
                 nn.init.normal_(self.residual_adapter_proj.weight, mean=0.0, std=residual_proj_init_std)
             else:
                 nn.init.zeros_(self.residual_adapter_proj.weight)
             nn.init.zeros_(self.residual_adapter_proj.bias)
             print(
-                f"[LaBraM] selective adapter enabled: layers={adapter_layers}, "
+                f"[LaBraM] selective adapter enabled: type={self.adapter_type}, layers={adapter_layers}, "
                 f"attnres_variant={getattr(param, 'attnres_variant', 'none')}, "
                 f"moe={getattr(param, 'moe', False)}, "
                 f"force_adapter={getattr(param, 'labram_force_adapter', False)}, "
                 f"residual_gamma={self.residual_gamma}, "
                 f"gamma_zero_skip_branch={self.gamma_zero_skip_branch}, "
-                f"residual_proj_init_std={residual_proj_init_std}"
+                f"residual_proj_init_std={residual_proj_init_std}, "
+                f"native_depth_mode={self.native_depth_mode}, native_depth_k={self.native_depth_k}"
             )
         else:
             self.adapter = None
@@ -258,14 +386,79 @@ class LaBraMBackbone(nn.Module):
             pooled = self.foundation.fc_norm(pooled)
         return pooled
 
+    def _foundation_dense_tokens_depth(
+        self,
+        x: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        batch_size, channels, patches, t = x.shape
+        if self.input_chans is not None and len(self.input_chans) != channels + 1:
+            raise ValueError(
+                f"LaBraM input_chans length mismatch: expected {channels + 1}, got {len(self.input_chans)}"
+            )
+
+        input_time_window = patches if t == self.foundation.patch_size else t
+        tokens = self.foundation.patch_embed(x)
+        cls_tokens = self.foundation.cls_token.expand(batch_size, -1, -1)
+        tokens = torch.cat((cls_tokens, tokens), dim=1)
+
+        pos_embed_used = self.foundation._select_pos_embed(self.input_chans, channels)
+        if self.foundation.pos_embed is not None:
+            pos_embed = pos_embed_used[:, 1:, :].unsqueeze(2).expand(
+                batch_size, -1, input_time_window, -1
+            ).flatten(1, 2)
+            pos_embed = torch.cat(
+                (pos_embed_used[:, 0:1, :].expand(batch_size, -1, -1), pos_embed),
+                dim=1,
+            )
+            tokens = tokens + pos_embed
+        if self.foundation.time_embed is not None:
+            nc = channels if t == self.foundation.patch_size else patches
+            time_embed = self.foundation.time_embed[:, 0:input_time_window, :].unsqueeze(1).expand(
+                batch_size, nc, -1, -1
+            ).flatten(1, 2)
+            tokens[:, 1:, :] += time_embed
+
+        tokens = self.foundation.pos_drop(tokens)
+
+        depth_stats = []
+        use_depth = self.native_depth_mode == "lastk_delta"
+        start_idx = max(0, len(self.foundation.blocks) - self.native_depth_k)
+        for idx, blk in enumerate(self.foundation.blocks):
+            prev_tokens = tokens
+            tokens = blk(tokens, rel_pos_bias=None)
+            if use_depth and idx >= start_idx:
+                depth_stats.append((tokens[:, 1:, :] - prev_tokens[:, 1:, :]).mean(dim=1))
+
+        tokens = self.foundation.norm(tokens)
+        patch_tokens = tokens[:, 1:, :]
+        if getattr(self.foundation, "fc_norm", None) is not None:
+            dense_feat = self.foundation.fc_norm(patch_tokens.mean(dim=1))
+            patch_tokens = self.foundation.fc_norm(patch_tokens)
+        else:
+            dense_feat = patch_tokens.mean(dim=1)
+
+        depth_summary = None
+        if depth_stats:
+            depth_summary = torch.stack(depth_stats, dim=1).mean(dim=1)
+
+        if patch_tokens.shape[1] != channels * patches:
+            raise ValueError(
+                f"LaBraM patch token count mismatch: expected {channels * patches}, got {patch_tokens.shape[1]}"
+            )
+        token_grid = patch_tokens.reshape(batch_size, channels, patches, patch_tokens.shape[-1])
+        return dense_feat, token_grid, depth_summary
+
+    def _adapter_uses_moe(self) -> bool:
+        return isinstance(self.adapter, CBraMod) and bool(getattr(self.adapter, "use_moe", False))
+
     def forward(self, x, mask=None, batch_meta=None):
         del mask
         tok_psd = None
         tok_meta = None
         tok_eeg = None
-        if self.adapter is not None and self.adapter.use_moe and self.adapter.moe_use_psd_router_features:
+        if self._adapter_uses_moe() and self.adapter.moe_use_psd_router_features:
             tok_psd = set_moe_psd_router_features(compact_psd_bandpowers(x))
-        if self.adapter is not None and self.adapter.use_moe and self.adapter.moe_router_compact_feature_mode != "none":
+        if self._adapter_uses_moe() and self.adapter.moe_router_compact_feature_mode != "none":
             if self.adapter.moe_router_compact_feature_mode == "eeg_summary":
                 compact = _compact_eeg_summary(x, self.adapter.moe_router_compact_feature_dim)
             elif self.adapter.moe_router_compact_feature_mode == "psd_summary":
@@ -275,7 +468,7 @@ class LaBraMBackbone(nn.Module):
                     f"Unsupported compact router mode: {self.adapter.moe_router_compact_feature_mode!r}"
                 )
             tok_eeg = set_moe_eeg_router_summary(compact)
-        if self.adapter is not None and self.adapter.use_moe and self.adapter.moe_route_mode == "typed_capacity_domain":
+        if self._adapter_uses_moe() and self.adapter.moe_route_mode == "typed_capacity_domain":
             tok_meta = set_moe_faced_metadata(batch_meta)
         try:
             if self.adapter is None:
@@ -302,9 +495,14 @@ class LaBraMBackbone(nn.Module):
             )
             if self.gamma_zero_skip_branch and abs(self.residual_gamma) == 0.0:
                 return dense_feat
-            feats = self._foundation_features(x)
-            feats = self.adapter.encoder(feats)
-            delta_feat = self._pool_token_grid(feats)
+            if self.adapter_type == "native_axis_residual":
+                _, token_grid, depth_summary = self._foundation_dense_tokens_depth(x)
+                delta_grid = self.adapter(token_grid, depth_summary=depth_summary)
+                delta_feat = self._pool_token_grid(delta_grid)
+            else:
+                feats = self._foundation_features(x)
+                feats = self.adapter.encoder(feats)
+                delta_feat = self._pool_token_grid(feats)
             if self.residual_adapter_proj is None:
                 raise RuntimeError("Residual LaBraM adapter path expected residual_adapter_proj to be initialized.")
             delta_feat = self.residual_adapter_proj(delta_feat)
@@ -318,7 +516,7 @@ class LaBraMBackbone(nn.Module):
                 reset_moe_faced_metadata(tok_meta)
 
     def moe_auxiliary_loss(self) -> torch.Tensor:
-        if self.adapter is None:
+        if not self._adapter_uses_moe():
             device = next(self.foundation.parameters()).device
             return torch.zeros((), device=device, dtype=torch.float32)
         return self.adapter.moe_auxiliary_loss()

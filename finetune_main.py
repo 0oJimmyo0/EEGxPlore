@@ -144,6 +144,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         help='Number of CBraMod-style selective adaptation layers stacked on top of LaBraM features when adaptation is requested.',
     )
     parser.add_argument(
+        '--labram_adapter_type',
+        type=str,
+        default='cbramod_stack',
+        choices=['cbramod_stack', 'native_axis_residual'],
+        help='Selective adapter family for LaBraM. cbramod_stack keeps the legacy CBraMod-style path; native_axis_residual uses a lightweight LaBraM-native token-grid residual.',
+    )
+    parser.add_argument(
         '--labram_force_adapter',
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -202,6 +209,61 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.0,
         help='Stddev for random normal init of the LaBraM residual projection. Keep 0.0 for exact zero init.',
+    )
+    parser.add_argument(
+        '--labram_native_bottleneck',
+        type=int,
+        default=64,
+        help='Bottleneck width for the LaBraM-native token MLP residual adapter.',
+    )
+    parser.add_argument(
+        '--labram_native_heads',
+        type=int,
+        default=4,
+        help='Attention heads for the LaBraM-native channel/patch mixers.',
+    )
+    parser.add_argument(
+        '--labram_native_dropout',
+        type=float,
+        default=0.0,
+        help='Dropout used inside the LaBraM-native residual adapter.',
+    )
+    parser.add_argument(
+        '--labram_native_init_alpha',
+        type=float,
+        default=1e-3,
+        help='Initial branch scale for LaBraM-native residual channel/patch/token corrections.',
+    )
+    parser.add_argument(
+        '--labram_native_use_channel_mixer',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Enable channel-axis attention mixing in the LaBraM-native residual adapter.',
+    )
+    parser.add_argument(
+        '--labram_native_use_patch_mixer',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Enable patch-axis attention mixing in the LaBraM-native residual adapter.',
+    )
+    parser.add_argument(
+        '--labram_native_use_token_mlp',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='Enable token-wise MLP correction in the LaBraM-native residual adapter.',
+    )
+    parser.add_argument(
+        '--labram_native_depth_mode',
+        type=str,
+        default='none',
+        choices=['none', 'lastk_delta'],
+        help='Optional upper-layer depth summary mode injected into the LaBraM-native residual adapter.',
+    )
+    parser.add_argument(
+        '--labram_native_depth_k',
+        type=int,
+        default=4,
+        help='Number of final LaBraM blocks summarized when labram_native_depth_mode=lastk_delta.',
     )
     parser.add_argument(
         '--labram_gamma_zero_skip_branch',

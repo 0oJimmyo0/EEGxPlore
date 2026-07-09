@@ -74,12 +74,16 @@ class Model(nn.Module):
             self.pretrained_param_names = {f'backbone.{k}' for k in loaded_bb}
 
             if self.backbone_name == 'labram':
+                adapter_type = getattr(param, 'labram_adapter_type', 'cbramod_stack')
                 if param.attnres_variant == 'none' and not getattr(param, 'moe', False):
                     print("[FACED][LaBraM] dense baseline mode: loaded LaBraM foundation weights")
                 elif getattr(param, 'moe', False):
-                    print("[FACED][LaBraM] selective mode: loaded LaBraM foundation + CBraMod-style adapter stack")
+                    print(f"[FACED][LaBraM] selective mode: loaded LaBraM foundation + adapter_type={adapter_type}")
                 else:
-                    print(f"[FACED][LaBraM] AttnRes mode ({param.attnres_variant}): loaded LaBraM foundation + adapter stack")
+                    print(
+                        f"[FACED][LaBraM] AttnRes mode ({param.attnres_variant}): "
+                        f"loaded LaBraM foundation + adapter_type={adapter_type}"
+                    )
             elif param.attnres_variant == 'none' and not getattr(param, 'moe', False):
                 print("[FACED] Baseline mode: strict foundation load")
             elif getattr(param, 'moe', False):
