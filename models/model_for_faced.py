@@ -154,11 +154,22 @@ class Model(nn.Module):
     def _init_labram_pooled_classifier(self, param) -> None:
         if not isinstance(self.classifier, nn.Linear):
             raise TypeError("LaBraM pooled FACED classifier is expected to be nn.Linear.")
+        init_scale = float(getattr(param, 'labram_init_scale', 0.001))
+        if init_scale < 0:
+            with torch.no_grad():
+                w = self.classifier.weight.detach().float()
+                b = self.classifier.bias.detach().float()
+                print(
+                    "[FACED][LaBraM] pooled head init: preserving default nn.Linear initialization "
+                    f"weight_mean={w.mean().item():.6g} weight_std={w.std(unbiased=False).item():.6g} "
+                    f"bias_mean={b.mean().item():.6g} bias_std={b.std(unbiased=False).item():.6g}",
+                    flush=True,
+                )
+            return
         if trunc_normal_ is None:
             raise ImportError(
                 "timm is required to apply LaBraM-style pooled head initialization in EEGxPlore."
             )
-        init_scale = float(getattr(param, 'labram_init_scale', 0.001))
         trunc_normal_(self.classifier.weight, std=0.02)
         nn.init.constant_(self.classifier.bias, 0.0)
         self.classifier.weight.data.mul_(init_scale)
