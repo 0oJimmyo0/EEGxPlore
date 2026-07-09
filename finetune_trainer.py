@@ -237,6 +237,11 @@ class Trainer(object):
             grouped[self._component_name_for_param(name)].append(param)
 
         self.data_length = len(self.data_loader['train'])
+        print(
+            f"[sched] train_batches_per_epoch={self.data_length} epochs={int(self.params.epochs)} "
+            f"total_train_steps={max(int(self.params.epochs * self.data_length), 1)}",
+            flush=True,
+        )
         if getattr(self.params, 'use_component_lr', False) and getattr(self.params, 'multi_lr', False):
             print('[opt] use_component_lr=True overrides multi_lr=True.', flush=True)
         if (
@@ -339,6 +344,7 @@ class Trainer(object):
                 f"[sched] cosine-only enabled: total_steps={total_steps} eta_min={eta_min:.6g}",
                 flush=True,
             )
+        print(f"[sched] initial_group_lrs={self._current_lr_by_group()}", flush=True)
 
         if getattr(self.params, 'use_component_lr', False):
             for i, g in enumerate(self.optimizer.param_groups):
@@ -430,6 +436,7 @@ class Trainer(object):
 
         uninitialized_before = _collect_uninitialized_names()
         if len(uninitialized_before) == 0:
+            print("[lazy-init] no lazy tensors detected", flush=True)
             return
 
         print(
@@ -634,15 +641,22 @@ class Trainer(object):
                     'lr': float(self.params.lr) * values[layer_id],
                     'weight_decay': 0.0 if is_no_decay else float(self.params.weight_decay),
                     'name': group_name,
+                    'sample_names': [],
+                    'contains_classifier': False,
                 }
             groups_by_name[group_name]['params'].append(param)
+            if len(groups_by_name[group_name]['sample_names']) < 3:
+                groups_by_name[group_name]['sample_names'].append(name)
+            if name.startswith('classifier.'):
+                groups_by_name[group_name]['contains_classifier'] = True
 
         groups = list(groups_by_name.values())
         print(f"[opt] LaBraM layer decay enabled decay={layer_decay} num_layers={num_layers} values={values}", flush=True)
         for g in groups:
             print(
                 f"[opt] group={g['name']} lr={float(g['lr']):.6g} wd={float(g['weight_decay']):.6g} "
-                f"num_params={len(g['params'])}",
+                f"num_params={len(g['params'])} contains_classifier={bool(g.get('contains_classifier', False))} "
+                f"sample_names={g.get('sample_names', [])}",
                 flush=True,
             )
         if self.params.optimizer == 'AdamW':

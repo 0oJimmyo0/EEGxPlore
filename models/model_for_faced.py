@@ -1,6 +1,12 @@
 import torch
 import torch.nn as nn
 from einops.layers.torch import Rearrange
+
+try:
+    from timm.models.layers import trunc_normal_
+except ImportError:  # pragma: no cover - active LaBraM env should provide timm
+    trunc_normal_ = None
+
 from .cbramod import CBraMod, backbone_finetune_kwargs, load_foundation_into_backbone
 from .labram_backbone import LaBraMBackbone, load_labram_foundation_into_backbone
 
@@ -131,6 +137,9 @@ class Model(nn.Module):
         else:
             raise ValueError(f"Unknown classifier: {classifier_name}")
 
+        if self.backbone_name == 'labram' and classifier_name == 'labram_pooled_linear':
+            self._init_labram_pooled_classifier(param)
+
         all_param_names = {n for n, _ in self.named_parameters()}
         self.new_param_names = all_param_names - self.pretrained_param_names
 
@@ -141,3 +150,26 @@ class Model(nn.Module):
         feats = self.backbone(x, batch_meta=batch_meta)
         out = self.classifier(feats)
         return out
+
+    def _init_labram_pooled_classifier(self, param) -> None:
+        if not isinstance(self.classifier, nn.Linear):
+            raise TypeError("LaBraM pooled FACED classifier is expected to be nn.Linear.")
+        if trunc_normal_ is None:
+            raise ImportError(
+                "timm is required to apply LaBraM-style pooled head initialization in EEGxPlore."
+            )
+        init_scale = float(getattr(param, 'labram_init_scale', 0.001))
+        trunc_normal_(self.classifier.weight, std=0.02)
+        nn.init.constant_(self.classifier.bias, 0.0)
+        self.classifier.weight.data.mul_(init_scale)
+        self.classifier.bias.data.mul_(init_scale)
+        with torch.no_grad():
+            w = self.classifier.weight.detach().float()
+            b = self.classifier.bias.detach().float()
+            print(
+                "[FACED][LaBraM] pooled head init: "
+                f"init_scale={init_scale} "
+                f"weight_mean={w.mean().item():.6g} weight_std={w.std(unbiased=False).item():.6g} "
+                f"bias_mean={b.mean().item():.6g} bias_std={b.std(unbiased=False).item():.6g}",
+                flush=True,
+            )

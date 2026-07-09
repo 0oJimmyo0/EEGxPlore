@@ -162,6 +162,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         help='LayerScale init value passed to the LaBraM backbone constructor.',
     )
     parser.add_argument(
+        '--labram_init_scale',
+        type=float,
+        default=0.001,
+        help='LaBraM-style classifier init scale used for the external pooled linear head in EEGxPlore.',
+    )
+    parser.add_argument(
         '--labram_qkv_bias',
         action=argparse.BooleanOptionalAction,
         default=False,
