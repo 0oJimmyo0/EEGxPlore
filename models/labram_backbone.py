@@ -260,7 +260,9 @@ class LaBraMBackbone(nn.Module):
         self.foundation = ctor(
             EEG_size=200,
             in_chans=1,
-            num_classes=0,
+            num_classes=int(getattr(param, "num_of_classes", 0))
+            if str(getattr(param, "labram_head_mode", "external_pooled_linear")).strip().lower() == "native_head"
+            else 0,
             use_mean_pooling=True,
             init_values=float(getattr(param, "labram_layer_scale_init_value", 0.1)),
             drop_path_rate=float(getattr(param, "labram_drop_path_rate", 0.1)),
@@ -271,6 +273,7 @@ class LaBraMBackbone(nn.Module):
         self.proj_out = nn.Identity()
         self.output_mode = "pooled"
         self.feature_dim = int(getattr(self.foundation, "embed_dim", 200))
+        self.head_mode = str(getattr(param, "labram_head_mode", "external_pooled_linear")).strip().lower()
         self.token_pool_no_adapter = bool(getattr(param, "labram_token_pool_no_adapter", False))
         self.gamma_zero_skip_branch = bool(getattr(param, "labram_gamma_zero_skip_branch", False))
         self.adapter_type = str(getattr(param, "labram_adapter_type", "cbramod_stack")).strip().lower()
@@ -294,6 +297,15 @@ class LaBraMBackbone(nn.Module):
             or getattr(param, "attnres_variant", "none") != "none"
             or bool(getattr(param, "labram_force_adapter", False))
         )
+        if self.head_mode == "native_head" and selective_requested:
+            raise NotImplementedError(
+                "labram_head_mode=native_head is currently a dense-parity path only. "
+                "Disable selective adaptation flags for this run."
+            )
+        if self.head_mode == "native_head" and self.token_pool_no_adapter:
+            raise NotImplementedError(
+                "labram_head_mode=native_head cannot be combined with labram_token_pool_no_adapter."
+            )
         adapter_layers = int(getattr(param, "labram_adapter_layers", 4))
         self.adapter: Optional[nn.Module]
         self.residual_adapter_proj: Optional[nn.Linear]
@@ -366,6 +378,8 @@ class LaBraMBackbone(nn.Module):
             self.adapter = None
             self.residual_adapter_proj = None
             self.encoder = _EncoderView(self.foundation.blocks)
+            if self.head_mode == "native_head":
+                print("[LaBraM] dense native-head parity mode active.", flush=True)
             if selective_requested and adapter_layers <= 0:
                 print(
                     "[LaBraM] selective adaptation flags were requested, but "
@@ -494,6 +508,12 @@ class LaBraMBackbone(nn.Module):
             tok_meta = set_moe_faced_metadata(batch_meta)
         try:
             if self.adapter is None:
+                if self.head_mode == "native_head":
+                    return self.foundation(
+                        x,
+                        input_chans=self.input_chans,
+                        return_patch_tokens=False,
+                    )
                 if self.token_pool_no_adapter:
                     # Diagnostic path: keep LaBraM patch-token features but do not
                     # pass them through any selective adapter stack.

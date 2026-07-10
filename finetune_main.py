@@ -79,6 +79,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--pin_memory', action='store_true')
     parser.add_argument('--persistent_workers', action='store_true')
+    parser.add_argument(
+        '--train_drop_last',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Drop the final partial training batch to match pipelines such as the original LaBraM finetuning loop.',
+    )
     parser.add_argument('--label_smoothing', type=float, default=0.1)
     parser.add_argument(
         '--class_weight_mode',
@@ -136,6 +142,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default='labram_base_patch200_200',
         help='LaBraM constructor name inside modeling_finetune.py.',
+    )
+    parser.add_argument(
+        '--labram_head_mode',
+        type=str,
+        default='external_pooled_linear',
+        choices=['external_pooled_linear', 'native_head'],
+        help="LaBraM dense-readout mode. external_pooled_linear uses EEGxPlore's external linear head; native_head uses LaBraM's internal classifier head for parity experiments.",
     )
     parser.add_argument(
         '--labram_adapter_layers',

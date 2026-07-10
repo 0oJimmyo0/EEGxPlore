@@ -16,6 +16,7 @@ class Model(nn.Module):
         super().__init__()
 
         self.backbone_name = str(getattr(param, 'backbone', 'cbramod')).strip().lower()
+        self.labram_head_mode = str(getattr(param, 'labram_head_mode', 'external_pooled_linear')).strip().lower()
         if self.backbone_name == 'cbramod':
             self.backbone = CBraMod(
                 in_dim=200,
@@ -98,14 +99,19 @@ class Model(nn.Module):
         self.backbone.proj_out = nn.Identity()
         classifier_name = str(param.classifier)
         if self.backbone_name == 'labram':
-            if classifier_name != 'labram_pooled_linear':
+            if self.labram_head_mode == 'native_head':
+                classifier_name = 'native_head'
+                print("[FACED][LaBraM] using native internal LaBraM head for dense parity.")
+            elif classifier_name != 'labram_pooled_linear':
                 print(
                     f"[FACED][LaBraM] remapping classifier {classifier_name!r} -> "
                     "'labram_pooled_linear' to match the original LaBraM pooled-head finetuning path"
                 )
-            classifier_name = 'labram_pooled_linear'
+                classifier_name = 'labram_pooled_linear'
 
-        if classifier_name == 'labram_pooled_linear':
+        if classifier_name == 'native_head':
+            self.classifier = nn.Identity()
+        elif classifier_name == 'labram_pooled_linear':
             self.classifier = nn.Linear(200, param.num_of_classes)
         elif classifier_name == 'avgpooling_patch_reps':
             self.classifier = nn.Sequential(

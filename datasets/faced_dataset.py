@@ -183,8 +183,10 @@ class LoadDataset(object):
         num_workers = int(getattr(self.params, 'num_workers', 0))
         persistent_workers = bool(getattr(self.params, 'persistent_workers', False) and num_workers > 0)
         pin_memory = bool(getattr(self.params, 'pin_memory', False))
+        train_drop_last = bool(getattr(self.params, 'train_drop_last', False))
         input_scale_divisor = float(getattr(self.params, 'input_scale_divisor', 100.0))
         print(f"[FACED] input_scale_divisor={input_scale_divisor}", flush=True)
+        print(f"[FACED] train_drop_last={train_drop_last}", flush=True)
 
         train_set = CustomDataset(
             self.datasets_dir,
@@ -231,6 +233,7 @@ class LoadDataset(object):
                 num_workers=num_workers,
                 persistent_workers=persistent_workers,
                 pin_memory=pin_memory,
+                drop_last=train_drop_last,
             ),
             'val': DataLoader(
                 val_set,
