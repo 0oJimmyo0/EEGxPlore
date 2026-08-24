@@ -66,6 +66,19 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         default='FACED',
         choices=['FACED', 'SEED-V', 'ISRUC', 'PhysioNet-MI', 'Mumtaz2016', 'TUEV'],
     )
+    parser.add_argument(
+        '--experiment_profile',
+        type=str,
+        default='none',
+        choices=['none', 'icassp2027'],
+        help='Enable a fail-fast reproducibility firewall for the ICASSP study.',
+    )
+    parser.add_argument(
+        '--icassp_split_manifest',
+        type=str,
+        default='',
+        help='Frozen ICASSP split manifest for the selected dataset.',
+    )
     parser.add_argument('--datasets_dir', type=str, required=True)
     parser.add_argument(
         '--input_scale_divisor',
@@ -305,7 +318,19 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--moe', action='store_true')
     parser.add_argument('--moe_num_layers', type=int, default=1)
     parser.add_argument('--moe_num_experts', type=int, default=4)
-    parser.add_argument('--moe_route_mode', type=str, default='typed_capacity_domain', choices=['typed_capacity_domain'])
+    parser.add_argument(
+        '--moe_route_mode',
+        type=str,
+        default='typed_capacity_domain',
+        choices=['typed_capacity_domain', 'typed_conditional'],
+    )
+    parser.add_argument(
+        '--moe_router_policy',
+        type=str,
+        default='sample',
+        choices=['static', 'sample'],
+        help='For typed_conditional: static uses the learned constant; sample adds the current sample representation.',
+    )
     parser.add_argument('--moe_capacity_factor', type=float, default=1.0)
     parser.add_argument('--moe_load_balance', type=float, default=0.005)
     parser.add_argument('--moe_domain_bias', action='store_true')
@@ -520,6 +545,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if (
         args.moe_attnres_depth_context_mode in typed_block_modes
         and not args.moe_use_attnres_depth_router_features
+        and args.experiment_profile != 'icassp2027'
     ):
         print(
             f"[warn] {args.moe_attnres_depth_context_mode} selected but --moe_use_attnres_depth_router_features is off; "
@@ -583,6 +609,55 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.backbone == 'labram' and args.labram_adapter_layers < 0:
         raise ValueError('--labram_adapter_layers must be >= 0.')
 
+    if args.experiment_profile == 'icassp2027':
+        if args.downstream_dataset not in {'SEED-V', 'FACED', 'ISRUC', 'PhysioNet-MI'}:
+            raise ValueError('[icassp2027] dataset must be SEED-V, FACED, ISRUC, or PhysioNet-MI.')
+        if args.backbone != 'cbramod':
+            raise ValueError('[icassp2027] only the CBraMod backbone is allowed.')
+        if not args.icassp_split_manifest:
+            raise ValueError('[icassp2027] --icassp_split_manifest is required.')
+        if not os.path.isfile(args.icassp_split_manifest):
+            raise ValueError(f'[icassp2027] split manifest does not exist: {args.icassp_split_manifest}')
+        if args.attnres_variant != 'none':
+            raise ValueError('[icassp2027] AttnRes is excluded from the entire ICASSP profile.')
+        if args.routing_export_dir and args.downstream_dataset != 'SEED-V':
+            raise ValueError('[icassp2027] routing export is only defined for SEED-V.')
+        if args.moe:
+            if args.frozen:
+                raise ValueError('[icassp2027] do not use --frozen for Static/Routed; the shared FFN is selectively frozen.')
+            if args.moe_route_mode != 'typed_conditional':
+                raise ValueError('[icassp2027] MoE runs must use --moe_route_mode typed_conditional.')
+            if args.moe_num_layers != 4:
+                raise ValueError('[icassp2027] MoE runs must adapt exactly the upper four layers.')
+            if args.attnres_variant != 'none':
+                raise ValueError('[icassp2027] AttnRes is forbidden in the typed_conditional path.')
+            if args.moe_router_dispatch_mode != 'soft':
+                raise ValueError('[icassp2027] only soft router dispatch is allowed.')
+            forbidden_nonzero = {
+                'moe_load_balance': args.moe_load_balance,
+                'moe_domain_bias_reg': args.moe_domain_bias_reg,
+                'moe_router_entropy_coef': args.moe_router_entropy_coef,
+                'moe_router_balance_kl_coef': args.moe_router_balance_kl_coef,
+                'moe_router_z_loss_coef': args.moe_router_z_loss_coef,
+                'moe_router_jitter_std': args.moe_router_jitter_std,
+                'moe_router_jitter_final_std': args.moe_router_jitter_final_std,
+                'moe_router_soft_warmup_epochs': args.moe_router_soft_warmup_epochs,
+                'moe_uniform_dispatch_warmup_epochs': args.moe_uniform_dispatch_warmup_epochs,
+                'moe_shared_blend_warmup_epochs': args.moe_shared_blend_warmup_epochs,
+                'moe_expert_init_noise_std': args.moe_expert_init_noise_std,
+            }
+            bad = {name: value for name, value in forbidden_nonzero.items() if float(value) != 0.0}
+            if bad:
+                raise ValueError(f'[icassp2027] forbidden router extras are nonzero: {bad}')
+            if args.moe_domain_bias:
+                raise ValueError('[icassp2027] domain metadata routing is forbidden.')
+            if args.moe_use_psd_router_features or args.moe_use_attnres_depth_router_features:
+                raise ValueError('[icassp2027] PSD and AttnRes-depth router features are forbidden.')
+            if args.moe_router_compact_feature_mode != 'none':
+                raise ValueError('[icassp2027] compact EEG/PSD router features are forbidden.')
+            if args.moe_specialist_branch_mode != 'both':
+                raise ValueError('[icassp2027] both typed specialist banks are required.')
+
 
 def build_dataset(args: argparse.Namespace):
     args.return_sample_keys = False
@@ -598,11 +673,12 @@ def build_dataset(args: argparse.Namespace):
         if args.moe_domain_bias:
             print('[SEED-V] warning: --moe_domain_bias enabled without FACED metadata; zero/unknown ids will be used.')
         if args.return_sample_keys:
-            print('[SEED-V] routing_export_dir is set; per-sample export is FACED-only and will be skipped.')
+            print('[SEED-V] routing_export_dir is set; ICASSP SEED-V per-sample routing export is enabled.')
 
-        if args.seedv_split_manifest:
+        manifest = getattr(args, 'icassp_split_manifest', '') or args.seedv_split_manifest
+        if manifest:
             print(
-                f"[SEED-V] using split manifest override: {args.seedv_split_manifest} "
+                f"[SEED-V] using split manifest override: {manifest} "
                 '(this differs from CBraMod LMDB __keys__ cohort)'
             )
         else:

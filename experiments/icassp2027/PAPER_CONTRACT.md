@@ -23,9 +23,13 @@ ICASSP is explicitly CBraMod-specific. It does not claim cross-backbone generali
 - Adaptation site: the upper four CBraMod transformer blocks.
 - Specialist banks: spatial and spectral-temporal typed banks.
 - Dispatch: soft dispatch.
+- Route implementation: the new `typed_conditional` mode; legacy
+  `typed_capacity_domain` is excluded from ICASSP runs.
 - Static router: the same router network fed by a learned constant input.
 - Routed router: the same router network fed by the current sample representation plus the same learned constant.
 - Router dropout, jitter, depth/context features, and router-specific regularizers: disabled in the primary Static/Routed comparison.
+- The pretrained shared FFN is frozen for Static/Routed; specialists, routers,
+  learned constants, and the task head are trainable.
 - Primary datasets: SEED-V, FACED, ISRUC, PhysioNet-MI.
 - Split regime: fresh subject-disjoint manifests generated for this study.
 - Primary test metrics: balanced accuracy and macro-F1.
@@ -34,6 +38,9 @@ ICASSP is explicitly CBraMod-specific. It does not claim cross-backbone generali
 - Development seeds: `42, 1024, 3407`.
 - Additional Static/Routed seeds: `2027, 2718`.
 - Mechanism analysis: SEED-V subject-by-expert routing profiles only.
+
+The accepted implementation decisions and the ICASSP configuration firewall
+are recorded in `IMPLEMENTATION_DECISIONS.md`.
 
 ## Fixed method matrix
 

@@ -1603,6 +1603,200 @@ class TypedCapacityDomainMoEFFN(nn.Module):
         return self._last_aux_loss
 
 
+class TypedConditionalMoEFFN(nn.Module):
+    """Soft typed specialists with a sample-independent or sample-conditioned router.
+
+    This is deliberately separate from :class:`TypedCapacityDomainMoEFFN`.
+    The ICASSP comparison has one parameter schema and two runtime policies:
+
+    ``static``
+        ``softmax(R(c))``
+    ``sample``
+        ``softmax(R(u + c))``, where ``u`` is the mean normalized pre-FFN
+        representation over channel and patch axes.
+
+    The learned constants and router networks are present in both policies so
+    the Static/Routed intervention changes only the router input, not model
+    capacity or parameterization.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        dim_feedforward: int,
+        num_specialists: int,
+        dropout: float,
+        activation: Union[str, Callable[[Tensor], Tensor]],
+        bias: bool = True,
+        router_policy: str = "sample",
+        router_arch: str = "linear",
+        router_mlp_hidden: int = 128,
+        router_temperature: float = 1.0,
+        shared_output_scale: float = 1.0,
+        expert_output_scale: float = 1.0,
+        use_spatial_specialists: bool = True,
+        use_spectral_specialists: bool = True,
+        device=None,
+        dtype=None,
+    ) -> None:
+        super().__init__()
+        policy = str(router_policy).strip().lower()
+        if policy not in {"static", "sample"}:
+            raise ValueError("router_policy must be one of {'static', 'sample'}")
+        if router_arch not in MOE_ROUTER_ARCHS:
+            raise ValueError(f"router_arch must be one of {MOE_ROUTER_ARCHS}, got {router_arch!r}")
+        if num_specialists < 1:
+            raise ValueError("num_specialists must be >= 1")
+        if not use_spatial_specialists and not use_spectral_specialists:
+            raise ValueError("At least one specialist bank must be enabled")
+        if router_temperature <= 0:
+            raise ValueError("router_temperature must be > 0")
+        if shared_output_scale < 0 or expert_output_scale < 0:
+            raise ValueError("output scales must be >= 0")
+
+        factory_kwargs = {"device": device, "dtype": dtype}
+        activation_fn = _activation_from_arg(activation)
+
+        self.moe_kind = "typed_conditional"
+        self.route_mode = "typed_conditional"
+        self.router_policy = policy
+        self.num_specialists = int(num_specialists)
+        self.num_experts = int(num_specialists)
+        self.d_model = int(d_model)
+        self.router_arch = str(router_arch)
+        self.router_mlp_hidden = int(router_mlp_hidden)
+        self.router_temperature = float(router_temperature)
+        self.shared_output_scale = float(shared_output_scale)
+        self.expert_output_scale = float(expert_output_scale)
+        self.use_spatial_specialists = bool(use_spatial_specialists)
+        self.use_spectral_specialists = bool(use_spectral_specialists)
+
+        self.shared = ExpertFFN(
+            d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs
+        )
+        # These parameters intentionally exist for both policies. The static
+        # condition uses only c; the routed condition uses u+c.
+        self.router_constant_spatial = nn.Parameter(torch.zeros(d_model, **factory_kwargs))
+        self.router_constant_spectral = nn.Parameter(torch.zeros(d_model, **factory_kwargs))
+        self.spatial_router = _make_router_head(
+            d_model, num_specialists, router_arch, self.router_mlp_hidden, factory_kwargs
+        )
+        self.spectral_router = _make_router_head(
+            d_model, num_specialists, router_arch, self.router_mlp_hidden, factory_kwargs
+        )
+        self.spatial_specialists = nn.ModuleList(
+            ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
+            for _ in range(num_specialists)
+        )
+        self.spectral_specialists = nn.ModuleList(
+            ExpertFFN(d_model, dim_feedforward, dropout, activation_fn, bias=bias, **factory_kwargs)
+            for _ in range(num_specialists)
+        )
+
+        self._zero_specialist_output_weights()
+        self._last_aux_loss = torch.zeros((), device=device, dtype=torch.float32)
+        self.last_diagnostics: Optional[Dict[str, Any]] = None
+        self._routing_export_cache: Dict[str, Tensor] = {}
+
+    def _zero_specialist_output_weights(self) -> None:
+        for bank in (self.spatial_specialists, self.spectral_specialists):
+            for expert in bank:
+                nn.init.zeros_(expert.linear2.weight)
+                if expert.linear2.bias is not None:
+                    nn.init.zeros_(expert.linear2.bias)
+
+    def apply_expert_init_noise_(self, std: float) -> None:
+        std = float(max(0.0, std))
+        if std == 0.0:
+            return
+        for bank in (self.spatial_specialists, self.spectral_specialists):
+            for expert in bank:
+                expert.linear1.weight.add_(torch.randn_like(expert.linear1.weight) * std)
+                if expert.linear1.bias is not None:
+                    expert.linear1.bias.add_(torch.randn_like(expert.linear1.bias) * std)
+
+    def _router_input(self, sample: Tensor, constant: Tensor) -> Tensor:
+        if sample.dim() != 4:
+            raise ValueError(f"typed_conditional expects sample [B,C,S,D], got {tuple(sample.shape)}")
+        if sample.shape[-1] != self.d_model:
+            raise ValueError(
+                f"typed_conditional sample feature dimension must be {self.d_model}, "
+                f"got {sample.shape[-1]}"
+            )
+        u = sample.mean(dim=(1, 2))
+        if self.router_policy == "static":
+            return constant.unsqueeze(0).expand(sample.shape[0], -1)
+        return u + constant.unsqueeze(0)
+
+    def _dispatch_bank(self, x_flat: Tensor, probs: Tensor, bank: nn.ModuleList) -> Tensor:
+        out = torch.zeros_like(x_flat)
+        tokens_per_sample = x_flat.shape[0] // probs.shape[0]
+        if tokens_per_sample * probs.shape[0] != x_flat.shape[0]:
+            raise ValueError("typed_conditional input cannot be evenly grouped by sample")
+        for expert_idx, expert in enumerate(bank):
+            weights = probs[:, expert_idx].repeat_interleave(tokens_per_sample).unsqueeze(-1)
+            out = out + expert(x_flat) * weights
+        return out
+
+    def forward(self, x: Tensor, router_context: Optional[Dict[str, Tensor]] = None) -> Tensor:
+        if x.dim() != 4:
+            raise ValueError(f"typed_conditional expects x [B,C,S,D], got {tuple(x.shape)}")
+        b, c, s, d = x.shape
+        context = router_context or {}
+        sample = context.get("sample")
+        if sample is None:
+            raise ValueError("typed_conditional requires router_context['sample']")
+        if sample.shape[:3] != x.shape[:3] or sample.shape[-1] != d:
+            raise ValueError(
+                "typed_conditional router sample must match x in [B,C,S,D], "
+                f"got x={tuple(x.shape)}, sample={tuple(sample.shape)}"
+            )
+
+        spatial_logits = self.spatial_router(self._router_input(sample, self.router_constant_spatial))
+        spectral_logits = self.spectral_router(self._router_input(sample, self.router_constant_spectral))
+        spatial_probs = F.softmax(spatial_logits / self.router_temperature, dim=-1)
+        spectral_probs = F.softmax(spectral_logits / self.router_temperature, dim=-1)
+
+        x_flat = x.reshape(b * c * s, d)
+        shared = self.shared(x_flat).reshape(b, c, s, d)
+        spatial = torch.zeros_like(shared)
+        spectral = torch.zeros_like(shared)
+        if self.use_spatial_specialists:
+            spatial = self._dispatch_bank(x_flat, spatial_probs, self.spatial_specialists).reshape(b, c, s, d)
+        if self.use_spectral_specialists:
+            spectral = self._dispatch_bank(x_flat, spectral_probs, self.spectral_specialists).reshape(b, c, s, d)
+
+        out = self.shared_output_scale * shared + self.expert_output_scale * (spatial + spectral)
+        spatial_entropy = -(spatial_probs * spatial_probs.clamp_min(1e-10).log()).sum(dim=-1)
+        spectral_entropy = -(spectral_probs * spectral_probs.clamp_min(1e-10).log()).sum(dim=-1)
+        self.last_diagnostics = {
+            "moe_kind": self.moe_kind,
+            "router_policy": self.router_policy,
+            "num_experts": self.num_experts,
+            "spatial": {"mean_probs": spatial_probs.detach().mean(dim=0).cpu().tolist(),
+                        "entropy": float(spatial_entropy.detach().mean().item())},
+            "spectral": {"mean_probs": spectral_probs.detach().mean(dim=0).cpu().tolist(),
+                          "entropy": float(spectral_entropy.detach().mean().item())},
+            "shared_output_scale": float(self.shared_output_scale),
+            "expert_output_scale": float(self.expert_output_scale),
+        }
+        self._routing_export_cache = {
+            "logits_spatial": spatial_logits.detach().cpu(),
+            "logits_spectral": spectral_logits.detach().cpu(),
+            "probs_spatial": spatial_probs.detach().cpu(),
+            "probs_spectral": spectral_probs.detach().cpu(),
+            "raw_top1_spatial": spatial_probs.argmax(dim=-1).detach().cpu(),
+            "raw_top1_spectral": spectral_probs.argmax(dim=-1).detach().cpu(),
+            "pre_entropy_spatial": spatial_entropy.detach().cpu(),
+            "pre_entropy_spectral": spectral_entropy.detach().cpu(),
+        }
+        self._last_aux_loss = x.new_zeros(())
+        return out
+
+    def auxiliary_loss(self) -> Tensor:
+        return self._last_aux_loss
+
+
 @torch.no_grad()
 def warm_start_typed_capacity_domain_from_dense_ckpt(
     moe: TypedCapacityDomainMoEFFN,
@@ -1647,8 +1841,11 @@ def warm_start_moe_from_dense_ckpt(
     copy_specialist_linear1_from_dense: bool = True,
     expert_init_noise_std: float = 0.0,
 ) -> None:
-    if not isinstance(moe, TypedCapacityDomainMoEFFN):
-        raise TypeError(f"Expected TypedCapacityDomainMoEFFN, got {type(moe)}")
+    if not isinstance(moe, (TypedCapacityDomainMoEFFN, TypedConditionalMoEFFN)):
+        raise TypeError(
+            "Expected TypedCapacityDomainMoEFFN or TypedConditionalMoEFFN, "
+            f"got {type(moe)}"
+        )
     warm_start_typed_capacity_domain_from_dense_ckpt(
         moe,
         ckpt,

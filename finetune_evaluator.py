@@ -52,6 +52,7 @@ class Evaluator:
         preds = np.array(preds)
         acc = balanced_accuracy_score(truths, preds)
         f1 = f1_score(truths, preds, average='weighted')
+        self.last_macro_f1 = f1_score(truths, preds, average='macro')
         kappa = cohen_kappa_score(truths, preds)
         cm = confusion_matrix(truths, preds)
         return acc, kappa, f1, cm

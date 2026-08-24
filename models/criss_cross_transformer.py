@@ -574,7 +574,11 @@ class TransformerEncoderLayer(nn.Module):
 
         if self.attnres_variant == 'none':
             x = x + self._sa_block(self.norm1(x), src_mask, src_key_padding_mask, is_causal=is_causal)
-            x = x + self._ff_block(self.norm2(x), router_context=None)
+            ffn_in = self.norm2(x)
+            router_context = None
+            if self.moe_ffn is not None and getattr(self.moe_ffn, "moe_kind", "") == "typed_conditional":
+                router_context = {"sample": ffn_in}
+            x = x + self._ff_block(ffn_in, router_context=router_context)
             return x, [x]
 
         new_sources = []
@@ -627,6 +631,11 @@ class TransformerEncoderLayer(nn.Module):
         router_ctx: Optional[Dict[str, Tensor]] = None
         moe = self.moe_ffn
         needs_pre_attn_ctx = moe is not None and getattr(moe, "moe_kind", "") == "typed_capacity_domain"
+        if moe is not None and getattr(moe, "moe_kind", "") == "typed_conditional":
+            # The ICASSP router sees the current normalized pre-FFN sample
+            # representation only. No AttnRes, depth, PSD, or dataset metadata
+            # enters this path.
+            router_ctx = {"sample": ffn_in}
         if needs_pre_attn_ctx:
             if baseline_in is None or attnres_in is None:
                 raise ValueError(

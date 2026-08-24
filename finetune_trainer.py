@@ -230,7 +230,17 @@ class Trainer(object):
                 if params.frozen:
                     param.requires_grad = False
                 else:
-                    param.requires_grad = True
+                    # ICASSP Static/Routed freezes only the shared pretrained
+                    # FFN inside each conditional MoE block. The specialist
+                    # banks, routers/constants, attention stack, and task
+                    # head remain trainable.
+                    freeze_shared = (
+                        getattr(params, 'experiment_profile', 'none') == 'icassp2027'
+                        and getattr(params, 'moe', False)
+                        and getattr(params, 'moe_route_mode', '') == 'typed_conditional'
+                        and '.moe_ffn.shared.' in name
+                    )
+                    param.requires_grad = not freeze_shared
             if not param.requires_grad:
                 continue
             self._named_trainable_params.append((name, param))
@@ -507,12 +517,13 @@ class Trainer(object):
         self,
         evaluator: Evaluator,
         epoch_for_log: Optional[int] = None,
-    ) -> Tuple[Tuple[float, float, float, np.ndarray], Optional[Tuple[float, float, float, np.ndarray]]]:
+    ) -> Tuple[Tuple[float, float, float, float, np.ndarray], Optional[Tuple[float, float, float, float, np.ndarray]]]:
         if epoch_for_log is None:
             raw = evaluator.get_metrics_for_multiclass(self.model)
         else:
             raw = evaluator.get_metrics_for_multiclass(self.model, epoch_for_log=epoch_for_log)
 
+        raw = (raw[0], raw[1], raw[2], float(evaluator.last_macro_f1), raw[3])
         ema = None
         if self._ema_is_ready():
             self._ema_helper.apply_shadow(self.model)
@@ -523,6 +534,7 @@ class Trainer(object):
                     ema = evaluator.get_metrics_for_multiclass(self.model, epoch_for_log=epoch_for_log)
             finally:
                 self._ema_helper.restore(self.model)
+            ema = (ema[0], ema[1], ema[2], float(evaluator.last_macro_f1), ema[3])
         return raw, ema
 
     @staticmethod
@@ -542,6 +554,7 @@ class Trainer(object):
         router_keys = (
             'spatial_router',
             'spectral_router',
+            'router_constant_',
             'router_input_norm',
             'domain_embeddings',
             'domain_bias_mlp',
@@ -1115,9 +1128,11 @@ class Trainer(object):
             'val_balanced_accuracy': best_val_metrics.get('balanced_accuracy', ''),
             'val_kappa': best_val_metrics.get('kappa', ''),
             'val_weighted_f1': best_val_metrics.get('weighted_f1', ''),
+            'val_macro_f1': best_val_metrics.get('macro_f1', ''),
             'test_balanced_accuracy': test_metrics.get('balanced_accuracy', ''),
             'test_kappa': test_metrics.get('kappa', ''),
             'test_weighted_f1': test_metrics.get('weighted_f1', ''),
+            'test_macro_f1': test_metrics.get('macro_f1', ''),
             'seed': getattr(self.params, 'seed', ''),
             'epochs': getattr(self.params, 'epochs', ''),
             'batch_size': getattr(self.params, 'batch_size', ''),
@@ -1129,8 +1144,11 @@ class Trainer(object):
             'ema_eval_only': bool(getattr(self.params, 'ema_eval_only', True)),
             'classifier': getattr(self.params, 'classifier', ''),
             'attnres_variant': getattr(self.params, 'attnres_variant', ''),
+            'experiment_profile': getattr(self.params, 'experiment_profile', ''),
             'moe': bool(getattr(self.params, 'moe', False)),
             'moe_num_layers': getattr(self.params, 'moe_num_layers', ''),
+            'moe_route_mode': getattr(self.params, 'moe_route_mode', ''),
+            'moe_router_policy': getattr(self.params, 'moe_router_policy', ''),
             'moe_router_arch': getattr(self.params, 'moe_router_arch', ''),
             'moe_use_attnres_depth_router_features': bool(getattr(self.params, 'moe_use_attnres_depth_router_features', False)),
             'moe_attnres_depth_router_dim': getattr(self.params, 'moe_attnres_depth_router_dim', ''),
@@ -1170,6 +1188,7 @@ class Trainer(object):
             'lr_expert_mult': getattr(self.params, 'lr_expert_mult', ''),
             'lr_classifier_mult': getattr(self.params, 'lr_classifier_mult', ''),
             'lr_other_mult': getattr(self.params, 'lr_other_mult', ''),
+            'trainable_parameter_count': sum(p.numel() for _, p in self._named_trainable_params),
         }
 
         write_header = not os.path.isfile(csv_path)
@@ -1311,11 +1330,13 @@ class Trainer(object):
         selection_metric = self._multiclass_selection_metric_name()
 
         raw_kappa_best = float('-inf')
+        raw_macro_f1_best = float('-inf')
         raw_best_epoch = 0
         raw_best_val_metrics: Dict[str, float] = {}
         raw_best_model_states: Optional[Dict[str, Any]] = None
 
         ema_kappa_best = float('-inf')
+        ema_macro_f1_best = float('-inf')
         ema_best_epoch = 0
         ema_best_val_metrics: Dict[str, float] = {}
         ema_best_model_states: Optional[Dict[str, Any]] = None
@@ -1398,50 +1419,53 @@ class Trainer(object):
 
                 try:
                     with torch.no_grad():
-                        (raw_acc, raw_kappa, raw_f1, raw_cm), ema_pack = self._eval_multiclass_with_optional_ema(
+                        (raw_acc, raw_kappa, raw_f1, raw_macro_f1, raw_cm), ema_pack = self._eval_multiclass_with_optional_ema(
                             self.val_eval,
                             epoch_for_log=epoch + 1,
                         )
-                    ema_acc = ema_kappa = ema_f1 = None
+                    ema_acc = ema_kappa = ema_f1 = ema_macro_f1 = None
                     ema_cm = None
                     if ema_pack is not None:
-                        ema_acc, ema_kappa, ema_f1, ema_cm = ema_pack
+                        ema_acc, ema_kappa, ema_f1, ema_macro_f1, ema_cm = ema_pack
 
                     selected_source = 'raw'
-                    acc, kappa, f1, cm = raw_acc, raw_kappa, raw_f1, raw_cm
+                    acc, kappa, f1, macro_f1, cm = raw_acc, raw_kappa, raw_f1, raw_macro_f1, raw_cm
                     if ema_pack is not None and self._ema_eval_only:
                         selected_source = 'ema'
-                        acc, kappa, f1, cm = ema_acc, ema_kappa, ema_f1, ema_cm
+                        acc, kappa, f1, macro_f1, cm = ema_acc, ema_kappa, ema_f1, ema_macro_f1, ema_cm
 
                     _mem_report(f"after_val ep={epoch + 1}", md)
                     print(
-                        "Epoch {} : Training Loss: {:.5f}, acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}, LR: {:.5f}, Time elapsed {:.2f} mins, eval_source={}".format(
+                        "Epoch {} : Training Loss: {:.5f}, acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}, macro_f1: {:.5f}, LR: {:.5f}, Time elapsed {:.2f} mins, eval_source={}".format(
                             epoch + 1,
                             np.mean(losses) if losses else float("nan"),
                             acc,
                             kappa,
                             f1,
+                            macro_f1,
                             lr_cur,
                             (timer() - start_time) / 60,
                             selected_source,
                         )
                     )
                     print(
-                        "[diag] ep={} val_raw acc={:.5f} kappa={:.5f} f1={:.5f}".format(
+                        "[diag] ep={} val_raw acc={:.5f} kappa={:.5f} f1={:.5f} macro_f1={:.5f}".format(
                             epoch + 1,
                             raw_acc,
                             raw_kappa,
                             raw_f1,
+                            raw_macro_f1,
                         ),
                         flush=True,
                     )
                     if ema_pack is not None:
                         print(
-                            "[diag] ep={} val_ema acc={:.5f} kappa={:.5f} f1={:.5f}".format(
+                            "[diag] ep={} val_ema acc={:.5f} kappa={:.5f} f1={:.5f} macro_f1={:.5f}".format(
                                 epoch + 1,
                                 ema_acc,
                                 ema_kappa,
                                 ema_f1,
+                                ema_macro_f1,
                             ),
                             flush=True,
                         )
@@ -1484,13 +1508,16 @@ class Trainer(object):
                             'balanced_accuracy': float(acc),
                             'kappa': float(kappa),
                             'weighted_f1': float(f1),
+                            'macro_f1': float(macro_f1),
                             'eval_source': selected_source,
                             'raw_balanced_accuracy': float(raw_acc),
                             'raw_kappa': float(raw_kappa),
                             'raw_weighted_f1': float(raw_f1),
+                            'raw_macro_f1': float(raw_macro_f1),
                             'ema_balanced_accuracy': float(ema_acc) if ema_acc is not None else None,
                             'ema_kappa': float(ema_kappa) if ema_kappa is not None else None,
                             'ema_weighted_f1': float(ema_f1) if ema_f1 is not None else None,
+                            'ema_macro_f1': float(ema_macro_f1) if ema_macro_f1 is not None else None,
                             'lr': float(lr_cur),
                             'loss_mean': float(np.mean(losses) if losses else float('nan')),
                             'lr_groups': lr_by_group,
@@ -1529,6 +1556,7 @@ class Trainer(object):
                             'balanced_accuracy': float(acc),
                             'kappa': float(kappa),
                             'weighted_f1': float(f1),
+                            'macro_f1': float(macro_f1),
                             'eval_source': selected_source,
                         },
                         'grad_norms': _to_jsonable(grad_norms),
@@ -1542,20 +1570,24 @@ class Trainer(object):
                     if raw_kappa > raw_kappa_best:
                         raw_best_epoch = epoch + 1
                         raw_kappa_best = raw_kappa
+                        raw_macro_f1_best = raw_macro_f1
                         raw_best_val_metrics = {
                             'balanced_accuracy': float(raw_acc),
                             'kappa': float(raw_kappa),
                             'weighted_f1': float(raw_f1),
+                            'macro_f1': float(raw_macro_f1),
                         }
                         raw_best_model_states = _state_dict_to_cpu(self.model)
 
                     if ema_pack is not None and ema_kappa > ema_kappa_best:
                         ema_best_epoch = epoch + 1
                         ema_kappa_best = ema_kappa
+                        ema_macro_f1_best = ema_macro_f1
                         ema_best_val_metrics = {
                             'balanced_accuracy': float(ema_acc),
                             'kappa': float(ema_kappa),
                             'weighted_f1': float(ema_f1),
+                            'macro_f1': float(ema_macro_f1),
                         }
                         ema_best_model_states = self._snapshot_ema_state_dict_cpu()
 
@@ -1603,6 +1635,7 @@ class Trainer(object):
                     'balanced_accuracy': float(acc_best),
                     'kappa': float(raw_kappa_best if raw_kappa_best != float('-inf') else 0.0),
                     'weighted_f1': float(f1_best),
+                    'macro_f1': float(raw_macro_f1_best if raw_macro_f1_best != float('-inf') else 0.0),
                 }
 
             if self._ema_enabled() and ema_best_model_states is None and self._ema_is_ready():
@@ -1612,6 +1645,7 @@ class Trainer(object):
                     'balanced_accuracy': float(acc_best),
                     'kappa': float(ema_kappa_best if ema_kappa_best != float('-inf') else 0.0),
                     'weighted_f1': float(f1_best),
+                    'macro_f1': float(ema_macro_f1_best if ema_macro_f1_best != float('-inf') else 0.0),
                 }
 
             if self.best_model_states is None:
@@ -1631,29 +1665,33 @@ class Trainer(object):
                 self.model.load_state_dict(raw_best_model_states)
                 self.model.cuda()
                 raw_test_acc, raw_test_kappa, raw_test_f1, raw_test_cm = self.test_eval.get_metrics_for_multiclass(self.model)
+                raw_test_macro_f1 = float(self.test_eval.last_macro_f1)
                 print("***************************Test results (raw)************************")
                 print(
-                    "Test Evaluation: acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}".format(
+                    "Test Evaluation: acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}, macro_f1: {:.5f}".format(
                         raw_test_acc,
                         raw_test_kappa,
                         raw_test_f1,
+                        raw_test_macro_f1,
                     ),
                     flush=True,
                 )
                 print(raw_test_cm, flush=True)
 
-                ema_test_acc = ema_test_kappa = ema_test_f1 = None
+                ema_test_acc = ema_test_kappa = ema_test_f1 = ema_test_macro_f1 = None
                 ema_test_cm = None
                 if ema_best_model_states is not None:
                     self.model.load_state_dict(ema_best_model_states)
                     self.model.cuda()
                     ema_test_acc, ema_test_kappa, ema_test_f1, ema_test_cm = self.test_eval.get_metrics_for_multiclass(self.model)
+                    ema_test_macro_f1 = float(self.test_eval.last_macro_f1)
                     print("***************************Test results (ema)************************")
                     print(
-                        "Test Evaluation EMA: acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}".format(
+                        "Test Evaluation EMA: acc: {:.5f}, kappa: {:.5f}, f1: {:.5f}, macro_f1: {:.5f}".format(
                             ema_test_acc,
                             ema_test_kappa,
                             ema_test_f1,
+                            ema_test_macro_f1,
                         ),
                         flush=True,
                     )
@@ -1666,12 +1704,14 @@ class Trainer(object):
                     primary_acc = ema_test_acc
                     primary_kappa = ema_test_kappa
                     primary_f1 = ema_test_f1
+                    primary_macro_f1 = ema_test_macro_f1
                     primary_val_metrics = dict(ema_best_val_metrics)
                 else:
                     primary_epoch = raw_best_epoch
                     primary_acc = raw_test_acc
                     primary_kappa = raw_test_kappa
                     primary_f1 = raw_test_f1
+                    primary_macro_f1 = raw_test_macro_f1
                     primary_val_metrics = dict(raw_best_val_metrics)
 
                 print(f"[post_test] primary_eval_source={primary_source}", flush=True)
@@ -1721,6 +1761,12 @@ class Trainer(object):
                                 f"[post_test]   example: faced_routing_{sp}_e{epoch_tag}_{ck_tag}_per_sample.csv",
                                 flush=True,
                             )
+                    elif self.params.downstream_dataset == "SEED-V" and rd:
+                        print(
+                            "[post_test] expected SEED-V routing per-sample pattern: "
+                            f"seedv_routing_<split>_e{epoch_tag}_<checkpoint_tag>_per_sample.csv",
+                            flush=True,
+                        )
                     print("[post_test] after checkpoint save", flush=True)
                     exists = os.path.isfile(model_path)
                     sz = os.path.getsize(model_path) if exists else -1
@@ -1742,6 +1788,21 @@ class Trainer(object):
                                 print(f"[routing_export] skip unknown split {sp!r}", flush=True)
                                 continue
                             export_facced_routing_split(
+                                self.model,
+                                self.data_loader[sp],
+                                self.params,
+                                sp,
+                                epoch_tag,
+                                ck_tag,
+                            )
+                    elif self.params.downstream_dataset == "SEED-V" and rd:
+                        from utils.seedv_routing_export import export_seedv_routing_split
+
+                        for sp in split_list:
+                            if sp not in self.data_loader:
+                                print(f"[routing_export] skip unknown split {sp!r}", flush=True)
+                                continue
+                            export_seedv_routing_split(
                                 self.model,
                                 self.data_loader[sp],
                                 self.params,
@@ -1773,6 +1834,7 @@ class Trainer(object):
                             'balanced_accuracy': float(primary_acc),
                             'kappa': float(primary_kappa),
                             'weighted_f1': float(primary_f1),
+                            'macro_f1': float(primary_macro_f1),
                         },
                         model_path=model_path,
                     )
@@ -1784,6 +1846,7 @@ class Trainer(object):
                             'balanced_accuracy': float(primary_acc),
                             'kappa': float(primary_kappa),
                             'weighted_f1': float(primary_f1),
+                            'macro_f1': float(primary_macro_f1),
                         },
                     )
 
@@ -1797,6 +1860,7 @@ class Trainer(object):
                                     'balanced_accuracy': float(raw_test_acc),
                                     'kappa': float(raw_test_kappa),
                                     'weighted_f1': float(raw_test_f1),
+                                    'macro_f1': float(raw_test_macro_f1),
                                 },
                                 'checkpoint_path': raw_model_path,
                             },
@@ -1807,6 +1871,7 @@ class Trainer(object):
                                     'balanced_accuracy': float(ema_test_acc),
                                     'kappa': float(ema_test_kappa),
                                     'weighted_f1': float(ema_test_f1),
+                                    'macro_f1': float(ema_test_macro_f1),
                                 },
                                 'checkpoint_path': ema_model_path,
                             },

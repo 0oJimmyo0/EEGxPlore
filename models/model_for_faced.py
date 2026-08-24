@@ -39,7 +39,7 @@ class Model(nn.Module):
         print(f"[FACED] attnres_start_layer = {param.attnres_start_layer}")
         if getattr(param, 'moe', False):
             print(
-                f"[FACED] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "
+                f"[FACED] MoE ({getattr(param, 'moe_route_mode', 'typed_capacity_domain')}): top-{param.moe_num_layers} layers, "
                 f"experts/bank={param.moe_num_experts}, "
                 f"route_mode={getattr(param, 'moe_route_mode', 'typed_capacity_domain')}, "
                 f"capacity_factor={getattr(param, 'moe_capacity_factor', 1.0)}, "

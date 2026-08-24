@@ -175,14 +175,14 @@ class LoadDataset(object):
             else:
                 print('[SEED-V split] non-default trial partition detected; verify preprocessing and __keys__.')
 
-    def _report_schema(self, dataset, expected_shape):
+    def _report_schema(self, dataset, expected_shape=None):
         one = dataset[0]
         x = one[0]
         y = one[1]
         x_shape = tuple(x.shape) if hasattr(x, 'shape') else 'unknown'
         x_dtype = getattr(x, 'dtype', type(x))
         print(f"[SEED-V schema] sample_shape={x_shape} sample_dtype={x_dtype} label={int(y)}")
-        if x_shape != expected_shape:
+        if expected_shape is not None and x_shape != expected_shape:
             print(f'[SEED-V schema] warning: expected {expected_shape}; check preprocessing/protocol.')
 
     def get_data_loader(self):
@@ -219,9 +219,11 @@ class LoadDataset(object):
 
         self._report_split_protocol(train_set, val_set, test_set, external_manifest=external_manifest)
 
-        # Benchmark mode expects (62,1,200); legacy/experimental mode commonly uses (62,4,200).
-        expected_shape = (62, 4, 200) if external_manifest else (62, 1, 200)
-        self._report_schema(train_set, expected_shape=expected_shape)
+        # Do not infer an expected tensor shape from the split source. An
+        # external ICASSP manifest changes membership, not serialization, and
+        # the old (62,4,200) proxy incorrectly warned for valid (62,1,200)
+        # examples. The serialized examples themselves are the source of truth.
+        self._report_schema(train_set)
 
         print(len(train_set), len(val_set), len(test_set))
         print(len(train_set) + len(val_set) + len(test_set))

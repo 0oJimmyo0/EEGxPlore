@@ -42,7 +42,7 @@ class Model(nn.Module):
                 depth_summary_mode = 'dual_query_block_typed_learned'
                 depth_probe_mlp = False
             print(
-                f"[SEED-V] MoE (typed_capacity_domain): top-{param.moe_num_layers} layers, "
+                f"[SEED-V] MoE ({getattr(param, 'moe_route_mode', 'typed_capacity_domain')}): top-{param.moe_num_layers} layers, "
                 f"experts/bank={param.moe_num_experts}, "
                 f"route_mode={getattr(param, 'moe_route_mode', 'typed_capacity_domain')}, "
                 f"capacity_factor={getattr(param, 'moe_capacity_factor', 1.0)}, "

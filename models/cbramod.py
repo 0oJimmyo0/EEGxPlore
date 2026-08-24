@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from models.criss_cross_transformer import TransformerEncoderLayer, TransformerEncoder
 from models.moe import (
     TypedCapacityDomainMoEFFN,
+    TypedConditionalMoEFFN,
     compact_psd_bandpowers,
     reset_moe_eeg_router_summary,
     reset_moe_faced_metadata,
@@ -48,6 +49,7 @@ class CBraMod(nn.Module):
         moe_num_layers=2,
         moe_num_experts=4,
         moe_route_mode: str = "typed_capacity_domain",
+        moe_router_policy: str = "sample",
         moe_capacity_factor: float = 1.0,
         moe_domain_bias: bool = False,
         moe_domain_emb_dim: int = 16,
@@ -124,14 +126,18 @@ class CBraMod(nn.Module):
         if use_moe:
             moe_num_layers = min(max(1, moe_num_layers), n_layer)
             moe_start = n_layer - moe_num_layers
-            if moe_route_mode != "typed_capacity_domain":
-                raise ValueError("Only moe_route_mode=typed_capacity_domain is supported")
-            if attnres_variant not in ("pre_attn", "full"):
+            if moe_route_mode not in ("typed_capacity_domain", "typed_conditional"):
+                raise ValueError(
+                    "moe_route_mode must be one of {'typed_capacity_domain', 'typed_conditional'}"
+                )
+            if moe_route_mode == "typed_capacity_domain" and attnres_variant not in ("pre_attn", "full"):
                 raise ValueError(
                     "typed_capacity_domain requires attnres_variant pre_attn or full "
                     "(pre-attn AttnRes path for router inputs)."
                 )
-            if attnres_start_layer > moe_start:
+            if moe_route_mode == "typed_conditional" and attnres_variant != "none":
+                raise ValueError("typed_conditional requires attnres_variant=none")
+            if moe_route_mode == "typed_capacity_domain" and attnres_start_layer > moe_start:
                 raise ValueError(
                     f"attnres_start_layer must be <= first MoE layer index ({moe_start}); "
                     f"got {attnres_start_layer}. Otherwise MoE runs without baseline/attnres."
@@ -152,59 +158,81 @@ class CBraMod(nn.Module):
                             f"got {moe_specialist_branch_mode!r}"
                         )
 
-                    use_compact_router_summary = self.moe_router_compact_feature_mode != "none"
-                    moe_mod = TypedCapacityDomainMoEFFN(
-                        d_model=d_model,
-                        dim_feedforward=dim_feedforward,
-                        num_specialists=moe_num_experts,
-                        dropout=dropout,
-                        activation=F.gelu,
-                        route_mode=moe_route_mode,
-                        capacity_factor=moe_capacity_factor,
-                        domain_bias=moe_domain_bias,
-                        domain_emb_dim=moe_domain_emb_dim,
-                        router_arch=moe_router_arch,
-                        router_mlp_hidden=moe_router_mlp_hidden,
-                        use_psd_router_features=moe_use_psd_router_features,
-                        use_attnres_depth_router_concat=moe_use_attnres_depth_router_features,
-                        attnres_depth_router_dim=moe_attnres_depth_router_dim,
-                                                attnres_depth_router_init=moe_attnres_depth_router_init,
-                                                attnres_depth_router_norm_gate=moe_attnres_depth_router_norm_gate,
-                                                attnres_depth_router_gate_init=moe_attnres_depth_router_gate_init,
-                                                attnres_depth_router_norm_eps=moe_attnres_depth_router_norm_eps,
-                        attnres_depth_block_separation_coef=moe_attnres_depth_block_separation_coef,
-                                                attnres_depth_block_separation_target_js=moe_attnres_depth_block_separation_target_js,
-                        router_dispatch_mode=moe_router_dispatch_mode,
-                        router_temperature=moe_router_temperature,
-                        router_entropy_coef=moe_router_entropy_coef,
-                        router_balance_kl_coef=moe_router_balance_kl_coef,
-                        router_z_loss_coef=moe_router_z_loss_coef,
-                        router_jitter_std=moe_router_jitter_std,
-                        router_jitter_final_std=moe_router_jitter_final_std,
-                        router_jitter_anneal_epochs=moe_router_jitter_anneal_epochs,
-                        router_soft_warmup_epochs=moe_router_soft_warmup_epochs,
-                        uniform_dispatch_warmup_epochs=moe_uniform_dispatch_warmup_epochs,
-                        shared_blend_warmup_epochs=moe_shared_blend_warmup_epochs,
-                        shared_blend_start=moe_shared_blend_start,
-                        shared_blend_end=moe_shared_blend_end,
-                        shared_output_scale=moe_shared_output_scale,
-                        expert_output_scale=moe_expert_output_scale,
-                        router_base_feature_mode=moe_router_base_feature_mode,
-                        router_entropy_coef_spatial=moe_router_entropy_coef_spatial,
-                        router_entropy_coef_spectral=moe_router_entropy_coef_spectral,
-                        router_balance_kl_coef_spatial=moe_router_balance_kl_coef_spatial,
-                        router_balance_kl_coef_spectral=moe_router_balance_kl_coef_spectral,
-                        use_spatial_specialists=use_spatial_specialists,
-                        use_spectral_specialists=use_spectral_specialists,
-                        use_eeg_summary_router_concat_spatial=use_compact_router_summary,
-                        use_eeg_summary_router_concat_spectral=use_compact_router_summary,
-                        eeg_summary_router_dim=self.moe_router_compact_feature_dim,
-                        compact_router_warmup_epochs=moe_router_compact_warmup_epochs,
-                        compact_router_gate_init=moe_router_compact_gate_init,
-                        expert_init_noise_std=moe_expert_init_noise_std,
-                        load_balance_coef=moe_load_balance,
-                        domain_bias_reg_coef=moe_domain_bias_reg,
-                    )
+                    if moe_route_mode == "typed_conditional":
+                        if moe_specialist_branch_mode not in {"both", "spatial_only", "spectral_only"}:
+                            raise ValueError(
+                                "moe_specialist_branch_mode must be one of "
+                                "['both','spatial_only','spectral_only']"
+                            )
+                        moe_mod = TypedConditionalMoEFFN(
+                            d_model=d_model,
+                            dim_feedforward=dim_feedforward,
+                            num_specialists=moe_num_experts,
+                            dropout=dropout,
+                            activation=F.gelu,
+                            router_policy=moe_router_policy,
+                            router_arch=moe_router_arch,
+                            router_mlp_hidden=moe_router_mlp_hidden,
+                            router_temperature=moe_router_temperature,
+                            shared_output_scale=moe_shared_output_scale,
+                            expert_output_scale=moe_expert_output_scale,
+                            use_spatial_specialists=use_spatial_specialists,
+                            use_spectral_specialists=use_spectral_specialists,
+                        )
+                    else:
+                        use_compact_router_summary = self.moe_router_compact_feature_mode != "none"
+                        moe_mod = TypedCapacityDomainMoEFFN(
+                            d_model=d_model,
+                            dim_feedforward=dim_feedforward,
+                            num_specialists=moe_num_experts,
+                            dropout=dropout,
+                            activation=F.gelu,
+                            route_mode=moe_route_mode,
+                            capacity_factor=moe_capacity_factor,
+                            domain_bias=moe_domain_bias,
+                            domain_emb_dim=moe_domain_emb_dim,
+                            router_arch=moe_router_arch,
+                            router_mlp_hidden=moe_router_mlp_hidden,
+                            use_psd_router_features=moe_use_psd_router_features,
+                            use_attnres_depth_router_concat=moe_use_attnres_depth_router_features,
+                            attnres_depth_router_dim=moe_attnres_depth_router_dim,
+                            attnres_depth_router_init=moe_attnres_depth_router_init,
+                            attnres_depth_router_norm_gate=moe_attnres_depth_router_norm_gate,
+                            attnres_depth_router_gate_init=moe_attnres_depth_router_gate_init,
+                            attnres_depth_router_norm_eps=moe_attnres_depth_router_norm_eps,
+                            attnres_depth_block_separation_coef=moe_attnres_depth_block_separation_coef,
+                            attnres_depth_block_separation_target_js=moe_attnres_depth_block_separation_target_js,
+                            router_dispatch_mode=moe_router_dispatch_mode,
+                            router_temperature=moe_router_temperature,
+                            router_entropy_coef=moe_router_entropy_coef,
+                            router_balance_kl_coef=moe_router_balance_kl_coef,
+                            router_z_loss_coef=moe_router_z_loss_coef,
+                            router_jitter_std=moe_router_jitter_std,
+                            router_jitter_final_std=moe_router_jitter_final_std,
+                            router_jitter_anneal_epochs=moe_router_jitter_anneal_epochs,
+                            router_soft_warmup_epochs=moe_router_soft_warmup_epochs,
+                            uniform_dispatch_warmup_epochs=moe_uniform_dispatch_warmup_epochs,
+                            shared_blend_warmup_epochs=moe_shared_blend_warmup_epochs,
+                            shared_blend_start=moe_shared_blend_start,
+                            shared_blend_end=moe_shared_blend_end,
+                            shared_output_scale=moe_shared_output_scale,
+                            expert_output_scale=moe_expert_output_scale,
+                            router_base_feature_mode=moe_router_base_feature_mode,
+                            router_entropy_coef_spatial=moe_router_entropy_coef_spatial,
+                            router_entropy_coef_spectral=moe_router_entropy_coef_spectral,
+                            router_balance_kl_coef_spatial=moe_router_balance_kl_coef_spatial,
+                            router_balance_kl_coef_spectral=moe_router_balance_kl_coef_spectral,
+                            use_spatial_specialists=use_spatial_specialists,
+                            use_spectral_specialists=use_spectral_specialists,
+                            use_eeg_summary_router_concat_spatial=use_compact_router_summary,
+                            use_eeg_summary_router_concat_spectral=use_compact_router_summary,
+                            eeg_summary_router_dim=self.moe_router_compact_feature_dim,
+                            compact_router_warmup_epochs=moe_router_compact_warmup_epochs,
+                            compact_router_gate_init=moe_router_compact_gate_init,
+                            expert_init_noise_std=moe_expert_init_noise_std,
+                            load_balance_coef=moe_load_balance,
+                            domain_bias_reg_coef=moe_domain_bias_reg,
+                        )
                 layers_list.append(
                     TransformerEncoderLayer(
                         d_model=d_model,
@@ -274,7 +302,7 @@ class CBraMod(nn.Module):
         if use_moe:
             for li, layer in enumerate(self.encoder.layers):
                 m = getattr(layer, 'moe_ffn', None)
-                if isinstance(m, TypedCapacityDomainMoEFFN):
+                if isinstance(m, (TypedCapacityDomainMoEFFN, TypedConditionalMoEFFN)):
                     m._zero_specialist_output_weights()
 
     def forward(self, x, mask=None, batch_meta=None):
@@ -403,6 +431,7 @@ def backbone_finetune_kwargs(param) -> Dict[str, Any]:
         'moe_num_layers': getattr(param, 'moe_num_layers', 2),
         'moe_num_experts': getattr(param, 'moe_num_experts', 4),
         'moe_route_mode': getattr(param, 'moe_route_mode', 'typed_capacity_domain'),
+        'moe_router_policy': getattr(param, 'moe_router_policy', 'sample'),
         'moe_capacity_factor': getattr(param, 'moe_capacity_factor', 1.0),
         'moe_domain_bias': getattr(param, 'moe_domain_bias', False),
         'moe_domain_emb_dim': getattr(param, 'moe_domain_emb_dim', 16),
