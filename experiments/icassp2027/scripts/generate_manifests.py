@@ -90,7 +90,20 @@ def _subject_stats(containers: Mapping[str, Mapping[str, Any]]) -> Dict[str, Dic
     return stats
 
 
-def _target_subject_counts(n_subjects: int, ratios: Mapping[str, float]) -> Dict[str, int]:
+def _target_subject_counts(
+    n_subjects: int,
+    ratios: Mapping[str, float],
+    override: Mapping[str, int] | None = None,
+) -> Dict[str, int]:
+    if override is not None:
+        counts = {split: int(override[split]) for split in SPLITS}
+        if sum(counts.values()) != n_subjects:
+            raise ValueError(
+                f"Explicit subject counts must sum to {n_subjects}, got {counts}"
+            )
+        if any(count < 1 for count in counts.values()):
+            raise ValueError(f"Explicit subject counts must all be >= 1, got {counts}")
+        return counts
     train = max(1, int(round(n_subjects * ratios["train"])))
     val = max(1, int(round(n_subjects * ratios["val"])))
     test = n_subjects - train - val
@@ -140,12 +153,13 @@ def _assign_subjects(
     stats: Mapping[str, Mapping[str, Any]],
     seed: int,
     ratios: Mapping[str, float],
+    subject_counts: Mapping[str, int] | None = None,
 ) -> Tuple[Dict[str, str], Dict[str, Any]]:
     subjects = sorted(stats)
     if len(subjects) < 3:
         raise ValueError("At least three subjects are required for disjoint splits")
     labels = sorted({int(label) for value in stats.values() for label in value["labels"]})
-    target_subjects = _target_subject_counts(len(subjects), ratios)
+    target_subjects = _target_subject_counts(len(subjects), ratios, override=subject_counts)
 
     best: Tuple[float, Dict[str, str], int] | None = None
     # A small deterministic restart set makes the greedy assignment robust to
@@ -260,12 +274,18 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _generate(dataset: str, metadata_path: Path, output_dir: Path, seed: int) -> None:
+def _generate(
+    dataset: str,
+    metadata_path: Path,
+    output_dir: Path,
+    seed: int,
+    subject_counts: Mapping[str, int] | None = None,
+) -> None:
     rows = _read_rows(metadata_path)
     containers = _group_containers(rows)
     stats = _subject_stats(containers)
     ratios = {"train": 0.70, "val": 0.15, "test": 0.15}
-    assignment, generation = _assign_subjects(stats, seed, ratios)
+    assignment, generation = _assign_subjects(stats, seed, ratios, subject_counts=subject_counts)
 
     manifest = {
         split: sorted(
@@ -394,10 +414,29 @@ def main() -> None:
     parser.add_argument("--metadata_csv", type=Path, required=True)
     parser.add_argument("--output_dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=2027)
+    parser.add_argument(
+        "--subject_counts",
+        type=str,
+        default="",
+        help="Optional explicit counts such as train=10,val=3,test=3.",
+    )
     args = parser.parse_args()
     if not args.metadata_csv.is_file():
         raise FileNotFoundError(args.metadata_csv)
-    _generate(args.dataset, args.metadata_csv, args.output_dir, args.seed)
+    subject_counts = None
+    if args.subject_counts:
+        parsed = {}
+        for item in args.subject_counts.split(','):
+            if '=' not in item:
+                raise ValueError(f"Invalid --subject_counts item: {item!r}")
+            split, count = item.split('=', 1)
+            if split not in SPLITS:
+                raise ValueError(f"Unknown split in --subject_counts: {split!r}")
+            parsed[split] = int(count)
+        if set(parsed) != set(SPLITS):
+            raise ValueError(f"--subject_counts must specify exactly {SPLITS}")
+        subject_counts = parsed
+    _generate(args.dataset, args.metadata_csv, args.output_dir, args.seed, subject_counts=subject_counts)
 
 
 if __name__ == "__main__":

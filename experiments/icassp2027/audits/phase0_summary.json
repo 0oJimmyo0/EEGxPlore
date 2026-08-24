@@ -296,35 +296,35 @@
           "4": 3657
         },
         "train": {
-          "0": 13618,
-          "1": 16555,
-          "2": 21087,
-          "3": 16280,
-          "4": 13409
+          "0": 12380,
+          "1": 15050,
+          "2": 19170,
+          "3": 14800,
+          "4": 12190
         },
         "val": {
-          "0": 2476,
-          "1": 3010,
-          "2": 3834,
-          "3": 2960,
-          "4": 2438
+          "0": 3714,
+          "1": 4515,
+          "2": 5751,
+          "3": 4440,
+          "4": 3657
         }
       },
-      "fresh_manifest_sha256": "cf161862af26157ae6ddd4607aa37d8b82d673e510a28d33a8c083a91ee7e444",
+      "fresh_manifest_sha256": "9785d78e458915ac8dc4fce2264ae0a4e5f0e2f0378a5bc0a28bbfe77507725e",
       "fresh_split_container_counts": {
         "test": 22077,
-        "train": 80949,
-        "val": 14718
+        "train": 73590,
+        "val": 22077
       },
       "fresh_split_sample_counts": {
         "test": 22077,
-        "train": 80949,
-        "val": 14718
+        "train": 73590,
+        "val": 22077
       },
       "fresh_split_subject_counts": {
         "test": 3,
-        "train": 11,
-        "val": 2
+        "train": 10,
+        "val": 3
       },
       "fresh_subject_overlap": {
         "train_test": [],
@@ -342,7 +342,7 @@
       "passed": true,
       "source_container_keys": 117744,
       "source_subjects": 16,
-      "stored_manifest_sha256": "cf161862af26157ae6ddd4607aa37d8b82d673e510a28d33a8c083a91ee7e444",
+      "stored_manifest_sha256": "9785d78e458915ac8dc4fce2264ae0a4e5f0e2f0378a5bc0a28bbfe77507725e",
       "unknown_manifest_keys": []
     }
   },

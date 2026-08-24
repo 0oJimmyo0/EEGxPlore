@@ -131,6 +131,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         help='Backbone/head dual-LR mode used by prior FACED runs.',
     )
     parser.add_argument('--frozen', action='store_true')
+    parser.add_argument(
+        '--trainability_mode',
+        type=str,
+        default='auto',
+        choices=['auto', 'frozen', 'full', 'upper4', 'typed_conditional'],
+        help='Centralized backbone trainability contract; auto preserves legacy behavior outside ICASSP.',
+    )
     parser.add_argument('--use_pretrained_weights', action='store_true')
     parser.add_argument(
         '--backbone',
@@ -624,7 +631,7 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError('[icassp2027] routing export is only defined for SEED-V.')
         if args.moe:
             if args.frozen:
-                raise ValueError('[icassp2027] do not use --frozen for Static/Routed; the shared FFN is selectively frozen.')
+                raise ValueError('[icassp2027] do not use --frozen for Static/Routed; the original CBraMod foundation is frozen by trainability_mode.')
             if args.moe_route_mode != 'typed_conditional':
                 raise ValueError('[icassp2027] MoE runs must use --moe_route_mode typed_conditional.')
             if args.moe_num_layers != 4:
@@ -657,6 +664,8 @@ def validate_args(args: argparse.Namespace) -> None:
                 raise ValueError('[icassp2027] compact EEG/PSD router features are forbidden.')
             if args.moe_specialist_branch_mode != 'both':
                 raise ValueError('[icassp2027] both typed specialist banks are required.')
+            if args.trainability_mode not in {'auto', 'typed_conditional'}:
+                raise ValueError('[icassp2027] Static/Routed must use trainability_mode=typed_conditional or auto.')
 
 
 def build_dataset(args: argparse.Namespace):

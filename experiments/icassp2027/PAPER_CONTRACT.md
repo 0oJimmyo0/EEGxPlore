@@ -1,6 +1,6 @@
 # ICASSP 2027 Routing Study Contract
 
-Status: Phase 0 frozen for implementation
+Status: Phase 0 frozen for implementation; SEED-V manifest revised to explicit 10/3/3 allocation
 Branch: `icassp2027-routing`
 
 ## Scientific identity
@@ -28,8 +28,10 @@ ICASSP is explicitly CBraMod-specific. It does not claim cross-backbone generali
 - Static router: the same router network fed by a learned constant input.
 - Routed router: the same router network fed by the current sample representation plus the same learned constant.
 - Router dropout, jitter, depth/context features, and router-specific regularizers: disabled in the primary Static/Routed comparison.
-- The pretrained shared FFN is frozen for Static/Routed; specialists, routers,
-  learned constants, and the task head are trainable.
+- Every original pretrained CBraMod parameter is frozen for Static/Routed;
+  only the upper-four conditional specialist banks, routers, learned
+  constants, and task head are trainable. The shared FFN remains as the frozen
+  dense foundation.
 - Primary datasets: SEED-V, FACED, ISRUC, PhysioNet-MI.
 - Split regime: fresh subject-disjoint manifests generated for this study.
 - Primary test metrics: balanced accuracy and macro-F1.

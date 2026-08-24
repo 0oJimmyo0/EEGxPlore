@@ -18,10 +18,16 @@ paper and does not alter the legacy `typed_capacity_domain` implementation.
 - Adapt the upper four CBraMod transformer blocks. The ICASSP profile rejects
   AttnRes, PSD features, depth/context features, domain metadata, compact EEG
   summaries, router jitter, warmups, and router-specific regularizers.
-- Freeze the pretrained shared FFN for Static/Routed while training the
-  specialists, routers, constants, and task head. This makes the comparison
-  estimate routing/capacity adaptation beyond the same frozen foundation;
-  trainability and parameter counts must be written to the run registry.
+- Freeze every original pretrained CBraMod parameter for Static/Routed while
+  training only the upper-four `typed_conditional` specialist banks, routers,
+  learned constants, and task head. The shared FFN remains present as the
+  dense foundation but is frozen. This makes the comparison estimate
+  routing/capacity adaptation beyond the same frozen foundation; trainability
+  and parameter counts must be written to the run registry.
+- SEED-V uses an explicit 10/3/3 train/validation/test subject allocation.
+  This intentionally gives validation three subjects because checkpoint
+  selection uses validation kappa; the allocation is reproducible through
+  `--subject_counts train=10,val=3,test=3`.
 - Add exact-isomorphism tests: identical state-dict keys/shapes, identical
   initialization under a matched seed, and identical trainable parameter
   counts for Static/Routed.
@@ -53,6 +59,12 @@ paper and does not alter the legacy `typed_capacity_domain` implementation.
   paper; record them for reproducibility and sanity checks.
 - Upper-4, LoRA, and bottleneck baselines remain required follow-up code, but
   are implemented after the Static/Routed path passes its contract tests.
+- A centralized trainability-mode implementation, full-wrapper contract test,
+  optimizer audit, and run-provenance fields are required before the
+  scientific smoke matrix. The optimizer audit must cover at least two steps:
+  zero-initialized specialist output projections can legitimately make router
+  gradients zero on step one, while specialist output weights should update;
+  routed-router gradient/connectivity is checked after that first update.
 
 ## Implementation firewall
 
@@ -77,4 +89,3 @@ moe_router_soft_warmup_epochs = 0
 moe_uniform_dispatch_warmup_epochs = 0
 moe_shared_blend_warmup_epochs = 0
 ```
-

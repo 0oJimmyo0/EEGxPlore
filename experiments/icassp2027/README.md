@@ -18,7 +18,7 @@ Phase 0 status (2026-08-24): all gates pass. The frozen manifest hashes are:
 
 | Dataset | Subjects (train/val/test) | Loader containers (train/val/test) | Manifest SHA-256 |
 |---|---:|---:|---|
-| SEED-V | 11 / 2 / 3 | 80,949 / 14,718 / 22,077 | `cf161862af26157ae6ddd4607aa37d8b82d673e510a28d33a8c083a91ee7e444` |
+| SEED-V | 10 / 3 / 3 | 73,590 / 22,077 / 22,077 | `9785d78e458915ac8dc4fce2264ae0a4e5f0e2f0378a5bc0a28bbfe77507725e` |
 | FACED | 86 / 18 / 19 | 7,224 / 1,512 / 1,596 | `7f564428b51131993e341cb4da881e8b8e167056c90499190245052ea1ed131a` |
 | ISRUC | 70 / 15 / 15 | 3,017 / 738 / 707 | `253008f042c7698b17e5e9110c62c776d97238ba09ad6ffe82d75ad7b5839c79` |
 | PhysioNet-MI | 76 / 16 / 17 | 6,843 / 1,464 / 1,530 | `71344f5bf12edfafedee53da7247ad10f7f8f7b678abbe084c86b8f531133601` |

@@ -1,8 +1,10 @@
 import gc
+import hashlib
 import json
 import os
 import re
 import shutil
+import subprocess
 import traceback
 from datetime import datetime
 from timeit import default_timer as timer
@@ -131,6 +133,30 @@ def _to_jsonable(obj):
     return str(obj)
 
 
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_provenance() -> Dict[str, Any]:
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    try:
+        commit = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=repo_root, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ['git', 'status', '--porcelain'], cwd=repo_root, check=True,
+            capture_output=True, text=True,
+        ).stdout
+        return {'git_commit': commit, 'git_dirty': bool(dirty.strip())}
+    except Exception as exc:
+        return {'git_commit': '', 'git_dirty': None, 'git_error': str(exc)}
+
+
 class EMAHelper:
     @staticmethod
     def _is_uninitialized_parameter(p: torch.nn.Parameter) -> bool:
@@ -190,6 +216,7 @@ class Trainer(object):
     def __init__(self, params, data_loader, model):
         self.params = params
         self.data_loader = data_loader
+        self._run_start_time = timer()
 
         self.val_eval = Evaluator(params, self.data_loader['val'])
         self.test_eval = Evaluator(params, self.data_loader['test'])
@@ -218,6 +245,21 @@ class Trainer(object):
         self.best_model_states = None
 
         self._named_trainable_params: List = []
+        trainability_mode = str(getattr(params, 'trainability_mode', 'auto')).strip().lower()
+        if trainability_mode == 'auto':
+            if (
+                getattr(params, 'experiment_profile', 'none') == 'icassp2027'
+                and getattr(params, 'moe', False)
+                and getattr(params, 'moe_route_mode', '') == 'typed_conditional'
+            ):
+                trainability_mode = 'typed_conditional'
+            elif params.frozen:
+                trainability_mode = 'frozen'
+            else:
+                trainability_mode = 'full'
+        if trainability_mode not in {'frozen', 'full', 'upper4', 'typed_conditional'}:
+            raise ValueError(f"Unsupported trainability_mode={trainability_mode!r}")
+        self.trainability_mode = trainability_mode
         grouped = {
             'backbone': [],
             'router': [],
@@ -227,20 +269,18 @@ class Trainer(object):
         }
         for name, param in self.model.named_parameters():
             if "backbone" in name:
-                if params.frozen:
+                if trainability_mode == 'frozen' or params.frozen:
                     param.requires_grad = False
+                elif trainability_mode == 'typed_conditional':
+                    # Static/Routed is a frozen-foundation comparison. Only
+                    # newly introduced conditional MoE modules in the upper
+                    # four layers may update inside the backbone.
+                    param.requires_grad = self._is_icasp_conditional_parameter(name)
+                elif trainability_mode == 'upper4':
+                    layer_match = re.search(r'backbone\.encoder\.layers\.(\d+)\.', name)
+                    param.requires_grad = bool(layer_match and int(layer_match.group(1)) >= 8)
                 else:
-                    # ICASSP Static/Routed freezes only the shared pretrained
-                    # FFN inside each conditional MoE block. The specialist
-                    # banks, routers/constants, attention stack, and task
-                    # head remain trainable.
-                    freeze_shared = (
-                        getattr(params, 'experiment_profile', 'none') == 'icassp2027'
-                        and getattr(params, 'moe', False)
-                        and getattr(params, 'moe_route_mode', '') == 'typed_conditional'
-                        and '.moe_ffn.shared.' in name
-                    )
-                    param.requires_grad = not freeze_shared
+                    param.requires_grad = True
             if not param.requires_grad:
                 continue
             self._named_trainable_params.append((name, param))
@@ -250,6 +290,43 @@ class Trainer(object):
         print(
             f"[sched] train_batches_per_epoch={self.data_length} epochs={int(self.params.epochs)} "
             f"total_train_steps={max(int(self.params.epochs * self.data_length), 1)}",
+            flush=True,
+        )
+
+        trainable_by_component = {}
+        for name, parameter in self._named_trainable_params:
+            component = self._component_name_for_param(name)
+            trainable_by_component[component] = trainable_by_component.get(component, 0) + parameter.numel()
+        self._trainable_parameter_counts = {
+            'total': int(sum(parameter.numel() for _, parameter in self._named_trainable_params)),
+            'original_backbone': int(sum(
+                parameter.numel() for name, parameter in self._named_trainable_params
+                if 'backbone' in name and '.moe_ffn.' not in name
+            )),
+            'shared_ffn': int(sum(
+                parameter.numel() for name, parameter in self._named_trainable_params
+                if '.moe_ffn.shared.' in name
+            )),
+            'specialists': int(sum(
+                parameter.numel() for name, parameter in self._named_trainable_params
+                if '.spatial_specialists.' in name or '.spectral_specialists.' in name
+            )),
+            'router': int(sum(
+                parameter.numel() for name, parameter in self._named_trainable_params
+                if '.spatial_router.' in name or '.spectral_router.' in name
+            )),
+            'router_constant': int(sum(
+                parameter.numel() for name, parameter in self._named_trainable_params
+                if '.router_constant_' in name
+            )),
+            'classifier': int(sum(
+                parameter.numel() for name, parameter in self._named_trainable_params
+                if name.startswith('classifier') or '.classifier.' in name
+            )),
+        }
+        print(
+            f"[trainability] trainable_parameter_count={sum(trainable_by_component.values())} "
+            f"mode={self.trainability_mode} by_component={trainable_by_component}",
             flush=True,
         )
         if getattr(self.params, 'use_component_lr', False) and getattr(self.params, 'multi_lr', False):
@@ -536,6 +613,25 @@ class Trainer(object):
                 self._ema_helper.restore(self.model)
             ema = (ema[0], ema[1], ema[2], float(evaluator.last_macro_f1), ema[3])
         return raw, ema
+
+    @staticmethod
+    def _is_icasp_conditional_parameter(name: str) -> bool:
+        """Return whether a parameter is newly introduced by typed_conditional."""
+        if name.startswith('classifier') or '.classifier.' in name:
+            return True
+        if '.moe_ffn.' not in name:
+            return False
+        return any(
+            key in name
+            for key in (
+                '.spatial_specialists.',
+                '.spectral_specialists.',
+                '.spatial_router.',
+                '.spectral_router.',
+                '.router_constant_spatial',
+                '.router_constant_spectral',
+            )
+        )
 
     @staticmethod
     def _component_name_for_param(name: str) -> str:
@@ -1100,6 +1196,24 @@ class Trainer(object):
         dataset = str(getattr(self.params, 'downstream_dataset', 'unknown'))
         dataset_tag = _safe_tag(dataset).lower()
         run_name = str(getattr(self.params, 'routing_run_name', '') or '')
+        config_bytes = json.dumps(vars(self.params), sort_keys=True, default=str).encode('utf-8')
+        config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+        manifest_path = str(getattr(self.params, 'icassp_split_manifest', '') or '')
+        manifest_sha256 = ''
+        if manifest_path and os.path.isfile(manifest_path):
+            hash_sidecar = os.path.join(os.path.dirname(manifest_path), 'split_manifest.sha256')
+            if os.path.isfile(hash_sidecar):
+                with open(hash_sidecar, 'r', encoding='utf-8') as handle:
+                    manifest_sha256 = handle.read().split()[0]
+            else:
+                manifest_sha256 = _sha256_file(manifest_path)
+        git_info = _git_provenance()
+        if getattr(self.params, 'experiment_profile', 'none') == 'icassp2027' and git_info.get('git_dirty'):
+            print('[provenance] WARNING: ICASSP run summary was written from a dirty git worktree.', flush=True)
+        peak_cuda_mb = (
+            float(torch.cuda.max_memory_allocated() / (1024 ** 2))
+            if torch.cuda.is_available() else 0.0
+        )
 
         summary_payload = {
             'timestamp_utc': ts,
@@ -1111,6 +1225,16 @@ class Trainer(object):
             'best_val_metrics': _to_jsonable(best_val_metrics),
             'test_metrics': _to_jsonable(test_metrics),
             'config': _to_jsonable(vars(self.params)),
+            'provenance': {
+                **git_info,
+                'manifest_path': manifest_path,
+                'manifest_sha256': manifest_sha256,
+                'config_sha256': config_sha256,
+                'trainability_mode': self.trainability_mode,
+                'trainable_parameter_counts': self._trainable_parameter_counts,
+                'peak_cuda_mb': peak_cuda_mb,
+                'total_wall_seconds': float(timer() - self._run_start_time),
+            },
         }
         json_path = os.path.join(md, f"run_summary_{dataset_tag}_{ts}.json")
         with open(json_path, 'w', encoding='utf-8') as f:
@@ -1189,6 +1313,19 @@ class Trainer(object):
             'lr_classifier_mult': getattr(self.params, 'lr_classifier_mult', ''),
             'lr_other_mult': getattr(self.params, 'lr_other_mult', ''),
             'trainable_parameter_count': sum(p.numel() for _, p in self._named_trainable_params),
+            'trainability_mode': self.trainability_mode,
+            'trainable_original_backbone': self._trainable_parameter_counts['original_backbone'],
+            'trainable_shared_ffn': self._trainable_parameter_counts['shared_ffn'],
+            'trainable_specialists': self._trainable_parameter_counts['specialists'],
+            'trainable_router': self._trainable_parameter_counts['router'],
+            'trainable_router_constant': self._trainable_parameter_counts['router_constant'],
+            'manifest_path': manifest_path,
+            'manifest_sha256': manifest_sha256,
+            'config_sha256': config_sha256,
+            'git_commit': git_info.get('git_commit', ''),
+            'git_dirty': git_info.get('git_dirty', ''),
+            'peak_cuda_mb': peak_cuda_mb,
+            'total_wall_seconds': float(timer() - self._run_start_time),
         }
 
         write_header = not os.path.isfile(csv_path)

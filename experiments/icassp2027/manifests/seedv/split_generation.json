@@ -9,7 +9,7 @@
   "container_key_is_split_unit": true,
   "dataset": "SEED-V",
   "generation": {
-    "objective": 0.31708829365079366,
+    "objective": 0.4776785714285715,
     "restart_count": 256,
     "seed": 2027,
     "selected_restart": 0,
@@ -20,11 +20,11 @@
     },
     "target_subject_counts": {
       "test": 3,
-      "train": 11,
-      "val": 2
+      "train": 10,
+      "val": 3
     }
   },
-  "manifest_sha256": "cf161862af26157ae6ddd4607aa37d8b82d673e510a28d33a8c083a91ee7e444",
+  "manifest_sha256": "9785d78e458915ac8dc4fce2264ae0a4e5f0e2f0378a5bc0a28bbfe77507725e",
   "metadata_path": "experiments/icassp2027/datasets/seedv/all_samples.csv",
   "metadata_sha256": "5b852a3a1d8d3689896ef522bbc35e52a5f9a68291647062a1b0437d46df8162",
   "source_container_keys": 117744,

@@ -1856,6 +1856,25 @@ def warm_start_moe_from_dense_ckpt(
 
 
 def format_moe_diagnostics_lines(layer_idx: int, diag: Dict[str, Any]) -> List[str]:
+    if diag.get("moe_kind") == "typed_conditional":
+        sp = diag.get("spatial", {}) or {}
+        sc = diag.get("spectral", {}) or {}
+        return [
+            (
+                f"  [MoE L{layer_idx}] kind=typed_conditional "
+                f"policy={diag.get('router_policy', '?')} experts={diag.get('num_experts', '?')} "
+                f"shared_scale={diag.get('shared_output_scale', 1.0):.4f} "
+                f"expert_scale={diag.get('expert_output_scale', 1.0):.4f}"
+            ),
+            (
+                f"    spatial mean_probs={sp.get('mean_probs', [])} "
+                f"entropy={sp.get('entropy', float('nan')):.6f}"
+            ),
+            (
+                f"    spectral mean_probs={sc.get('mean_probs', [])} "
+                f"entropy={sc.get('entropy', float('nan')):.6f}"
+            ),
+        ]
     if diag.get("moe_kind") != "typed_capacity_domain":
         return [f"  [MoE L{layer_idx}] unsupported diagnostics payload: {diag.get('moe_kind')}"]
     sp = diag.get("spatial", {})
