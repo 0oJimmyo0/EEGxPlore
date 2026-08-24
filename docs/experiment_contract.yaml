@@ -1,0 +1,21 @@
+contract_version: 1
+last_updated: "2026-07-23"
+canonical_plan: "/data/neurogroup/mingyangjiang/EEGxPlore/LaBraM/docs/cross_backbone_execution_plan.md"
+repository_role: cbramod
+repository_path: "/data/neurogroup/mingyangjiang/EEGxPlore/EEGxPlore"
+backbone: CBraMod
+forbidden_backbone: LaBraM
+branch: SEED-V
+development_seeds: [42, 1024, 3407]
+final_seed_count: 5
+datasets:
+  primary_shared: [FACED, ISRUC, TUEV]
+  mechanism: [SEED-V]
+  optional: [PhysioNet-MI]
+selection:
+  development_metric: validation_cohen_kappa
+  primary_test_metrics: [balanced_accuracy, macro_f1]
+  test_access_during_development: false
+parameter_matching:
+  tolerance_fraction: 0.05
+methods: [frozen_probe, full_finetune, upper_k_finetune, lora, generic_bottleneck_adapter, axis_blind_adapter, interaction_aligned_adapter, interaction_aligned_plus_depth]

@@ -1,0 +1,37 @@
+{
+  "class_labels": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "container_key_is_split_unit": true,
+  "dataset": "ISRUC",
+  "generation": {
+    "objective": 0.07629883204847959,
+    "restart_count": 256,
+    "seed": 2027,
+    "selected_restart": 199,
+    "target_sample_ratios": {
+      "test": 0.15,
+      "train": 0.7,
+      "val": 0.15
+    },
+    "target_subject_counts": {
+      "test": 15,
+      "train": 70,
+      "val": 15
+    }
+  },
+  "manifest_sha256": "253008f042c7698b17e5e9110c62c776d97238ba09ad6ffe82d75ad7b5839c79",
+  "metadata_path": "experiments/icassp2027/datasets/isruc/all_samples.csv",
+  "metadata_sha256": "43e8326a120a41f5a8e76539043e8419e8771db2e8ac6f10f630a149d3328f27",
+  "source_container_keys": 4462,
+  "source_existing_split_container_counts": {
+    "test": 435,
+    "train": 3559,
+    "val": 468
+  },
+  "source_rows": 89240
+}

@@ -187,7 +187,11 @@ class LoadDataset(object):
 
     def get_data_loader(self):
         rk = bool(getattr(self.params, 'return_sample_keys', False))
-        split_manifest_path = str(getattr(self.params, 'seedv_split_manifest', '') or '')
+        split_manifest_path = str(
+            getattr(self.params, 'icassp_split_manifest', '')
+            or getattr(self.params, 'seedv_split_manifest', '')
+            or ''
+        )
         external_manifest = bool(split_manifest_path)
         if split_manifest_path:
             print(f"[SEED-V split] using external manifest (optional legacy/experimental path): {split_manifest_path}")

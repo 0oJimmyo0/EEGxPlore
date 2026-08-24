@@ -1,0 +1,80 @@
+{
+  "checkpoint": "/data/neurogroup/mingyangjiang/data/weights/pretrained_weights.pth",
+  "checkpoint_sha256": "0792cb808c14e6b7a2bb2ce1dff379bc47bc54c49a779825bdfeb33bf8157178",
+  "datasets": {
+    "FACED": {
+      "input_finite": true,
+      "input_shape": [
+        1,
+        32,
+        10,
+        200
+      ],
+      "output_finite": true,
+      "output_mean": 0.0017757966415956616,
+      "output_shape": [
+        1,
+        32,
+        10,
+        200
+      ],
+      "output_std": 0.04828226938843727
+    },
+    "ISRUC": {
+      "input_finite": true,
+      "input_shape": [
+        1,
+        6,
+        30,
+        200
+      ],
+      "output_finite": true,
+      "output_mean": -0.001564738224260509,
+      "output_shape": [
+        1,
+        6,
+        30,
+        200
+      ],
+      "output_std": 0.01269535906612873
+    },
+    "PhysioNet-MI": {
+      "input_finite": true,
+      "input_shape": [
+        1,
+        64,
+        4,
+        200
+      ],
+      "output_finite": true,
+      "output_mean": 0.005365909542888403,
+      "output_shape": [
+        1,
+        64,
+        4,
+        200
+      ],
+      "output_std": 0.05426489934325218
+    },
+    "SEED-V": {
+      "input_finite": true,
+      "input_shape": [
+        1,
+        62,
+        1,
+        200
+      ],
+      "output_finite": true,
+      "output_mean": 0.005098295863717794,
+      "output_shape": [
+        1,
+        62,
+        1,
+        200
+      ],
+      "output_std": 0.05432378873229027
+    }
+  },
+  "passed": true,
+  "trainable_parameter_count": 0
+}

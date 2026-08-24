@@ -1,0 +1,49 @@
+{
+  "dataset": "SEED-V",
+  "example_shapes": {
+    "test": "(62, 1, 200)",
+    "train": "(62, 1, 200)",
+    "val": "(62, 1, 200)"
+  },
+  "existing_split_counts": {
+    "test": 40352,
+    "train": 34432,
+    "val": 42960
+  },
+  "label_counts": {
+    "0": 19808,
+    "1": 24080,
+    "2": 30672,
+    "3": 23680,
+    "4": 19504
+  },
+  "missing_key_rows": 0,
+  "missing_keys": 0,
+  "missing_or_invalid_labels": 0,
+  "missing_subject_rows": 0,
+  "rows": 117744,
+  "split_index_counts": {
+    "test": 40352,
+    "train": 34432,
+    "val": 42960
+  },
+  "subject_ids": [
+    "1",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15",
+    "16",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9"
+  ],
+  "subjects": 16
+}

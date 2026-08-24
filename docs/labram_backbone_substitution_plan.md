@@ -1,4 +1,9 @@
-# LaBraM Backbone Substitution Plan
+# Historical LaBraM Backbone Substitution Plan
+
+> **Superseded on 2026-07-23.** LaBraM is now executed only in the sibling
+> `/data/neurogroup/mingyangjiang/EEGxPlore/LaBraM` repository. This file records
+> the old substitution engineering path and is not a paper-grade experiment
+> plan. See the canonical cross-backbone plan in the LaBraM repository.
 
 ## Goal
 Replace the current `CBraMod` backbone in the SEED-V selective-adaptation pipeline with a LaBraM backbone, while preserving as much of the current adaptation machinery as possible:

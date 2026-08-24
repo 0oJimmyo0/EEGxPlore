@@ -1,0 +1,5 @@
+dataset,passed,metadata_rows,source_subjects,train_subjects,val_subjects,test_subjects,existing_overlap_pairs
+SEED-V,True,117744,16,11,2,3,3
+FACED,True,10332,123,86,18,19,0
+ISRUC,True,89240,100,70,15,15,0
+PhysioNet-MI,True,9837,109,76,16,17,0

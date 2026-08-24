@@ -1,0 +1,36 @@
+{
+  "class_labels": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "container_key_is_split_unit": true,
+  "dataset": "PhysioNet-MI",
+  "generation": {
+    "objective": 0.004397783382661057,
+    "restart_count": 256,
+    "seed": 2027,
+    "selected_restart": 238,
+    "target_sample_ratios": {
+      "test": 0.15,
+      "train": 0.7,
+      "val": 0.15
+    },
+    "target_subject_counts": {
+      "test": 17,
+      "train": 76,
+      "val": 16
+    }
+  },
+  "manifest_sha256": "71344f5bf12edfafedee53da7247ad10f7f8f7b678abbe084c86b8f531133601",
+  "metadata_path": "experiments/icassp2027/datasets/physionet_mi/all_samples.csv",
+  "metadata_sha256": "d806cc90fe37f9420c0f70d1788e8d59f058ac952fdfc2c2c2e30355ec9af9dd",
+  "source_container_keys": 9837,
+  "source_existing_split_container_counts": {
+    "test": 1803,
+    "train": 6300,
+    "val": 1734
+  },
+  "source_rows": 9837
+}

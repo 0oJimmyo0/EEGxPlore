@@ -1,0 +1,350 @@
+{
+  "all_fresh_manifest_gates_passed": true,
+  "datasets": {
+    "FACED": {
+      "dataset": "FACED",
+      "duplicate_manifest_keys": [],
+      "existing_split_subject_counts": {
+        "test": 23,
+        "train": 80,
+        "val": 20
+      },
+      "existing_split_subject_overlap": {
+        "test_train": [],
+        "test_val": [],
+        "train_val": []
+      },
+      "fresh_class_counts": {
+        "test": {
+          "0": 171,
+          "1": 171,
+          "2": 171,
+          "3": 171,
+          "4": 228,
+          "5": 171,
+          "6": 171,
+          "7": 171,
+          "8": 171
+        },
+        "train": {
+          "0": 774,
+          "1": 774,
+          "2": 774,
+          "3": 774,
+          "4": 1032,
+          "5": 774,
+          "6": 774,
+          "7": 774,
+          "8": 774
+        },
+        "val": {
+          "0": 162,
+          "1": 162,
+          "2": 162,
+          "3": 162,
+          "4": 216,
+          "5": 162,
+          "6": 162,
+          "7": 162,
+          "8": 162
+        }
+      },
+      "fresh_manifest_sha256": "7f564428b51131993e341cb4da881e8b8e167056c90499190245052ea1ed131a",
+      "fresh_split_container_counts": {
+        "test": 1596,
+        "train": 7224,
+        "val": 1512
+      },
+      "fresh_split_sample_counts": {
+        "test": 1596,
+        "train": 7224,
+        "val": 1512
+      },
+      "fresh_split_subject_counts": {
+        "test": 19,
+        "train": 86,
+        "val": 18
+      },
+      "fresh_subject_overlap": {
+        "train_test": [],
+        "train_val": [],
+        "val_test": []
+      },
+      "manifest_hash_match": true,
+      "metadata_rows": 10332,
+      "missing_classes_by_fresh_split": {
+        "test": [],
+        "train": [],
+        "val": []
+      },
+      "missing_manifest_keys": [],
+      "passed": true,
+      "source_container_keys": 10332,
+      "source_subjects": 123,
+      "stored_manifest_sha256": "7f564428b51131993e341cb4da881e8b8e167056c90499190245052ea1ed131a",
+      "unknown_manifest_keys": []
+    },
+    "ISRUC": {
+      "dataset": "ISRUC",
+      "duplicate_manifest_keys": [],
+      "existing_split_subject_counts": {
+        "test": 10,
+        "train": 80,
+        "val": 10
+      },
+      "existing_split_subject_overlap": {
+        "test_train": [],
+        "test_val": [],
+        "train_val": []
+      },
+      "fresh_class_counts": {
+        "test": {
+          "0": 2871,
+          "1": 1757,
+          "2": 4605,
+          "3": 2847,
+          "4": 2060
+        },
+        "train": {
+          "0": 14604,
+          "1": 7790,
+          "2": 18671,
+          "3": 11576,
+          "4": 7699
+        },
+        "val": {
+          "0": 3209,
+          "1": 1795,
+          "2": 4753,
+          "3": 2996,
+          "4": 2007
+        }
+      },
+      "fresh_manifest_sha256": "253008f042c7698b17e5e9110c62c776d97238ba09ad6ffe82d75ad7b5839c79",
+      "fresh_split_container_counts": {
+        "test": 707,
+        "train": 3017,
+        "val": 738
+      },
+      "fresh_split_sample_counts": {
+        "test": 14140,
+        "train": 60340,
+        "val": 14760
+      },
+      "fresh_split_subject_counts": {
+        "test": 15,
+        "train": 70,
+        "val": 15
+      },
+      "fresh_subject_overlap": {
+        "train_test": [],
+        "train_val": [],
+        "val_test": []
+      },
+      "manifest_hash_match": true,
+      "metadata_rows": 89240,
+      "missing_classes_by_fresh_split": {
+        "test": [],
+        "train": [],
+        "val": []
+      },
+      "missing_manifest_keys": [],
+      "passed": true,
+      "source_container_keys": 4462,
+      "source_subjects": 100,
+      "stored_manifest_sha256": "253008f042c7698b17e5e9110c62c776d97238ba09ad6ffe82d75ad7b5839c79",
+      "unknown_manifest_keys": []
+    },
+    "PhysioNet-MI": {
+      "dataset": "PhysioNet-MI",
+      "duplicate_manifest_keys": [],
+      "existing_split_subject_counts": {
+        "test": 20,
+        "train": 70,
+        "val": 19
+      },
+      "existing_split_subject_overlap": {
+        "test_train": [],
+        "test_val": [],
+        "train_val": []
+      },
+      "fresh_class_counts": {
+        "test": {
+          "0": 386,
+          "1": 379,
+          "2": 384,
+          "3": 381
+        },
+        "train": {
+          "0": 1723,
+          "1": 1697,
+          "2": 1714,
+          "3": 1709
+        },
+        "val": {
+          "0": 370,
+          "1": 362,
+          "2": 367,
+          "3": 365
+        }
+      },
+      "fresh_manifest_sha256": "71344f5bf12edfafedee53da7247ad10f7f8f7b678abbe084c86b8f531133601",
+      "fresh_split_container_counts": {
+        "test": 1530,
+        "train": 6843,
+        "val": 1464
+      },
+      "fresh_split_sample_counts": {
+        "test": 1530,
+        "train": 6843,
+        "val": 1464
+      },
+      "fresh_split_subject_counts": {
+        "test": 17,
+        "train": 76,
+        "val": 16
+      },
+      "fresh_subject_overlap": {
+        "train_test": [],
+        "train_val": [],
+        "val_test": []
+      },
+      "manifest_hash_match": true,
+      "metadata_rows": 9837,
+      "missing_classes_by_fresh_split": {
+        "test": [],
+        "train": [],
+        "val": []
+      },
+      "missing_manifest_keys": [],
+      "passed": true,
+      "source_container_keys": 9837,
+      "source_subjects": 109,
+      "stored_manifest_sha256": "71344f5bf12edfafedee53da7247ad10f7f8f7b678abbe084c86b8f531133601",
+      "unknown_manifest_keys": []
+    },
+    "SEED-V": {
+      "dataset": "SEED-V",
+      "duplicate_manifest_keys": [],
+      "existing_split_subject_counts": {
+        "test": 16,
+        "train": 16,
+        "val": 16
+      },
+      "existing_split_subject_overlap": {
+        "test_train": [
+          "1",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "16",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9"
+        ],
+        "test_val": [
+          "1",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "16",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9"
+        ],
+        "train_val": [
+          "1",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "16",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9"
+        ]
+      },
+      "fresh_class_counts": {
+        "test": {
+          "0": 3714,
+          "1": 4515,
+          "2": 5751,
+          "3": 4440,
+          "4": 3657
+        },
+        "train": {
+          "0": 13618,
+          "1": 16555,
+          "2": 21087,
+          "3": 16280,
+          "4": 13409
+        },
+        "val": {
+          "0": 2476,
+          "1": 3010,
+          "2": 3834,
+          "3": 2960,
+          "4": 2438
+        }
+      },
+      "fresh_manifest_sha256": "cf161862af26157ae6ddd4607aa37d8b82d673e510a28d33a8c083a91ee7e444",
+      "fresh_split_container_counts": {
+        "test": 22077,
+        "train": 80949,
+        "val": 14718
+      },
+      "fresh_split_sample_counts": {
+        "test": 22077,
+        "train": 80949,
+        "val": 14718
+      },
+      "fresh_split_subject_counts": {
+        "test": 3,
+        "train": 11,
+        "val": 2
+      },
+      "fresh_subject_overlap": {
+        "train_test": [],
+        "train_val": [],
+        "val_test": []
+      },
+      "manifest_hash_match": true,
+      "metadata_rows": 117744,
+      "missing_classes_by_fresh_split": {
+        "test": [],
+        "train": [],
+        "val": []
+      },
+      "missing_manifest_keys": [],
+      "passed": true,
+      "source_container_keys": 117744,
+      "source_subjects": 16,
+      "stored_manifest_sha256": "cf161862af26157ae6ddd4607aa37d8b82d673e510a28d33a8c083a91ee7e444",
+      "unknown_manifest_keys": []
+    }
+  },
+  "note": "Existing split overlap is diagnostic only; fresh manifests are the ICASSP protocol."
+}

@@ -1,4 +1,9 @@
-# EEGxPlore Next-Step Plan
+# Historical CBraMod Next-Step Plan
+
+> **Superseded on 2026-07-23.** The current cross-backbone source of truth is
+> [`/data/neurogroup/mingyangjiang/EEGxPlore/LaBraM/docs/cross_backbone_execution_plan.md`](../../LaBraM/docs/cross_backbone_execution_plan.md).
+> This file is retained for historical CBraMod planning. CBraMod runs remain
+> in this repository; LaBraM runs must not be launched from this path.
 
 ## Current Status
 

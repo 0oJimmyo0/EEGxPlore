@@ -1,0 +1,11 @@
+{
+  "dataset": "ISRUC",
+  "duplicate_manifest_keys": [],
+  "manifest_container_keys": 4462,
+  "metadata_key_exists_false": 0,
+  "metadata_rows": 89240,
+  "missing_manifest_keys": [],
+  "passed": true,
+  "source_container_keys": 4462,
+  "unknown_manifest_keys": []
+}

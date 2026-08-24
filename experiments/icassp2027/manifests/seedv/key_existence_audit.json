@@ -1,0 +1,11 @@
+{
+  "dataset": "SEED-V",
+  "duplicate_manifest_keys": [],
+  "manifest_container_keys": 117744,
+  "metadata_key_exists_false": 0,
+  "metadata_rows": 117744,
+  "missing_manifest_keys": [],
+  "passed": true,
+  "source_container_keys": 117744,
+  "unknown_manifest_keys": []
+}

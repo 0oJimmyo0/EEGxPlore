@@ -86,6 +86,7 @@ class CustomDataset(Dataset):
             return_domain_ids: bool = False,
             domain_maps=None,
             input_scale_divisor: float = 100.0,
+            split_manifest_path: str = '',
     ):
         super(CustomDataset, self).__init__()
         self.data_dir = data_dir
@@ -97,8 +98,17 @@ class CustomDataset(Dataset):
             raise ValueError(f"input_scale_divisor must be > 0, got {self.input_scale_divisor}")
         self.db = None
         self.channel_names = read_faced_channel_names(data_dir)
-        with lmdb.open(data_dir, readonly=True, lock=False, readahead=False, meminit=False).begin(write=False) as txn:
-            self.keys = pickle.loads(txn.get('__keys__'.encode()))[mode]
+        if split_manifest_path:
+            if not os.path.isfile(split_manifest_path):
+                raise FileNotFoundError(f"FACED split manifest not found: {split_manifest_path}")
+            with open(split_manifest_path, 'r', encoding='utf-8') as handle:
+                split_index = json.load(handle)
+        else:
+            with lmdb.open(data_dir, readonly=True, lock=False, readahead=False, meminit=False).begin(write=False) as txn:
+                split_index = pickle.loads(txn.get('__keys__'.encode()))
+        if mode not in split_index:
+            raise KeyError(f"FACED split manifest missing split {mode!r}")
+        self.keys = split_index[mode]
 
     def __len__(self):
         return len((self.keys))
@@ -185,6 +195,7 @@ class LoadDataset(object):
         pin_memory = bool(getattr(self.params, 'pin_memory', False))
         train_drop_last = bool(getattr(self.params, 'train_drop_last', False))
         input_scale_divisor = float(getattr(self.params, 'input_scale_divisor', 100.0))
+        split_manifest_path = str(getattr(self.params, 'icassp_split_manifest', '') or '')
         print(f"[FACED] input_scale_divisor={input_scale_divisor}", flush=True)
         print(f"[FACED] train_drop_last={train_drop_last}", flush=True)
 
@@ -195,6 +206,7 @@ class LoadDataset(object):
             return_domain_ids=return_domain_ids,
             domain_maps=domain_maps,
             input_scale_divisor=input_scale_divisor,
+            split_manifest_path=split_manifest_path,
         )
         val_set = CustomDataset(
             self.datasets_dir,
@@ -203,6 +215,7 @@ class LoadDataset(object):
             return_domain_ids=return_domain_ids,
             domain_maps=domain_maps,
             input_scale_divisor=input_scale_divisor,
+            split_manifest_path=split_manifest_path,
         )
         test_set = CustomDataset(
             self.datasets_dir,
@@ -211,6 +224,7 @@ class LoadDataset(object):
             return_domain_ids=return_domain_ids,
             domain_maps=domain_maps,
             input_scale_divisor=input_scale_divisor,
+            split_manifest_path=split_manifest_path,
         )
         if train_set.get_ch_names() is not None:
             self.params.labram_channel_names = train_set.get_ch_names()

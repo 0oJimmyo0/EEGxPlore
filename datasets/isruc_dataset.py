@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from utils.util import to_tensor
 import os
+import json
 
 
 
@@ -37,6 +38,8 @@ class LoadDataset(object):
         self.params = params
         self.seqs_dir = os.path.join(params.datasets_dir, 'seq')
         self.labels_dir = os.path.join(params.datasets_dir, 'labels')
+        self.split_manifest_path = str(getattr(params, 'icassp_split_manifest', '') or '')
+        self._pair_by_container = {}
         self.seqs_labels_path_pair = self.load_path()
 
     def get_data_loader(self):
@@ -101,11 +104,34 @@ class LoadDataset(object):
                         f'{subject_seq} -> {seq_fname} vs {subject_label} -> {label_fname}'
                     )
                 subject_pairs.append((os.path.join(subject_seq, seq_fname), os.path.join(subject_label, label_fname)))
+                container_key = f'{os.path.basename(subject_seq)}/{seq_fname}'
+                self._pair_by_container[container_key] = subject_pairs[-1]
             seqs_labels_path_pair.append(subject_pairs)
 
         return seqs_labels_path_pair
 
     def split_dataset(self, seqs_labels_path_pair):
+        if self.split_manifest_path:
+            if not os.path.isfile(self.split_manifest_path):
+                raise FileNotFoundError(f'[ISRUC] split manifest not found: {self.split_manifest_path}')
+            with open(self.split_manifest_path, 'r', encoding='utf-8') as handle:
+                manifest = json.load(handle)
+            manifest_keys = [
+                key for split in ('train', 'val', 'test') for key in manifest.get(split, [])
+            ]
+            if len(manifest_keys) != len(set(manifest_keys)):
+                raise RuntimeError('[ISRUC] split manifest contains duplicate container keys')
+            unknown = sorted(set(manifest_keys) - set(self._pair_by_container))
+            missing = sorted(set(self._pair_by_container) - set(manifest_keys))
+            if unknown or missing:
+                raise RuntimeError(
+                    f'[ISRUC] split manifest key mismatch: unknown={len(unknown)} missing={len(missing)}'
+                )
+            return tuple(
+                [self._pair_by_container[key] for key in manifest.get(split, [])]
+                for split in ('train', 'val', 'test')
+            )
+
         train_pairs = []
         val_pairs = []
         test_pairs = []

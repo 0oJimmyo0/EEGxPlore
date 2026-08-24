@@ -1,0 +1,11 @@
+{
+  "dataset": "FACED",
+  "duplicate_manifest_keys": [],
+  "manifest_container_keys": 10332,
+  "metadata_key_exists_false": 0,
+  "metadata_rows": 10332,
+  "missing_manifest_keys": [],
+  "passed": true,
+  "source_container_keys": 10332,
+  "unknown_manifest_keys": []
+}
