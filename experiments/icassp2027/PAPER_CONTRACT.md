@@ -30,6 +30,9 @@ ICASSP is explicitly CBraMod-specific. It does not claim cross-backbone generali
 - Learned router constants use the same matched `std=0.02` initialization in
   both conditions; Static remains batch-invariant while its prior is not
   trapped by exact specialist symmetry at initialization.
+- Fixed router configuration across datasets: four experts per bank, MLP
+  router with hidden width 128, temperature 1.0, shared output scale 1.0,
+  expert output scale 1.0, and soft dispatch.
 - Router dropout, jitter, depth/context features, and router-specific regularizers: disabled in the primary Static/Routed comparison.
 - Every original pretrained CBraMod parameter is frozen for Static/Routed;
   only the upper-four conditional specialist banks, routers, learned

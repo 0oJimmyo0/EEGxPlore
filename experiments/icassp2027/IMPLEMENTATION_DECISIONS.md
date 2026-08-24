@@ -20,6 +20,10 @@ paper and does not alter the legacy `typed_capacity_domain` implementation.
   invariance and S/R parameter isomorphism while preventing dense-warm-start
   specialists with zero output projections from remaining perfectly symmetric,
   which would disconnect the Static router from the task loss.
+- Fix the primary router configuration across all four datasets to four
+  experts, MLP hidden width 128, temperature 1.0, shared/expert output scales
+  1.0, and soft dispatch. Dataset-specific router tuning is outside the
+  primary ICASSP comparison.
 - Adapt the upper four CBraMod transformer blocks. The ICASSP profile rejects
   AttnRes, PSD features, depth/context features, domain metadata, compact EEG
   summaries, router jitter, warmups, and router-specific regularizers.

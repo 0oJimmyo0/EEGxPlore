@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from datasets import faced_dataset, isruc_dataset, mumtaz_dataset, physio_dataset, seedv_dataset, tuev_dataset
-from finetune_trainer import Trainer
+from finetune_trainer import Trainer, validate_manifest_integrity
 from models import model_for_faced, model_for_isruc, model_for_mumtaz, model_for_physio, model_for_seedv, model_for_tuev
 
 
@@ -625,6 +625,12 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError('[icassp2027] --icassp_split_manifest is required.')
         if not os.path.isfile(args.icassp_split_manifest):
             raise ValueError(f'[icassp2027] split manifest does not exist: {args.icassp_split_manifest}')
+        try:
+            validate_manifest_integrity(args.icassp_split_manifest, require_sidecar=True)
+        except (FileNotFoundError, RuntimeError) as exc:
+            raise ValueError(f'[icassp2027] manifest integrity check failed: {exc}') from exc
+        if args.selection_metric != 'kappa':
+            raise ValueError('[icassp2027] checkpoint selection must use validation kappa.')
         if args.attnres_variant != 'none':
             raise ValueError('[icassp2027] AttnRes is excluded from the entire ICASSP profile.')
         if args.routing_export_dir and args.downstream_dataset != 'SEED-V':
@@ -635,6 +641,31 @@ def validate_args(args: argparse.Namespace) -> None:
                 'use --trainability_mode frozen explicitly for a frozen backbone.'
             )
         if args.moe:
+            fixed_router_config = {
+                'moe_num_experts': args.moe_num_experts,
+                'moe_router_arch': args.moe_router_arch,
+                'moe_router_mlp_hidden': args.moe_router_mlp_hidden,
+                'moe_router_temperature': args.moe_router_temperature,
+                'moe_shared_output_scale': args.moe_shared_output_scale,
+                'moe_expert_output_scale': args.moe_expert_output_scale,
+            }
+            expected_router_config = {
+                'moe_num_experts': 4,
+                'moe_router_arch': 'mlp',
+                'moe_router_mlp_hidden': 128,
+                'moe_router_temperature': 1.0,
+                'moe_shared_output_scale': 1.0,
+                'moe_expert_output_scale': 1.0,
+            }
+            router_config_mismatch = {
+                key: (value, expected_router_config[key])
+                for key, value in fixed_router_config.items()
+                if value != expected_router_config[key]
+            }
+            if router_config_mismatch:
+                raise ValueError(
+                    f'[icassp2027] fixed router configuration mismatch: {router_config_mismatch}'
+                )
             if args.frozen:
                 raise ValueError('[icassp2027] do not use --frozen for Static/Routed; the original CBraMod foundation is frozen by trainability_mode.')
             if args.moe_route_mode != 'typed_conditional':

@@ -141,6 +141,30 @@ def _sha256_file(path: str) -> str:
     return digest.hexdigest()
 
 
+def validate_manifest_integrity(path: str, require_sidecar: bool = False) -> str:
+    """Hash a manifest and fail if its optional sidecar disagrees."""
+    manifest_path = os.fspath(path)
+    if not os.path.isfile(manifest_path):
+        raise FileNotFoundError(f"Manifest does not exist: {manifest_path}")
+    actual_sha256 = _sha256_file(manifest_path)
+    sidecar = os.path.join(os.path.dirname(manifest_path), 'split_manifest.sha256')
+    if not os.path.isfile(sidecar):
+        if require_sidecar:
+            raise RuntimeError(f"Manifest hash sidecar is required but missing: {sidecar}")
+        return actual_sha256
+    with open(sidecar, 'r', encoding='utf-8') as handle:
+        fields = handle.read().split()
+    if not fields:
+        raise RuntimeError(f"Manifest hash sidecar is empty: {sidecar}")
+    stored_sha256 = fields[0]
+    if stored_sha256 != actual_sha256:
+        raise RuntimeError(
+            f"Manifest hash mismatch for {manifest_path}: "
+            f"actual={actual_sha256} sidecar={stored_sha256}"
+        )
+    return actual_sha256
+
+
 def _git_provenance() -> Dict[str, Any]:
     repo_root = os.path.dirname(os.path.abspath(__file__))
     try:
@@ -1238,26 +1262,13 @@ class Trainer(object):
         config_sha256 = hashlib.sha256(config_bytes).hexdigest()
         manifest_path = str(getattr(self.params, 'icassp_split_manifest', '') or '')
         manifest_sha256 = ''
-        if manifest_path and os.path.isfile(manifest_path):
-            manifest_sha256 = _sha256_file(manifest_path)
-            hash_sidecar = os.path.join(os.path.dirname(manifest_path), 'split_manifest.sha256')
-            if os.path.isfile(hash_sidecar):
-                with open(hash_sidecar, 'r', encoding='utf-8') as handle:
-                    sidecar_fields = handle.read().split()
-                if not sidecar_fields:
-                    raise RuntimeError(f"Empty manifest hash sidecar: {hash_sidecar}")
-                stored_manifest_sha256 = sidecar_fields[0]
-                if stored_manifest_sha256 != manifest_sha256:
-                    raise RuntimeError(
-                        f"Manifest hash mismatch for {manifest_path}: "
-                        f"actual={manifest_sha256} sidecar={stored_manifest_sha256}"
-                    )
-            elif getattr(self.params, 'experiment_profile', 'none') == 'icassp2027':
-                raise RuntimeError(
-                    f"ICASSP manifest is missing its required split_manifest.sha256 sidecar: {manifest_path}"
-                )
+        if manifest_path:
+            manifest_sha256 = validate_manifest_integrity(
+                manifest_path,
+                require_sidecar=getattr(self.params, 'experiment_profile', 'none') == 'icassp2027',
+            )
         elif getattr(self.params, 'experiment_profile', 'none') == 'icassp2027':
-            raise RuntimeError(f"ICASSP manifest does not exist at summary time: {manifest_path}")
+            raise RuntimeError('ICASSP manifest is required at summary time')
         git_info = _git_provenance()
         if getattr(self.params, 'experiment_profile', 'none') == 'icassp2027' and git_info.get('git_dirty'):
             print('[provenance] WARNING: ICASSP run summary was written from a dirty git worktree.', flush=True)

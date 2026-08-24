@@ -55,3 +55,23 @@ After these gates pass, run the five short pilots in this order: SEED-V Static,
 SEED-V Routed, ISRUC Upper-4, PhysioNet-MI Frozen, and FACED Frozen. Do not
 launch the 28-job matrix until all pilot summaries contain matching manifest
 and pair-contract hashes.
+
+The canonical pilot launcher is parameterized but keeps all causal settings
+shared:
+
+```bash
+bash experiments/icassp2027/configs/run_pilot.sh SEED-V static
+bash experiments/icassp2027/configs/run_pilot.sh SEED-V routed
+bash experiments/icassp2027/configs/run_pilot.sh ISRUC upper4
+bash experiments/icassp2027/configs/run_pilot.sh PhysioNet-MI frozen
+bash experiments/icassp2027/configs/run_pilot.sh FACED frozen
+```
+
+Override dataset roots, `MODEL_ROOT`, `CUDA_ID`, or resource settings through
+the environment. After the two SEED-V runs, validate their summary pair with:
+
+```bash
+python experiments/icassp2027/scripts/validate_static_routed_pair.py \
+  --static_summary <STATIC_RUN_SUMMARY.json> \
+  --routed_summary <ROUTED_RUN_SUMMARY.json>
+```
