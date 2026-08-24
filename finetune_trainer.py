@@ -157,6 +157,85 @@ def _git_provenance() -> Dict[str, Any]:
         return {'git_commit': '', 'git_dirty': None, 'git_error': str(exc)}
 
 
+TRAINABILITY_MODES = {'frozen', 'full', 'upper4', 'typed_conditional'}
+
+
+def resolve_trainability_mode(params) -> str:
+    """Resolve the centralized backbone trainability contract."""
+    mode = str(getattr(params, 'trainability_mode', 'auto')).strip().lower()
+    if mode == 'auto':
+        if (
+            getattr(params, 'experiment_profile', 'none') == 'icassp2027'
+            and getattr(params, 'moe', False)
+            and getattr(params, 'moe_route_mode', '') == 'typed_conditional'
+        ):
+            mode = 'typed_conditional'
+        elif getattr(params, 'frozen', False):
+            mode = 'frozen'
+        else:
+            mode = 'full'
+    if mode not in TRAINABILITY_MODES:
+        raise ValueError(f"Unsupported trainability_mode={mode!r}")
+    return mode
+
+
+def is_icasp_conditional_parameter(name: str) -> bool:
+    """Return whether a parameter belongs to the new typed-conditional path."""
+    if name.startswith('classifier') or '.classifier.' in name:
+        return True
+    if '.moe_ffn.' not in name:
+        return False
+    return any(
+        key in name
+        for key in (
+            '.spatial_specialists.',
+            '.spectral_specialists.',
+            '.spatial_router.',
+            '.spectral_router.',
+            '.router_constant_spatial',
+            '.router_constant_spectral',
+        )
+    )
+
+
+def configure_trainability(model: torch.nn.Module, params) -> Tuple[str, List[Tuple[str, torch.nn.Parameter]]]:
+    """Apply and return the shared trainability mask used by training and audits."""
+    mode = resolve_trainability_mode(params)
+    frozen_flag = bool(getattr(params, 'frozen', False))
+    named_trainable: List[Tuple[str, torch.nn.Parameter]] = []
+    for name, parameter in model.named_parameters():
+        if 'backbone' in name:
+            if mode == 'frozen' or frozen_flag:
+                parameter.requires_grad = False
+            elif mode == 'typed_conditional':
+                parameter.requires_grad = is_icasp_conditional_parameter(name)
+            elif mode == 'upper4':
+                layer_match = re.search(r'backbone\.encoder\.layers\.(\d+)\.', name)
+                parameter.requires_grad = bool(layer_match and int(layer_match.group(1)) >= 8)
+            else:
+                parameter.requires_grad = True
+        if parameter.requires_grad:
+            named_trainable.append((name, parameter))
+    return mode, named_trainable
+
+
+def pair_contract_sha256(params) -> str:
+    """Hash all causal Static/Routed settings while excluding run-only fields."""
+    excluded = {
+        'moe_router_policy',
+        'model_dir',
+        'routing_run_name',
+        'routing_export_dir',
+        'routing_export_splits',
+    }
+    config = {
+        key: value for key, value in vars(params).items()
+        if key not in excluded
+    }
+    payload = json.dumps(config, sort_keys=True, default=str).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
 class EMAHelper:
     @staticmethod
     def _is_uninitialized_parameter(p: torch.nn.Parameter) -> bool:
@@ -244,22 +323,7 @@ class Trainer(object):
 
         self.best_model_states = None
 
-        self._named_trainable_params: List = []
-        trainability_mode = str(getattr(params, 'trainability_mode', 'auto')).strip().lower()
-        if trainability_mode == 'auto':
-            if (
-                getattr(params, 'experiment_profile', 'none') == 'icassp2027'
-                and getattr(params, 'moe', False)
-                and getattr(params, 'moe_route_mode', '') == 'typed_conditional'
-            ):
-                trainability_mode = 'typed_conditional'
-            elif params.frozen:
-                trainability_mode = 'frozen'
-            else:
-                trainability_mode = 'full'
-        if trainability_mode not in {'frozen', 'full', 'upper4', 'typed_conditional'}:
-            raise ValueError(f"Unsupported trainability_mode={trainability_mode!r}")
-        self.trainability_mode = trainability_mode
+        self.trainability_mode, self._named_trainable_params = configure_trainability(self.model, params)
         grouped = {
             'backbone': [],
             'router': [],
@@ -267,23 +331,7 @@ class Trainer(object):
             'classifier': [],
             'other': [],
         }
-        for name, param in self.model.named_parameters():
-            if "backbone" in name:
-                if trainability_mode == 'frozen' or params.frozen:
-                    param.requires_grad = False
-                elif trainability_mode == 'typed_conditional':
-                    # Static/Routed is a frozen-foundation comparison. Only
-                    # newly introduced conditional MoE modules in the upper
-                    # four layers may update inside the backbone.
-                    param.requires_grad = self._is_icasp_conditional_parameter(name)
-                elif trainability_mode == 'upper4':
-                    layer_match = re.search(r'backbone\.encoder\.layers\.(\d+)\.', name)
-                    param.requires_grad = bool(layer_match and int(layer_match.group(1)) >= 8)
-                else:
-                    param.requires_grad = True
-            if not param.requires_grad:
-                continue
-            self._named_trainable_params.append((name, param))
+        for name, param in self._named_trainable_params:
             grouped[self._component_name_for_param(name)].append(param)
 
         self.data_length = len(self.data_loader['train'])
@@ -457,6 +505,10 @@ class Trainer(object):
                 f"eval_only={self._ema_eval_only} trackable_params={len(self._ema_helper.shadow)}",
                 flush=True,
             )
+        if torch.cuda.is_available():
+            # The summary field is a whole Trainer-run diagnostic. Do not
+            # reset this counter at epoch boundaries.
+            torch.cuda.reset_peak_memory_stats()
 
     def _train_class_counts(self) -> torch.Tensor:
         num_classes = int(self.params.num_of_classes)
@@ -617,21 +669,7 @@ class Trainer(object):
     @staticmethod
     def _is_icasp_conditional_parameter(name: str) -> bool:
         """Return whether a parameter is newly introduced by typed_conditional."""
-        if name.startswith('classifier') or '.classifier.' in name:
-            return True
-        if '.moe_ffn.' not in name:
-            return False
-        return any(
-            key in name
-            for key in (
-                '.spatial_specialists.',
-                '.spectral_specialists.',
-                '.spatial_router.',
-                '.spectral_router.',
-                '.router_constant_spatial',
-                '.router_constant_spectral',
-            )
-        )
+        return is_icasp_conditional_parameter(name)
 
     @staticmethod
     def _component_name_for_param(name: str) -> str:
@@ -1201,12 +1239,25 @@ class Trainer(object):
         manifest_path = str(getattr(self.params, 'icassp_split_manifest', '') or '')
         manifest_sha256 = ''
         if manifest_path and os.path.isfile(manifest_path):
+            manifest_sha256 = _sha256_file(manifest_path)
             hash_sidecar = os.path.join(os.path.dirname(manifest_path), 'split_manifest.sha256')
             if os.path.isfile(hash_sidecar):
                 with open(hash_sidecar, 'r', encoding='utf-8') as handle:
-                    manifest_sha256 = handle.read().split()[0]
-            else:
-                manifest_sha256 = _sha256_file(manifest_path)
+                    sidecar_fields = handle.read().split()
+                if not sidecar_fields:
+                    raise RuntimeError(f"Empty manifest hash sidecar: {hash_sidecar}")
+                stored_manifest_sha256 = sidecar_fields[0]
+                if stored_manifest_sha256 != manifest_sha256:
+                    raise RuntimeError(
+                        f"Manifest hash mismatch for {manifest_path}: "
+                        f"actual={manifest_sha256} sidecar={stored_manifest_sha256}"
+                    )
+            elif getattr(self.params, 'experiment_profile', 'none') == 'icassp2027':
+                raise RuntimeError(
+                    f"ICASSP manifest is missing its required split_manifest.sha256 sidecar: {manifest_path}"
+                )
+        elif getattr(self.params, 'experiment_profile', 'none') == 'icassp2027':
+            raise RuntimeError(f"ICASSP manifest does not exist at summary time: {manifest_path}")
         git_info = _git_provenance()
         if getattr(self.params, 'experiment_profile', 'none') == 'icassp2027' and git_info.get('git_dirty'):
             print('[provenance] WARNING: ICASSP run summary was written from a dirty git worktree.', flush=True)
@@ -1214,6 +1265,7 @@ class Trainer(object):
             float(torch.cuda.max_memory_allocated() / (1024 ** 2))
             if torch.cuda.is_available() else 0.0
         )
+        pair_sha256 = pair_contract_sha256(self.params)
 
         summary_payload = {
             'timestamp_utc': ts,
@@ -1230,9 +1282,11 @@ class Trainer(object):
                 'manifest_path': manifest_path,
                 'manifest_sha256': manifest_sha256,
                 'config_sha256': config_sha256,
+                'pair_contract_sha256': pair_sha256,
                 'trainability_mode': self.trainability_mode,
                 'trainable_parameter_counts': self._trainable_parameter_counts,
                 'peak_cuda_mb': peak_cuda_mb,
+                'peak_cuda_scope': 'trainer_run',
                 'total_wall_seconds': float(timer() - self._run_start_time),
             },
         }
@@ -1322,9 +1376,11 @@ class Trainer(object):
             'manifest_path': manifest_path,
             'manifest_sha256': manifest_sha256,
             'config_sha256': config_sha256,
+            'pair_contract_sha256': pair_sha256,
             'git_commit': git_info.get('git_commit', ''),
             'git_dirty': git_info.get('git_dirty', ''),
             'peak_cuda_mb': peak_cuda_mb,
+            'peak_cuda_scope': 'trainer_run',
             'total_wall_seconds': float(timer() - self._run_start_time),
         }
 
@@ -1488,8 +1544,6 @@ class Trainer(object):
                 if getattr(self.params, 'moe', False):
                     set_moe_train_epoch(epoch + 1)
                 _mem_report(f"epoch_start ep={epoch + 1}/{self.params.epochs}", md)
-                if torch.cuda.is_available():
-                    torch.cuda.reset_peak_memory_stats()
 
                 self.model.train()
                 start_time = timer()
@@ -2050,8 +2104,6 @@ class Trainer(object):
                 if getattr(self.params, 'moe', False):
                     set_moe_train_epoch(epoch + 1)
                 _mem_report(f"epoch_start_binary ep={epoch + 1}/{self.params.epochs}", md)
-                if torch.cuda.is_available():
-                    torch.cuda.reset_peak_memory_stats()
 
                 self.model.train()
                 start_time = timer()
@@ -2206,8 +2258,6 @@ class Trainer(object):
                 if getattr(self.params, 'moe', False):
                     set_moe_train_epoch(epoch + 1)
                 _mem_report(f"epoch_start_regr ep={epoch + 1}/{self.params.epochs}", md)
-                if torch.cuda.is_available():
-                    torch.cuda.reset_peak_memory_stats()
 
                 self.model.train()
                 start_time = timer()

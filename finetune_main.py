@@ -629,6 +629,11 @@ def validate_args(args: argparse.Namespace) -> None:
             raise ValueError('[icassp2027] AttnRes is excluded from the entire ICASSP profile.')
         if args.routing_export_dir and args.downstream_dataset != 'SEED-V':
             raise ValueError('[icassp2027] routing export is only defined for SEED-V.')
+        if args.frozen and args.trainability_mode != 'frozen':
+            raise ValueError(
+                '[icassp2027] --frozen conflicts with trainability_mode; '
+                'use --trainability_mode frozen explicitly for a frozen backbone.'
+            )
         if args.moe:
             if args.frozen:
                 raise ValueError('[icassp2027] do not use --frozen for Static/Routed; the original CBraMod foundation is frozen by trainability_mode.')

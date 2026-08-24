@@ -15,6 +15,11 @@ paper and does not alter the legacy `typed_capacity_domain` implementation.
   channel and patch axes.
 - Keep the shared FFN, spatial specialists, and spectral-temporal specialists
   in both conditions. Use soft dispatch only.
+- Initialize both learned router constants with the same small normal scheme
+  (`std=0.02`) in Static and Routed. This preserves exact Static batch
+  invariance and S/R parameter isomorphism while preventing dense-warm-start
+  specialists with zero output projections from remaining perfectly symmetric,
+  which would disconnect the Static router from the task loss.
 - Adapt the upper four CBraMod transformer blocks. The ICASSP profile rejects
   AttnRes, PSD features, depth/context features, domain metadata, compact EEG
   summaries, router jitter, warmups, and router-specific regularizers.
@@ -59,12 +64,11 @@ paper and does not alter the legacy `typed_capacity_domain` implementation.
   paper; record them for reproducibility and sanity checks.
 - Upper-4, LoRA, and bottleneck baselines remain required follow-up code, but
   are implemented after the Static/Routed path passes its contract tests.
-- A centralized trainability-mode implementation, full-wrapper contract test,
-  optimizer audit, and run-provenance fields are required before the
-  scientific smoke matrix. The optimizer audit must cover at least two steps:
-  zero-initialized specialist output projections can legitimately make router
-  gradients zero on step one, while specialist output weights should update;
-  routed-router gradient/connectivity is checked after that first update.
+- The centralized trainability mode, full SEED-V-wrapper contract test,
+  two-step optimizer audit, and run-provenance fields must pass before the
+  scientific smoke matrix. The audit records zero router gradients on step
+  one as expected, requires specialist output updates, then requires finite
+  router gradients and Static/Routed routing behavior after step two.
 
 ## Implementation firewall
 

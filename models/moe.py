@@ -1676,8 +1676,14 @@ class TypedConditionalMoEFFN(nn.Module):
         )
         # These parameters intentionally exist for both policies. The static
         # condition uses only c; the routed condition uses u+c.
-        self.router_constant_spatial = nn.Parameter(torch.zeros(d_model, **factory_kwargs))
-        self.router_constant_spectral = nn.Parameter(torch.zeros(d_model, **factory_kwargs))
+        # A small matched random constant breaks the exact expert symmetry
+        # created by dense linear1 warm-start + zero linear2 output weights.
+        # Static remains sample-invariant, while its learned prior can now
+        # receive gradients after specialist output projections activate.
+        self.router_constant_spatial = nn.Parameter(torch.empty(d_model, **factory_kwargs))
+        self.router_constant_spectral = nn.Parameter(torch.empty(d_model, **factory_kwargs))
+        nn.init.normal_(self.router_constant_spatial, mean=0.0, std=0.02)
+        nn.init.normal_(self.router_constant_spectral, mean=0.0, std=0.02)
         self.spatial_router = _make_router_head(
             d_model, num_specialists, router_arch, self.router_mlp_hidden, factory_kwargs
         )

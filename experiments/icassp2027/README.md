@@ -34,3 +34,24 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 python experiments/icassp2027/scripts/frozen
 The original split audit is retained in `audits/phase0_summary.json`; it shows
 subject overlap for all three SEED-V original splits, while the other three
 datasets' original splits were already subject-disjoint.
+
+## Pre-training gates
+
+Run these repository-level gates before scheduling the short integration pilots:
+
+```bash
+python experiments/icassp2027/scripts/test_typed_conditional.py
+python experiments/icassp2027/scripts/test_full_static_routed_contract.py
+OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+  python experiments/icassp2027/scripts/test_two_step_optimizer_contract.py
+```
+
+The full wrapper test covers the SEED-V classifier and the production
+trainability mask. The optimizer audit requires specialist output updates on
+step one, finite router gradients on step two, unchanged pretrained tensors,
+Static batch invariance, and Routed sample dependence.
+
+After these gates pass, run the five short pilots in this order: SEED-V Static,
+SEED-V Routed, ISRUC Upper-4, PhysioNet-MI Frozen, and FACED Frozen. Do not
+launch the 28-job matrix until all pilot summaries contain matching manifest
+and pair-contract hashes.

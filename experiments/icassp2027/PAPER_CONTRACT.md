@@ -27,6 +27,9 @@ ICASSP is explicitly CBraMod-specific. It does not claim cross-backbone generali
   `typed_capacity_domain` is excluded from ICASSP runs.
 - Static router: the same router network fed by a learned constant input.
 - Routed router: the same router network fed by the current sample representation plus the same learned constant.
+- Learned router constants use the same matched `std=0.02` initialization in
+  both conditions; Static remains batch-invariant while its prior is not
+  trapped by exact specialist symmetry at initialization.
 - Router dropout, jitter, depth/context features, and router-specific regularizers: disabled in the primary Static/Routed comparison.
 - Every original pretrained CBraMod parameter is frozen for Static/Routed;
   only the upper-four conditional specialist banks, routers, learned
