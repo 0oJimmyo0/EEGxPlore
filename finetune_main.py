@@ -629,6 +629,10 @@ def validate_args(args: argparse.Namespace) -> None:
             validate_manifest_integrity(args.icassp_split_manifest, require_sidecar=True)
         except (FileNotFoundError, RuntimeError) as exc:
             raise ValueError(f'[icassp2027] manifest integrity check failed: {exc}') from exc
+        if abs(float(args.input_scale_divisor) - 100.0) > 1e-12:
+            raise ValueError(
+                '[icassp2027] input_scale_divisor is fixed at 100.0 for the locked loader protocol.'
+            )
         if args.selection_metric != 'kappa':
             raise ValueError('[icassp2027] checkpoint selection must use validation kappa.')
         if args.attnres_variant != 'none':

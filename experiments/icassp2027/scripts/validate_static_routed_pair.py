@@ -31,10 +31,10 @@ def main() -> None:
 
     static_policy = static_config.get('moe_router_policy')
     routed_policy = routed_config.get('moe_router_policy')
-    if {static_policy, routed_policy} != {'static', 'sample'}:
-        raise AssertionError(
-            f"Expected one static and one sample policy, got {static_policy!r}, {routed_policy!r}"
-        )
+    if static_policy != 'static':
+        raise AssertionError(f"Static summary must use policy='static', got {static_policy!r}")
+    if routed_policy != 'sample':
+        raise AssertionError(f"Routed summary must use policy='sample', got {routed_policy!r}")
 
     for key in ('dataset', 'seed', 'selection_metric'):
         if static.get(key, static_config.get(key)) != routed.get(key, routed_config.get(key)):

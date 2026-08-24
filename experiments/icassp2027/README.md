@@ -67,6 +67,17 @@ bash experiments/icassp2027/configs/run_pilot.sh PhysioNet-MI frozen
 bash experiments/icassp2027/configs/run_pilot.sh FACED frozen
 ```
 
+For the ACCRE GPU queue, use the same launcher through the checked-in Slurm
+wrapper after committing the experiment:
+
+```bash
+sbatch --export=ALL,DATASET=SEED-V,METHOD=static experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,DATASET=SEED-V,METHOD=routed experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,DATASET=ISRUC,METHOD=upper4 experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,DATASET=PhysioNet-MI,METHOD=frozen experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,DATASET=FACED,METHOD=frozen experiments/icassp2027/configs/submit_pilot.slurm
+```
+
 Override dataset roots, `MODEL_ROOT`, `CUDA_ID`, or resource settings through
 the environment. After the two SEED-V runs, validate their summary pair with:
 
