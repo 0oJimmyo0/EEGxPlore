@@ -107,6 +107,10 @@ def main() -> None:
 
     static_sd = static.state_dict()
     routed_sd = routed.state_dict()
+    assert not any("depth_block_" in name for name in static_sd)
+    assert not any("depth_block_" in name for name in routed_sd)
+    assert any("moe_ffn.spatial_specialists" in name for name in static_sd)
+    assert any("moe_ffn.spatial_router" in name for name in static_sd)
     assert list(static_sd) == list(routed_sd)
     assert all(torch.equal(a, b) for a, b in zip(static_sd.values(), routed_sd.values()))
 

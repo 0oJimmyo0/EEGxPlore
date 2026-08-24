@@ -80,7 +80,7 @@ class Model(nn.Module):
         self.pretrained_param_names = set()
 
         if param.use_pretrained_weights:
-            map_location = torch.device(f'cuda:{param.cuda}')
+            map_location = torch.device(f'cuda:{param.cuda}') if torch.cuda.is_available() else torch.device('cpu')
             ckpt = torch.load(param.foundation_dir, map_location=map_location, weights_only=False)
             if self.backbone_name == 'cbramod':
                 if isinstance(ckpt, dict) and "state_dict" in ckpt:

@@ -121,6 +121,18 @@ class CBraMod(nn.Module):
                 f"moe_attnres_depth_context_mode must be one of {sorted(valid_depth_context_modes)}, "
                 f"got {moe_attnres_depth_context_mode!r}"
             )
+        # Block-level depth context is a typed-capacity routing feature.  It
+        # must not change the parameter schema of dense baselines or the
+        # typed-conditional ICASSP model, even when a stale/default context
+        # mode is present in the shared argument namespace.
+        depth_context_active = (
+            bool(use_moe)
+            and str(moe_route_mode) == "typed_capacity_domain"
+            and bool(moe_use_attnres_depth_router_features)
+        )
+        effective_moe_attnres_depth_context_mode = (
+            str(moe_attnres_depth_context_mode) if depth_context_active else "compact_shared"
+        )
         self.patch_embedding = PatchEmbedding(in_dim, out_dim, d_model, seq_len)
 
         if use_moe:
@@ -246,7 +258,7 @@ class CBraMod(nn.Module):
                         attnres_gated=attnres_gated,
                         attnres_gate_init=attnres_gate_init,
                         attnres_start_layer=attnres_start_layer,
-                                                    moe_attnres_depth_context_mode=moe_attnres_depth_context_mode,
+                                                    moe_attnres_depth_context_mode=effective_moe_attnres_depth_context_mode,
                                                     moe_attnres_depth_block_count=moe_attnres_depth_block_count,
                         moe_attnres_depth_router_dim=moe_attnres_depth_router_dim,
                         moe_attnres_depth_summary_mode=moe_attnres_depth_summary_mode,
@@ -279,7 +291,7 @@ class CBraMod(nn.Module):
                 attnres_gated=attnres_gated,
                 attnres_gate_init=attnres_gate_init,
                 attnres_start_layer=attnres_start_layer,
-                                    moe_attnres_depth_context_mode=moe_attnres_depth_context_mode,
+                                    moe_attnres_depth_context_mode=effective_moe_attnres_depth_context_mode,
                                     moe_attnres_depth_block_count=moe_attnres_depth_block_count,
                 moe_attnres_depth_router_dim=moe_attnres_depth_router_dim,
                 moe_attnres_depth_summary_mode=moe_attnres_depth_summary_mode,
