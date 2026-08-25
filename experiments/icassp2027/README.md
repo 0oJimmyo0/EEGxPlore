@@ -51,21 +51,38 @@ trainability mask. The optimizer audit requires specialist output updates on
 step one, finite router gradients on step two, unchanged pretrained tensors,
 Static batch invariance, and Routed sample dependence.
 
-After these gates pass, run the five short pilots in this order: SEED-V Static,
-SEED-V Routed, ISRUC Upper-4, PhysioNet-MI Frozen, and FACED Frozen. Do not
-launch the 28-job matrix until all pilot summaries contain matching manifest
-and pair-contract hashes.
+After these gates pass, run the matched SEED-V health diagnostic first. It
+compares Frozen, Upper-4, Full, Static, and Routed under the same 20-epoch
+training policy. Do not launch the four-dataset matrix until train and
+validation behavior shows that the adaptation is learning rather than
+collapsing to a majority-class predictor.
 
 The canonical pilot launcher is parameterized but keeps all causal settings
 shared:
 
 ```bash
-bash experiments/icassp2027/configs/run_pilot.sh SEED-V static
-bash experiments/icassp2027/configs/run_pilot.sh SEED-V routed
-bash experiments/icassp2027/configs/run_pilot.sh ISRUC upper4
-bash experiments/icassp2027/configs/run_pilot.sh PhysioNet-MI frozen
-bash experiments/icassp2027/configs/run_pilot.sh FACED frozen
+EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
+  bash experiments/icassp2027/configs/run_pilot.sh SEED-V frozen
+EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
+  bash experiments/icassp2027/configs/run_pilot.sh SEED-V upper4
+EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
+  bash experiments/icassp2027/configs/run_pilot.sh SEED-V full
+EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
+  bash experiments/icassp2027/configs/run_pilot.sh SEED-V static
+EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
+  bash experiments/icassp2027/configs/run_pilot.sh SEED-V routed
 ```
+
+The default health policy uses AdamW, `lr=1e-4`, component multipliers
+backbone/router/expert/classifier = `0.5/2.0/1.5/3.5`, no warmup, label
+smoothing `0.1`, no class weighting, and zero data-loader workers. Each run
+writes `selected_checkpoint_diagnostics.json` containing train/validation/test
+metrics, classwise recall, prediction histograms, and SEED-V subject metrics.
+
+Once the health gate passes, reuse the same launcher policy on SEED-V, FACED,
+ISRUC, and PhysioNet-MI, followed by the planned multi-seed confirmation
+runs. The `full` baseline is supported by the launcher but is not part of the
+final Static-versus-Routed paper comparison unless needed as a diagnostic.
 
 For the ACCRE GPU queue, use the same launcher through the checked-in Slurm
 wrapper after committing the experiment:

@@ -1406,6 +1406,46 @@ class Trainer(object):
         print(f"[summary] wrote {json_path}", flush=True)
         print(f"[summary] appended {csv_path}", flush=True)
 
+    def _write_selected_checkpoint_diagnostics(
+        self,
+        best_epoch: int,
+        eval_source: str,
+        model_path: str,
+    ) -> None:
+        """Persist split and (when available) subject-level metrics for the selected model.
+
+        The ordinary run summary reports validation metrics used for selection and the
+        test metrics.  This diagnostic is intentionally separate so it can also expose
+        train-set health, prediction histograms, classwise recall, and held-out
+        SEED-V subject breakdowns without changing the paper-facing summary schema.
+        The caller must have loaded the selected checkpoint into ``self.model``.
+        """
+        if not bool(getattr(self.params, 'selected_checkpoint_diagnostics', False)):
+            return
+
+        md = self._model_dir()
+        os.makedirs(md, exist_ok=True)
+        split_metrics: Dict[str, Any] = {}
+        for split in ('train', 'val', 'test'):
+            if split not in self.data_loader:
+                continue
+            evaluator = Evaluator(self.params, self.data_loader[split])
+            split_metrics[split] = evaluator.get_detailed_metrics_for_multiclass(self.model)
+
+        payload = {
+            'dataset': str(getattr(self.params, 'downstream_dataset', 'unknown')),
+            'selected_checkpoint': {
+                'best_epoch': int(best_epoch),
+                'eval_source': str(eval_source),
+                'model_path': str(model_path),
+            },
+            'splits': _to_jsonable(split_metrics),
+        }
+        path = os.path.join(md, 'selected_checkpoint_diagnostics.json')
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f, indent=2, ensure_ascii=True, sort_keys=True)
+        print(f"[diagnostics] wrote {path}", flush=True)
+
     def _write_adaptation_diagnosis(
         self,
         epoch_history: List[Dict[str, Any]],
@@ -1946,6 +1986,12 @@ class Trainer(object):
                     else:
                         self.model.load_state_dict(raw_best_model_states)
                         model_path = raw_model_path
+
+                    self._write_selected_checkpoint_diagnostics(
+                        best_epoch=primary_epoch,
+                        eval_source=primary_source,
+                        model_path=model_path,
+                    )
 
                     ck_tag = os.path.basename(model_path).replace(".pth", "")
                     epoch_tag = f"best_ep{primary_epoch}"

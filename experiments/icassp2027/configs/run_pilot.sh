@@ -8,14 +8,14 @@ DRY_RUN=0
 if [[ $# -eq 3 && "$3" == "--dry-run" ]]; then
   DRY_RUN=1
 elif [[ $# -ne 2 ]]; then
-  echo "Usage: bash $0 <SEED-V|FACED|ISRUC|PhysioNet-MI> <static|routed|upper4|frozen> [--dry-run]" >&2
+  echo "Usage: bash $0 <SEED-V|FACED|ISRUC|PhysioNet-MI> <static|routed|upper4|frozen|full> [--dry-run]" >&2
   exit 2
 fi
 
 DATASET="$1"
 METHOD="$2"
 case "$METHOD" in
-  static|routed|upper4|frozen) ;;
+  static|routed|upper4|frozen|full) ;;
   *) echo "Unsupported method: $METHOD" >&2; exit 2 ;;
 esac
 
@@ -95,6 +95,10 @@ CMD=(
   --model_dir "$MODEL_DIR"
   --input_scale_divisor "$INPUT_SCALE_DIVISOR"
   --num_workers "$NUM_WORKERS"
+  --warmup_epochs "$WARMUP_EPOCHS"
+  --warmup_start_factor "$WARMUP_START_FACTOR"
+  --label_smoothing "$LABEL_SMOOTHING"
+  --class_weight_mode "$CLASS_WEIGHT_MODE"
   --use_pretrained_weights
   --foundation_dir "$FOUNDATION_DIR"
   --experiment_profile icassp2027
@@ -104,6 +108,27 @@ CMD=(
   --trainability_mode "$TRAINABILITY_MODE"
   --no-tqdm
 )
+
+if [[ "$USE_COMPONENT_LR" == "1" || "$USE_COMPONENT_LR" == "true" ]]; then
+  CMD+=(
+    --use_component_lr
+    --lr_backbone_mult "$LR_BACKBONE_MULT"
+    --lr_router_mult "$LR_ROUTER_MULT"
+    --lr_expert_mult "$LR_EXPERT_MULT"
+    --lr_classifier_mult "$LR_CLASSIFIER_MULT"
+    --lr_other_mult "$LR_OTHER_MULT"
+  )
+elif [[ "$USE_COMPONENT_LR" != "0" && "$USE_COMPONENT_LR" != "false" ]]; then
+  echo "USE_COMPONENT_LR must be 0/1 or false/true, got: $USE_COMPONENT_LR" >&2
+  exit 2
+fi
+
+if [[ "$SELECTED_CHECKPOINT_DIAGNOSTICS" == "1" || "$SELECTED_CHECKPOINT_DIAGNOSTICS" == "true" ]]; then
+  CMD+=(--selected_checkpoint_diagnostics)
+elif [[ "$SELECTED_CHECKPOINT_DIAGNOSTICS" != "0" && "$SELECTED_CHECKPOINT_DIAGNOSTICS" != "false" ]]; then
+  echo "SELECTED_CHECKPOINT_DIAGNOSTICS must be 0/1 or false/true, got: $SELECTED_CHECKPOINT_DIAGNOSTICS" >&2
+  exit 2
+fi
 
 if [[ "$METHOD" == "frozen" ]]; then
   CMD+=(--frozen)
@@ -127,6 +152,7 @@ if [[ "$METHOD" == "static" || "$METHOD" == "routed" ]]; then
     --moe_shared_output_scale 1.0
     --moe_expert_output_scale 1.0
     --moe_router_dispatch_mode soft
+    --moe_attnres_depth_context_mode compact_shared
     --moe_specialist_branch_mode both
     --moe_router_compact_feature_mode none
     --moe_load_balance 0

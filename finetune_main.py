@@ -130,6 +130,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         default=False,
         help='Backbone/head dual-LR mode used by prior FACED runs.',
     )
+    parser.add_argument(
+        '--selected_checkpoint_diagnostics',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Evaluate train/val/test and SEED-V held-out subjects at the selected checkpoint.',
+    )
     parser.add_argument('--frozen', action='store_true')
     parser.add_argument(
         '--trainability_mode',
@@ -450,7 +456,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--lr_backbone_mult', type=float, default=0.5)
     parser.add_argument('--lr_router_mult', type=float, default=2.0)
     parser.add_argument('--lr_expert_mult', type=float, default=1.5)
-    parser.add_argument('--lr_classifier_mult', type=float, default=1.0)
+    parser.add_argument('--lr_classifier_mult', type=float, default=3.5)
     parser.add_argument('--lr_other_mult', type=float, default=1.0)
     parser.add_argument(
         '--selection_metric',
@@ -718,7 +724,10 @@ def build_dataset(args: argparse.Namespace):
         return faced_dataset.LoadDataset(args).get_data_loader()
 
     if args.downstream_dataset == 'SEED-V':
-        args.return_sample_keys = bool(getattr(args, 'routing_export_dir', None))
+        args.return_sample_keys = bool(
+            getattr(args, 'routing_export_dir', None)
+            or getattr(args, 'selected_checkpoint_diagnostics', False)
+        )
         if args.moe_domain_bias:
             print('[SEED-V] warning: --moe_domain_bias enabled without FACED metadata; zero/unknown ids will be used.')
         if args.return_sample_keys:
