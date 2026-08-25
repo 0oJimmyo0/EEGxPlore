@@ -136,6 +136,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         default=False,
         help='Evaluate train/val/test and SEED-V held-out subjects at the selected checkpoint.',
     )
+    parser.add_argument(
+        '--icassp_routing_diagnostic',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='Opt in to explicitly labeled ICASSP routing diagnostics such as expert-init-noise counterfactuals.',
+    )
     parser.add_argument('--frozen', action='store_true')
     parser.add_argument(
         '--trainability_mode',
@@ -697,11 +703,15 @@ def validate_args(args: argparse.Namespace) -> None:
                 'moe_router_soft_warmup_epochs': args.moe_router_soft_warmup_epochs,
                 'moe_uniform_dispatch_warmup_epochs': args.moe_uniform_dispatch_warmup_epochs,
                 'moe_shared_blend_warmup_epochs': args.moe_shared_blend_warmup_epochs,
-                'moe_expert_init_noise_std': args.moe_expert_init_noise_std,
             }
             bad = {name: value for name, value in forbidden_nonzero.items() if float(value) != 0.0}
             if bad:
                 raise ValueError(f'[icassp2027] forbidden router extras are nonzero: {bad}')
+            if args.moe_expert_init_noise_std != 0.0 and not args.icassp_routing_diagnostic:
+                raise ValueError(
+                    '[icassp2027] nonzero expert-init noise is diagnostic-only; '
+                    'pass --icassp_routing_diagnostic and label the run accordingly.'
+                )
             if args.moe_domain_bias:
                 raise ValueError('[icassp2027] domain metadata routing is forbidden.')
             if args.moe_use_psd_router_features or args.moe_use_attnres_depth_router_features:

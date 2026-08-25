@@ -19,6 +19,17 @@ case "$METHOD" in
   *) echo "Unsupported method: $METHOD" >&2; exit 2 ;;
 esac
 
+if [[ ! "$MOE_EXPERT_INIT_NOISE_STD" =~ ^[0-9]+([.][0-9]*)?([eE][+-]?[0-9]+)?$ ]]; then
+  echo "MOE_EXPERT_INIT_NOISE_STD must be a nonnegative numeric value, got: $MOE_EXPERT_INIT_NOISE_STD" >&2
+  exit 2
+fi
+if [[ "$ICASSP_ROUTING_DIAGNOSTIC" == "0" || "$ICASSP_ROUTING_DIAGNOSTIC" == "false" ]]; then
+  if ! awk -v value="$MOE_EXPERT_INIT_NOISE_STD" 'BEGIN { exit !((value + 0) == 0) }'; then
+    echo "Nonzero MOE_EXPERT_INIT_NOISE_STD requires ICASSP_ROUTING_DIAGNOSTIC=1/true" >&2
+    exit 2
+  fi
+fi
+
 case "$DATASET" in
   SEED-V)
     DATASET_DIR="$SEEDV_DATA_DIR"
@@ -130,6 +141,13 @@ elif [[ "$SELECTED_CHECKPOINT_DIAGNOSTICS" != "0" && "$SELECTED_CHECKPOINT_DIAGN
   exit 2
 fi
 
+if [[ "$ICASSP_ROUTING_DIAGNOSTIC" == "1" || "$ICASSP_ROUTING_DIAGNOSTIC" == "true" ]]; then
+  CMD+=(--icassp_routing_diagnostic)
+elif [[ "$ICASSP_ROUTING_DIAGNOSTIC" != "0" && "$ICASSP_ROUTING_DIAGNOSTIC" != "false" ]]; then
+  echo "ICASSP_ROUTING_DIAGNOSTIC must be 0/1 or false/true, got: $ICASSP_ROUTING_DIAGNOSTIC" >&2
+  exit 2
+fi
+
 if [[ "$METHOD" == "frozen" ]]; then
   CMD+=(--frozen)
 fi
@@ -164,7 +182,7 @@ if [[ "$METHOD" == "static" || "$METHOD" == "routed" ]]; then
     --moe_router_soft_warmup_epochs 0
     --moe_uniform_dispatch_warmup_epochs 0
     --moe_shared_blend_warmup_epochs 0
-    --moe_expert_init_noise_std 0
+    --moe_expert_init_noise_std "$MOE_EXPERT_INIT_NOISE_STD"
   )
   if [[ "$DATASET" == "SEED-V" ]]; then
     CMD+=(
@@ -174,7 +192,7 @@ if [[ "$METHOD" == "static" || "$METHOD" == "routed" ]]; then
     )
   fi
 elif [[ "$METHOD" == "upper4" ]]; then
-  CMD+=(--trainability_mode upper4)
+  : # The common command already carries --trainability_mode upper4.
 fi
 
 if [[ "$DATASET" == "FACED" ]]; then

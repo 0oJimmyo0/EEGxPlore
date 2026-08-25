@@ -46,6 +46,10 @@ paper and does not alter the legacy `typed_capacity_domain` implementation.
 - Fix SEED-V external-manifest shape validation so expected shape is derived
   from the actual serialized examples rather than an unrelated legacy
   manifest.
+- Keep expert-init noise at zero for the primary comparison. A nonzero value
+  is available only through the explicitly labeled `icassp_routing_diagnostic`
+  opt-in for initialization/collapse diagnostics; it is not a primary paper
+  configuration.
 
 ## Already resolved and retained
 

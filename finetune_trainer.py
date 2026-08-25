@@ -706,7 +706,6 @@ class Trainer(object):
         # group. This avoids under-training the added adaptation modules.
         is_selective_adapter = (
             name.startswith('backbone.adapter.')
-            or name.startswith('backbone.encoder.')
             or '.adapter.' in name
         )
         router_keys = (

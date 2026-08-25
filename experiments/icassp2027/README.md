@@ -44,6 +44,7 @@ python experiments/icassp2027/scripts/test_typed_conditional.py
 python experiments/icassp2027/scripts/test_full_static_routed_contract.py
 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
   python experiments/icassp2027/scripts/test_two_step_optimizer_contract.py
+python experiments/icassp2027/scripts/test_icassp_wiring_contract.py
 ```
 
 The full wrapper test covers the SEED-V classifier and the production
