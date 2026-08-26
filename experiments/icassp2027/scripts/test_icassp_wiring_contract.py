@@ -61,6 +61,22 @@ def _args(*extra: str) -> argparse.Namespace:
     return _parser().parse_args(base + list(extra))
 
 
+def _depth_args(*extra: str) -> argparse.Namespace:
+    base = [
+        "--datasets_dir", "/data/neurogroup/mingyangjiang/data/SEED-V_processed_lmdb",
+        "--num_of_classes", "5",
+        "--model_dir", "/tmp/icassp_depth_wiring_contract",
+        "--downstream_dataset", "SEED-V",
+        "--experiment_profile", "icassp2027",
+        "--icassp_split_manifest", str(MANIFEST),
+        "--trainability_mode", "depth_aggregation",
+        "--attnres_variant", "pre_attn",
+        "--attnres_start_layer", "8",
+        "--lr_depth_mult", "1.0",
+    ]
+    return _parser().parse_args(base + list(extra))
+
+
 def main() -> None:
     if not MANIFEST.is_file():
         raise FileNotFoundError(MANIFEST)
@@ -86,6 +102,17 @@ def main() -> None:
     assert Trainer._component_name_for_param("backbone.encoder.layers.8.moe_ffn.spatial_router.weight") == "router"
     assert Trainer._component_name_for_param("backbone.encoder.layers.8.moe_ffn.spatial_specialists.0.linear1.weight") == "experts"
     assert Trainer._component_name_for_param("backbone.adapter.0.weight") == "other"
+    assert Trainer._component_name_for_param("backbone.encoder.layers.8.pre_attn_res.query") == "depth"
+
+    depth = _depth_args()
+    validate_args(depth)
+    invalid_depth = _depth_args("--attnres_start_layer", "7")
+    try:
+        validate_args(invalid_depth)
+    except ValueError as exc:
+        assert "start_layer=8" in str(exc)
+    else:
+        raise AssertionError("invalid DepthAgg start layer was accepted")
 
     print("ICASSP wiring contract: PASS")
 

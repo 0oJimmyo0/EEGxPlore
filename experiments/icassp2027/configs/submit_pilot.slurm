@@ -1,6 +1,6 @@
 #!/bin/bash
 # One ICASSP pilot on one A6000. Submit from the EEGxPlore repository root:
-#   sbatch --export=ALL,DATASET=SEED-V,METHOD=static experiments/icassp2027/configs/submit_pilot.slurm
+#   sbatch --export=ALL,DATASET=SEED-V,METHOD=depth_aggregation experiments/icassp2027/configs/submit_pilot.slurm
 #
 # The experiment itself remains in run_pilot.sh so local dry-runs and Slurm
 # runs use exactly the same command and causal settings.

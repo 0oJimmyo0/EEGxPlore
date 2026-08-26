@@ -1,0 +1,6 @@
+paper,artifact_or_concept,icaspp_equivalent,reuse_status,verification_note
+TMLR,native channel/patch residual adapter,cross-depth FullAttnRes aggregation,pending_artifact_audit,manuscript-level operator and estimand differ; inspect TMLR registries before final runs
+TMLR,axis-agnostic matched residual control,none,not reused,excluded from ICASSP scope
+TMLR,numerical results,none,forbidden,regenerate all ICASSP cells
+TMLR,figures and prose,none,forbidden,write ICASSP manuscript from blank template
+ICASSP routing archive,typed conditional specialists,none,archived,not part of DepthAgg evidence

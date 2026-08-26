@@ -147,7 +147,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         '--trainability_mode',
         type=str,
         default='auto',
-        choices=['auto', 'frozen', 'full', 'upper4', 'typed_conditional'],
+        choices=['auto', 'frozen', 'full', 'upper4', 'depth_aggregation', 'typed_conditional'],
         help='Centralized backbone trainability contract; auto preserves legacy behavior outside ICASSP.',
     )
     parser.add_argument('--use_pretrained_weights', action='store_true')
@@ -464,6 +464,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--lr_expert_mult', type=float, default=1.5)
     parser.add_argument('--lr_classifier_mult', type=float, default=3.5)
     parser.add_argument('--lr_other_mult', type=float, default=1.0)
+    parser.add_argument('--lr_depth_mult', type=float, default=1.0)
     parser.add_argument(
         '--selection_metric',
         type=str,
@@ -606,7 +607,14 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.effective_num_beta < 0.0 or args.effective_num_beta >= 1.0:
         raise ValueError('--effective_num_beta must satisfy 0 <= effective_num_beta < 1.')
 
-    for key in ['lr_backbone_mult', 'lr_router_mult', 'lr_expert_mult', 'lr_classifier_mult', 'lr_other_mult']:
+    for key in [
+        'lr_backbone_mult',
+        'lr_router_mult',
+        'lr_expert_mult',
+        'lr_classifier_mult',
+        'lr_other_mult',
+        'lr_depth_mult',
+    ]:
         if getattr(args, key) <= 0:
             raise ValueError(f'--{key} must be > 0.')
 
@@ -647,8 +655,6 @@ def validate_args(args: argparse.Namespace) -> None:
             )
         if args.selection_metric != 'kappa':
             raise ValueError('[icassp2027] checkpoint selection must use validation kappa.')
-        if args.attnres_variant != 'none':
-            raise ValueError('[icassp2027] AttnRes is excluded from the entire ICASSP profile.')
         if args.routing_export_dir and args.downstream_dataset != 'SEED-V':
             raise ValueError('[icassp2027] routing export is only defined for SEED-V.')
         if args.frozen and args.trainability_mode != 'frozen':
@@ -656,6 +662,35 @@ def validate_args(args: argparse.Namespace) -> None:
                 '[icassp2027] --frozen conflicts with trainability_mode; '
                 'use --trainability_mode frozen explicitly for a frozen backbone.'
             )
+        effective_mode = args.trainability_mode
+        if effective_mode == 'auto':
+            if args.moe and args.moe_route_mode == 'typed_conditional':
+                effective_mode = 'typed_conditional'
+            elif args.frozen:
+                effective_mode = 'frozen'
+            else:
+                effective_mode = 'full'
+
+        if effective_mode == 'depth_aggregation':
+            if args.frozen:
+                raise ValueError('[icassp2027] depth_aggregation cannot be combined with --frozen.')
+            if args.moe:
+                raise ValueError('[icassp2027] depth_aggregation requires --moe to be disabled.')
+            if args.attnres_variant != 'pre_attn':
+                raise ValueError('[icassp2027] depth_aggregation requires attnres_variant=pre_attn.')
+            if args.attnres_start_layer != 8:
+                raise ValueError('[icassp2027] depth_aggregation requires attnres_start_layer=8.')
+            if args.attnres_gated:
+                raise ValueError('[icassp2027] depth_aggregation requires ungated AttnRes.')
+        else:
+            if effective_mode not in {'frozen', 'upper4', 'full', 'typed_conditional'}:
+                raise ValueError(f'[icassp2027] unsupported trainability mode: {effective_mode}')
+            if args.attnres_variant != 'none':
+                raise ValueError(
+                    '[icassp2027] only depth_aggregation may enable AttnRes; '
+                    'standard baselines require attnres_variant=none.'
+                )
+
         if args.moe:
             fixed_router_config = {
                 'moe_num_experts': args.moe_num_experts,
@@ -722,6 +757,8 @@ def validate_args(args: argparse.Namespace) -> None:
                 raise ValueError('[icassp2027] both typed specialist banks are required.')
             if args.trainability_mode not in {'auto', 'typed_conditional'}:
                 raise ValueError('[icassp2027] Static/Routed must use trainability_mode=typed_conditional or auto.')
+        elif effective_mode == 'typed_conditional':
+            raise ValueError('[icassp2027] typed_conditional requires --moe.')
 
 
 def build_dataset(args: argparse.Namespace):

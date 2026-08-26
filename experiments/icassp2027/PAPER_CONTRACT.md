@@ -1,4 +1,7 @@
-# ICASSP 2027 Routing Study Contract
+# Historical ICASSP 2027 Routing Study Contract
+
+> This is an archived development contract. It is not the active ICASSP paper
+> scope. See `DEPTH_AGGREGATION_CONTRACT.md` for the active profile.
 
 Status: Phase 0 frozen for implementation; SEED-V manifest revised to explicit 10/3/3 allocation
 Branch: `icassp2027-routing`

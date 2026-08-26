@@ -181,7 +181,28 @@ def _git_provenance() -> Dict[str, Any]:
         return {'git_commit': '', 'git_dirty': None, 'git_error': str(exc)}
 
 
-TRAINABILITY_MODES = {'frozen', 'full', 'upper4', 'typed_conditional'}
+TRAINABILITY_MODES = {'frozen', 'full', 'upper4', 'depth_aggregation', 'typed_conditional'}
+
+
+def is_depth_parameter(name: str) -> bool:
+    """Return whether a parameter belongs to an AttnRes depth module."""
+    return any(
+        token in name
+        for token in (
+            '.pre_attn_res.',
+            '.pre_mlp_res.',
+            '.pre_attn_gate',
+            '.pre_mlp_gate',
+        )
+    )
+
+
+def is_depth_aggregation_parameter(name: str) -> bool:
+    """Return whether a parameter is one of the four ICASSP trainable depth modules."""
+    return bool(re.fullmatch(
+        r'backbone\.encoder\.layers\.(8|9|10|11)\.pre_attn_res\.(norm\.weight|query)',
+        name,
+    ))
 
 
 def resolve_trainability_mode(params) -> str:
@@ -227,6 +248,22 @@ def configure_trainability(model: torch.nn.Module, params) -> Tuple[str, List[Tu
     mode = resolve_trainability_mode(params)
     frozen_flag = bool(getattr(params, 'frozen', False))
     named_trainable: List[Tuple[str, torch.nn.Parameter]] = []
+
+    if mode == 'depth_aggregation':
+        if frozen_flag:
+            raise ValueError('depth_aggregation cannot be combined with frozen=True.')
+        for parameter in model.parameters():
+            parameter.requires_grad = False
+        for name, parameter in model.named_parameters():
+            parameter.requires_grad = (
+                name.startswith('classifier')
+                or '.classifier.' in name
+                or is_depth_aggregation_parameter(name)
+            )
+            if parameter.requires_grad:
+                named_trainable.append((name, parameter))
+        return mode, named_trainable
+
     for name, parameter in model.named_parameters():
         if 'backbone' in name:
             if mode == 'frozen' or frozen_flag:
@@ -354,6 +391,7 @@ class Trainer(object):
             'experts': [],
             'classifier': [],
             'other': [],
+            'depth': [],
         }
         for name, param in self._named_trainable_params:
             grouped[self._component_name_for_param(name)].append(param)
@@ -373,7 +411,11 @@ class Trainer(object):
             'total': int(sum(parameter.numel() for _, parameter in self._named_trainable_params)),
             'original_backbone': int(sum(
                 parameter.numel() for name, parameter in self._named_trainable_params
-                if 'backbone' in name and '.moe_ffn.' not in name
+                if 'backbone' in name and '.moe_ffn.' not in name and not is_depth_parameter(name)
+            )),
+            'depth': int(sum(
+                parameter.numel() for name, parameter in self._named_trainable_params
+                if is_depth_parameter(name)
             )),
             'shared_ffn': int(sum(
                 parameter.numel() for name, parameter in self._named_trainable_params
@@ -697,6 +739,8 @@ class Trainer(object):
 
     @staticmethod
     def _component_name_for_param(name: str) -> str:
+        if is_depth_parameter(name):
+            return 'depth'
         if name.startswith('classifier') or '.classifier.' in name:
             return 'classifier'
         if 'backbone' not in name:
@@ -757,6 +801,7 @@ class Trainer(object):
         _add('experts', grouped['experts'], getattr(self.params, 'lr_expert_mult', 1.0))
         _add('classifier', grouped['classifier'], getattr(self.params, 'lr_classifier_mult', 1.0))
         _add('other', grouped['other'], getattr(self.params, 'lr_other_mult', 1.0))
+        _add('depth', grouped['depth'], getattr(self.params, 'lr_depth_mult', 1.0))
 
         if not groups:
             raise RuntimeError('No trainable parameters found for component-wise optimizer.')
@@ -851,6 +896,7 @@ class Trainer(object):
             'experts': float(getattr(self.params, 'lr_expert_mult', 1.0)),
             'classifier': float(getattr(self.params, 'lr_classifier_mult', 1.0)),
             'other': float(getattr(self.params, 'lr_other_mult', 1.0)),
+            'depth': float(getattr(self.params, 'lr_depth_mult', 1.0)),
         }
         base_lr = float(self.params.lr)
 
@@ -999,6 +1045,7 @@ class Trainer(object):
             'experts': 0.0,
             'classifier': 0.0,
             'other': 0.0,
+            'depth': 0.0,
             'depth_summary_path': 0.0,
             'depth_router_proj_spatial': 0.0,
             'depth_router_proj_spectral': 0.0,
@@ -1376,6 +1423,7 @@ class Trainer(object):
             'lr_expert_mult': getattr(self.params, 'lr_expert_mult', ''),
             'lr_classifier_mult': getattr(self.params, 'lr_classifier_mult', ''),
             'lr_other_mult': getattr(self.params, 'lr_other_mult', ''),
+            'lr_depth_mult': getattr(self.params, 'lr_depth_mult', ''),
             'trainable_parameter_count': sum(p.numel() for _, p in self._named_trainable_params),
             'trainability_mode': self.trainability_mode,
             'trainable_original_backbone': self._trainable_parameter_counts['original_backbone'],
@@ -1383,6 +1431,7 @@ class Trainer(object):
             'trainable_specialists': self._trainable_parameter_counts['specialists'],
             'trainable_router': self._trainable_parameter_counts['router'],
             'trainable_router_constant': self._trainable_parameter_counts['router_constant'],
+            'trainable_depth': self._trainable_parameter_counts['depth'],
             'manifest_path': manifest_path,
             'manifest_sha256': manifest_sha256,
             'config_sha256': config_sha256,

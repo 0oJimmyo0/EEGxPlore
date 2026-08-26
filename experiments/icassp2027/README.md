@@ -1,7 +1,11 @@
-# ICASSP 2027 routing experiment package
+# ICASSP 2027 experiment package
 
 This directory contains the isolated contract, manifests, audits, exports,
-configs, and result registry for the CBraMod subject-disjoint routing study.
+configs, and result registries for the CBraMod subject-disjoint ICASSP studies.
+
+The active paper profile is the selective cross-depth aggregation study defined
+in `DEPTH_AGGREGATION_CONTRACT.md`. The earlier Static/Routed study is retained
+as historical development work; see `ROUTING_ARCHIVE.md`.
 
 Phase 0 order:
 
@@ -45,62 +49,55 @@ python experiments/icassp2027/scripts/test_full_static_routed_contract.py
 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
   python experiments/icassp2027/scripts/test_two_step_optimizer_contract.py
 python experiments/icassp2027/scripts/test_icassp_wiring_contract.py
+python experiments/icassp2027/scripts/test_depth_aggregation_contract.py
 ```
 
-The full wrapper test covers the SEED-V classifier and the production
-trainability mask. The optimizer audit requires specialist output updates on
-step one, finite router gradients on step two, unchanged pretrained tensors,
-Static batch invariance, and Routed sample dependence.
+The existing routing tests remain regression tests for the archived routing
+implementation. The depth contract covers strict foundation loading, the
+DepthAgg trainability mask, uniform initialization, gradient connectivity,
+frozen foundation tensors, layer scope, and optimizer groups.
 
-After these gates pass, run the matched SEED-V health diagnostic first. It
-compares Frozen, Upper-4, Full, Static, and Routed under the same 20-epoch
-training policy. Do not launch the four-dataset matrix until train and
-validation behavior shows that the adaptation is learning rather than
-collapsing to a majority-class predictor.
+After these gates pass, run the matched SEED-V depth health diagnostic first.
+It compares Frozen, DepthAgg, Upper-4, and Full under the same predefined
+20-epoch training policy. Do not launch the four-dataset matrix until train
+and validation behavior is finite and non-degenerate.
 
 The canonical pilot launcher is parameterized but keeps all causal settings
 shared:
 
 ```bash
-EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
+EPOCHS=20 MODEL_ROOT=output/icassp2027_depth_health20 \
   bash experiments/icassp2027/configs/run_pilot.sh SEED-V frozen
-EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
+EPOCHS=20 MODEL_ROOT=output/icassp2027_depth_health20 \
+  bash experiments/icassp2027/configs/run_pilot.sh SEED-V depth_aggregation
+EPOCHS=20 MODEL_ROOT=output/icassp2027_depth_health20 \
   bash experiments/icassp2027/configs/run_pilot.sh SEED-V upper4
-EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
+EPOCHS=20 MODEL_ROOT=output/icassp2027_depth_health20 \
   bash experiments/icassp2027/configs/run_pilot.sh SEED-V full
-EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
-  bash experiments/icassp2027/configs/run_pilot.sh SEED-V static
-EPOCHS=20 MODEL_ROOT=output/icassp2027_health20 \
-  bash experiments/icassp2027/configs/run_pilot.sh SEED-V routed
 ```
 
 The default health policy uses AdamW, `lr=1e-4`, component multipliers
-backbone/router/expert/classifier = `0.5/2.0/1.5/3.5`, no warmup, label
-smoothing `0.1`, no class weighting, and zero data-loader workers. Each run
-writes `selected_checkpoint_diagnostics.json` containing train/validation/test
+backbone/depth/classifier = `0.5/1.0/3.5`, no warmup, label smoothing `0.1`,
+no class weighting, and zero data-loader workers. Each run writes
+`selected_checkpoint_diagnostics.json` containing train/validation/test
 metrics, classwise recall, prediction histograms, and SEED-V subject metrics.
 
-Once the health gate passes, reuse the same launcher policy on SEED-V, FACED,
-ISRUC, and PhysioNet-MI, followed by the planned multi-seed confirmation
-runs. The `full` baseline is supported by the launcher but is not part of the
-final Static-versus-Routed paper comparison unless needed as a diagnostic.
+Once the health gate passes, run the same four-method launcher policy on
+SEED-V, FACED, ISRUC, and PhysioNet-MI under a fresh
+`output/icassp2027_depth/` root, followed by the planned multi-seed
+confirmation runs. The archived Static/Routed runs are not part of this
+matrix.
 
 For the ACCRE GPU queue, use the same launcher through the checked-in Slurm
 wrapper after committing the experiment:
 
 ```bash
-sbatch --export=ALL,DATASET=SEED-V,METHOD=static experiments/icassp2027/configs/submit_pilot.slurm
-sbatch --export=ALL,DATASET=SEED-V,METHOD=routed experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,DATASET=SEED-V,METHOD=depth_aggregation experiments/icassp2027/configs/submit_pilot.slurm
 sbatch --export=ALL,DATASET=ISRUC,METHOD=upper4 experiments/icassp2027/configs/submit_pilot.slurm
 sbatch --export=ALL,DATASET=PhysioNet-MI,METHOD=frozen experiments/icassp2027/configs/submit_pilot.slurm
 sbatch --export=ALL,DATASET=FACED,METHOD=frozen experiments/icassp2027/configs/submit_pilot.slurm
 ```
 
 Override dataset roots, `MODEL_ROOT`, `CUDA_ID`, or resource settings through
-the environment. After the two SEED-V runs, validate their summary pair with:
-
-```bash
-python experiments/icassp2027/scripts/validate_static_routed_pair.py \
-  --static_summary <STATIC_RUN_SUMMARY.json> \
-  --routed_summary <ROUTED_RUN_SUMMARY.json>
-```
+the environment. The old Static/Routed summary validator remains available
+only for the archived routing study.

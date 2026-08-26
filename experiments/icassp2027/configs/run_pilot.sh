@@ -8,14 +8,14 @@ DRY_RUN=0
 if [[ $# -eq 3 && "$3" == "--dry-run" ]]; then
   DRY_RUN=1
 elif [[ $# -ne 2 ]]; then
-  echo "Usage: bash $0 <SEED-V|FACED|ISRUC|PhysioNet-MI> <static|routed|upper4|frozen|full> [--dry-run]" >&2
+  echo "Usage: bash $0 <SEED-V|FACED|ISRUC|PhysioNet-MI> <static|routed|upper4|frozen|full|depth_aggregation> [--dry-run]" >&2
   exit 2
 fi
 
 DATASET="$1"
 METHOD="$2"
 case "$METHOD" in
-  static|routed|upper4|frozen|full) ;;
+  static|routed|upper4|frozen|full|depth_aggregation) ;;
   *) echo "Unsupported method: $METHOD" >&2; exit 2 ;;
 esac
 
@@ -87,6 +87,13 @@ else
   TRAINABILITY_MODE="$METHOD"
 fi
 
+ATTNRES_VARIANT="none"
+ATTNRES_START_LAYER=0
+if [[ "$METHOD" == "depth_aggregation" ]]; then
+  ATTNRES_VARIANT="pre_attn"
+  ATTNRES_START_LAYER=8
+fi
+
 CMD=(
   python "$ICASSP_REPO_DIR/finetune_main.py"
   --seed "$SEED"
@@ -115,7 +122,8 @@ CMD=(
   --experiment_profile icassp2027
   --icassp_split_manifest "$MANIFEST"
   --selection_metric kappa
-  --attnres_variant none
+  --attnres_variant "$ATTNRES_VARIANT"
+  --attnres_start_layer "$ATTNRES_START_LAYER"
   --trainability_mode "$TRAINABILITY_MODE"
   --no-tqdm
 )
@@ -128,6 +136,7 @@ if [[ "$USE_COMPONENT_LR" == "1" || "$USE_COMPONENT_LR" == "true" ]]; then
     --lr_expert_mult "$LR_EXPERT_MULT"
     --lr_classifier_mult "$LR_CLASSIFIER_MULT"
     --lr_other_mult "$LR_OTHER_MULT"
+    --lr_depth_mult "$LR_DEPTH_MULT"
   )
 elif [[ "$USE_COMPONENT_LR" != "0" && "$USE_COMPONENT_LR" != "false" ]]; then
   echo "USE_COMPONENT_LR must be 0/1 or false/true, got: $USE_COMPONENT_LR" >&2
@@ -193,6 +202,8 @@ if [[ "$METHOD" == "static" || "$METHOD" == "routed" ]]; then
   fi
 elif [[ "$METHOD" == "upper4" ]]; then
   : # The common command already carries --trainability_mode upper4.
+elif [[ "$METHOD" == "depth_aggregation" ]]; then
+  : # DepthAgg uses the method-specific AttnRes settings above.
 fi
 
 if [[ "$DATASET" == "FACED" ]]; then

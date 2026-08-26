@@ -566,6 +566,47 @@ def load_foundation_into_backbone(backbone: nn.Module, param, ckpt_state: Dict[s
         k: v for k, v in ckpt_state.items()
         if k in backbone_sd and backbone_sd[k].shape == v.shape
     }
+
+    if (
+        getattr(param, 'experiment_profile', '') == 'icassp2027'
+        and getattr(param, 'trainability_mode', '') == 'depth_aggregation'
+        and not use_moe
+    ):
+        checkpoint_keys = set(ckpt_state.keys())
+        model_keys = set(backbone_sd.keys())
+        unexpected = sorted(checkpoint_keys - model_keys)
+        shape_mismatch = sorted(
+            key for key in checkpoint_keys & model_keys
+            if backbone_sd[key].shape != ckpt_state[key].shape
+        )
+        expected_missing = {
+            key for key in model_keys
+            if '.pre_attn_res.' in key
+        }
+        missing = model_keys - checkpoint_keys
+        if unexpected:
+            raise RuntimeError(
+                '[icassp2027][depth_aggregation] unexpected foundation keys: '
+                f'{unexpected[:8]}'
+            )
+        if shape_mismatch:
+            raise RuntimeError(
+                '[icassp2027][depth_aggregation] foundation shape mismatches: '
+                f'{shape_mismatch[:8]}'
+            )
+        if missing != expected_missing:
+            raise RuntimeError(
+                '[icassp2027][depth_aggregation] unexpected missing-key set: '
+                f'actual={sorted(missing)[:8]} expected={sorted(expected_missing)[:8]}'
+            )
+        original_keys = model_keys - expected_missing
+        if not original_keys.issubset(set(loadable.keys())):
+            missing_original = sorted(original_keys - set(loadable.keys()))
+            raise RuntimeError(
+                '[icassp2027][depth_aggregation] original foundation keys were not fully loaded: '
+                f'{missing_original[:8]}'
+            )
+
     backbone.load_state_dict(loadable, strict=False)
     pretrained = set(loadable.keys())
     if use_moe:

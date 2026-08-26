@@ -30,6 +30,7 @@ LR_ROUTER_MULT="${LR_ROUTER_MULT:-2.0}"
 LR_EXPERT_MULT="${LR_EXPERT_MULT:-1.5}"
 LR_CLASSIFIER_MULT="${LR_CLASSIFIER_MULT:-3.5}"
 LR_OTHER_MULT="${LR_OTHER_MULT:-1.0}"
+LR_DEPTH_MULT="${LR_DEPTH_MULT:-1.0}"
 SELECTED_CHECKPOINT_DIAGNOSTICS="${SELECTED_CHECKPOINT_DIAGNOSTICS:-1}"
 # Nonzero expert-init noise is reserved for explicitly labeled routing
 # diagnostics; the primary ICASSP configuration remains exactly zero.

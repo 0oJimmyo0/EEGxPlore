@@ -1,5 +1,9 @@
 # ICASSP 2027 Implementation Decisions
 
+> Historical routing-profile decisions. The active ICASSP implementation is
+> defined in `DEPTH_AGGREGATION_CONTRACT.md`; routing decisions below remain
+> only to preserve reproducibility of the archived experiments.
+
 This document records which parts of the repository analysis are adopted for
 the ICASSP branch. It is intentionally narrower than the historical rejected
 paper and does not alter the legacy `typed_capacity_domain` implementation.
