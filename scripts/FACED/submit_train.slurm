@@ -1,4 +1,5 @@
 #!/bin/bash
+# LEGACY ARTIFACT-REUSE PATH: use the ICASSP revision launcher for new paper runs.
 #SBATCH --job-name=FACED_TUNE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/FACED/out/faced_hier_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/FACED/err/faced_hier_%j.err
@@ -207,4 +208,3 @@ python /gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/finetune_main.
   "${EMA_ARGS[@]}" \
   "${CLASS_WEIGHT_ARGS[@]}" \
   --no-tqdm 
-

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# LEGACY ARTIFACT-REUSE PATH: use the ICASSP revision launcher for new paper runs.
 # Minimal SEED-V run script aligned to CBraMod benchmark cohort:
 # shared processed_lmdb with LMDB __keys__ train/val/test split.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

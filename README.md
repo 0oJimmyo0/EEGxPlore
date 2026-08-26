@@ -45,6 +45,10 @@ On the `EEGxPlore` branch, the codebase has been extended into a fuller research
 
 The original paper is available on [arXiv](https://arxiv.org/abs/2412.07236) and [OpenReview](https://openreview.net/forum?id=NPNUHgHF2w).
 
+## Current ICASSP Profile
+
+The active ICASSP work on this branch is a focused revision of the rejected CBraMod paper. Use [`experiments/icassp2027/REVISION_CONTRACT.md`](experiments/icassp2027/REVISION_CONTRACT.md) and [`experiments/icassp2027/REVISION_PLAN.md`](experiments/icassp2027/REVISION_PLAN.md) as the source of truth. The LaBraM/TMLR study and the removed DepthAgg/Static/Routed development paths are not active ICASSP experiments; historical code and outputs are retained only for provenance checks.
+
 <div align="center">
 <img src="figure/model.png" style="width:100%;" />
 </div>

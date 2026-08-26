@@ -1,5 +1,6 @@
 #!/bin/bash
 # ACCRE batch GPU training launcher for SEED-V.
+# LEGACY ARTIFACT-REUSE PATH: use the ICASSP revision launcher for new paper runs.
 # Submit with your ACCRE GPU account, for example:
 #   sbatch /path/to/submit_seedv_train.slurm
 # ACCRE reference: https://help.accre.vanderbilt.edu/index.php?title=GPUs_at_ACCRE

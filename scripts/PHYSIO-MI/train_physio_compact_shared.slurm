@@ -1,4 +1,5 @@
 #!/bin/bash
+# LEGACY ARTIFACT-REUSE PATH: use the ICASSP revision launcher for new paper runs.
 #SBATCH --job-name=PHYSIO_MOE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/Phy_MI/out/physio_moe_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/Phy_MI/err/physio_moe_%j.err

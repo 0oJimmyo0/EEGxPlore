@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# LEGACY ARTIFACT-REUSE PATH: use the ICASSP revision launcher for new paper runs.
 # Minimal FACED run script for the refactored FACED+SEED-V branch.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

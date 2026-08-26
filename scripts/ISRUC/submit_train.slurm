@@ -1,4 +1,5 @@
 #!/bin/bash
+# LEGACY ARTIFACT-REUSE PATH: use the ICASSP revision launcher for new paper runs.
 #SBATCH --job-name=ISRUC_TUNE
 #SBATCH --output=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/ISRUC/out/isruc_hier_%j.out
 #SBATCH --error=/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/EEGxPlore/logs/ISRUC/err/isruc_hier_%j.err
