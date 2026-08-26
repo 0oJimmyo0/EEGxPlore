@@ -56,6 +56,12 @@ below layer 8; those are not trainable DepthAgg parameters.
 All resolved optimizer groups and trainable parameter counts must be recorded
 in the run summary.
 
+The JSON provenance record must additionally include the foundation checkpoint
+path and SHA-256, the complete trainable parameter-name list, and an initial
+snapshot of every resolved optimizer group before scheduler updates. The CSV
+summary carries the foundation hash, AttnRes start layer, and JSON-encoded
+versions of the same trainable-name and optimizer-group fields.
+
 ## Evidence firewall
 
 - The routing outputs and routing contract are historical development artifacts.

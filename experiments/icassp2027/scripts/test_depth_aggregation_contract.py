@@ -135,6 +135,15 @@ def test_depth_mask_load_and_optimizer_contract() -> None:
     lr_by_name = {group['name']: group['lr'] for group in optimizer.param_groups}
     assert lr_by_name['depth'] == 1e-4
     assert lr_by_name['classifier'] == 3.5e-4
+    fake_trainer.model = model
+    fake_trainer.optimizer = optimizer
+    fake_trainer._named_trainable_params = named_trainable
+    optimizer_snapshot = fake_trainer._snapshot_optimizer_groups()
+    snapshot_by_name = {group['name']: group for group in optimizer_snapshot}
+    assert snapshot_by_name['depth']['parameter_count'] == 1600
+    assert snapshot_by_name['depth']['lr'] == 1e-4
+    assert snapshot_by_name['classifier']['lr'] == 3.5e-4
+    assert set(snapshot_by_name['depth']['parameter_names']) == depth_names
 
 
 def test_depth_forward_scope_and_gradient_connectivity() -> None:
@@ -142,10 +151,13 @@ def test_depth_forward_scope_and_gradient_connectivity() -> None:
     model = Probe(_depth_backbone()).eval()
     params = _params()
     configure_trainability(model, params)
+    assert not any('.moe_ffn.' in name for name, _ in model.named_parameters())
     x = torch.randn(1, 2, 1, 200)
 
     with torch.inference_mode():
         baseline = model(x)
+        repeated = model(x)
+        assert torch.equal(baseline, repeated)
         with torch.no_grad():
             model.backbone.encoder.layers[7].pre_attn_res.query.fill_(0.7)
         below_start = model(x)
@@ -156,26 +168,29 @@ def test_depth_forward_scope_and_gradient_connectivity() -> None:
     assert torch.equal(baseline, below_start)
     assert not torch.equal(baseline, active_layer)
 
-    model.train()
+    # Use a fresh model so the gradient assertion covers the real zero-query
+    # initialization rather than the 0.7 perturbation used by the scope test.
+    gradient_model = Probe(_depth_backbone()).train()
+    configure_trainability(gradient_model, params)
     optimizer = torch.optim.AdamW(
-        [parameter for _, parameter in model.named_parameters() if parameter.requires_grad],
+        [parameter for _, parameter in gradient_model.named_parameters() if parameter.requires_grad],
         lr=1e-4,
     )
     original = {
         name: parameter.detach().clone()
-        for name, parameter in model.named_parameters()
+        for name, parameter in gradient_model.named_parameters()
         if 'backbone' in name and not is_depth_parameter(name)
     }
-    logits = model(x)
+    logits = gradient_model(x)
     loss = F.cross_entropy(logits, torch.zeros(1, dtype=torch.long))
     loss.backward()
-    query_grad = model.backbone.encoder.layers[8].pre_attn_res.query.grad
-    norm_grad = model.backbone.encoder.layers[8].pre_attn_res.norm.weight.grad
+    query_grad = gradient_model.backbone.encoder.layers[8].pre_attn_res.query.grad
+    norm_grad = gradient_model.backbone.encoder.layers[8].pre_attn_res.norm.weight.grad
     assert query_grad is not None and torch.isfinite(query_grad).all() and query_grad.abs().sum() > 0
     assert norm_grad is not None and torch.isfinite(norm_grad).all()
     optimizer.step()
     for name, before in original.items():
-        assert torch.equal(model.state_dict()[name], before), name
+        assert torch.equal(gradient_model.state_dict()[name], before), name
 
 
 def main() -> None:

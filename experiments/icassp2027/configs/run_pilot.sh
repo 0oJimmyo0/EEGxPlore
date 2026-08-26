@@ -2,6 +2,10 @@
 set -euo pipefail
 
 CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MODEL_ROOT_EXPLICIT=0
+if [[ -n "${MODEL_ROOT+x}" ]]; then
+  MODEL_ROOT_EXPLICIT=1
+fi
 source "$CONFIG_DIR/common.sh"
 
 DRY_RUN=0
@@ -18,6 +22,13 @@ case "$METHOD" in
   static|routed|upper4|frozen|full|depth_aggregation) ;;
   *) echo "Unsupported method: $METHOD" >&2; exit 2 ;;
 esac
+
+# Static/Routed are archived experiments. Keep their implicit output root out
+# of the active DepthAgg evidence hierarchy; an explicit MODEL_ROOT still
+# allows deliberate historical reruns.
+if [[ ("$METHOD" == "static" || "$METHOD" == "routed") && "$MODEL_ROOT_EXPLICIT" == "0" ]]; then
+  MODEL_ROOT="$ICASSP_REPO_DIR/output/icassp2027_pilots"
+fi
 
 if [[ ! "$MOE_EXPERT_INIT_NOISE_STD" =~ ^[0-9]+([.][0-9]*)?([eE][+-]?[0-9]+)?$ ]]; then
   echo "MOE_EXPERT_INIT_NOISE_STD must be a nonnegative numeric value, got: $MOE_EXPERT_INIT_NOISE_STD" >&2
@@ -36,28 +47,28 @@ case "$DATASET" in
     NUM_CLASSES=5
     MANIFEST="$ICASSP_REPO_DIR/experiments/icassp2027/manifests/seedv/split_manifest.json"
     DATASET_TAG="seedv"
-    DEFAULT_EPOCHS=2
+    DEFAULT_EPOCHS=20
     ;;
   FACED)
     DATASET_DIR="$FACED_DATA_DIR"
     NUM_CLASSES=9
     MANIFEST="$ICASSP_REPO_DIR/experiments/icassp2027/manifests/faced/split_manifest.json"
     DATASET_TAG="faced"
-    DEFAULT_EPOCHS=1
+    DEFAULT_EPOCHS=20
     ;;
   ISRUC)
     DATASET_DIR="$ISRUC_DATA_DIR"
     NUM_CLASSES=5
     MANIFEST="$ICASSP_REPO_DIR/experiments/icassp2027/manifests/isruc/split_manifest.json"
     DATASET_TAG="isruc"
-    DEFAULT_EPOCHS=1
+    DEFAULT_EPOCHS=20
     ;;
   PhysioNet-MI)
     DATASET_DIR="$PHYSIONET_DATA_DIR"
     NUM_CLASSES=4
     MANIFEST="$ICASSP_REPO_DIR/experiments/icassp2027/manifests/physionet_mi/split_manifest.json"
     DATASET_TAG="physionet_mi"
-    DEFAULT_EPOCHS=1
+    DEFAULT_EPOCHS=20
     ;;
   *) echo "Unsupported dataset: $DATASET" >&2; exit 2 ;;
 esac

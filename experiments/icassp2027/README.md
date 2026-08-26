@@ -50,6 +50,9 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
   python experiments/icassp2027/scripts/test_two_step_optimizer_contract.py
 python experiments/icassp2027/scripts/test_icassp_wiring_contract.py
 python experiments/icassp2027/scripts/test_depth_aggregation_contract.py
+python experiments/icassp2027/scripts/test_foundation_loading_contract.py \
+  --checkpoint /data/neurogroup/mingyangjiang/data/weights/pretrained_weights.pth
+python experiments/icassp2027/scripts/test_icassp_matrix_contract.py
 ```
 
 The existing routing tests remain regression tests for the archived routing
@@ -66,14 +69,22 @@ The canonical pilot launcher is parameterized but keeps all causal settings
 shared:
 
 ```bash
-EPOCHS=20 MODEL_ROOT=output/icassp2027_depth_health20 \
+EPOCHS=20 MODEL_ROOT=output/icassp2027_depth/health20 \
   bash experiments/icassp2027/configs/run_pilot.sh SEED-V frozen
-EPOCHS=20 MODEL_ROOT=output/icassp2027_depth_health20 \
+EPOCHS=20 MODEL_ROOT=output/icassp2027_depth/health20 \
   bash experiments/icassp2027/configs/run_pilot.sh SEED-V depth_aggregation
-EPOCHS=20 MODEL_ROOT=output/icassp2027_depth_health20 \
+EPOCHS=20 MODEL_ROOT=output/icassp2027_depth/health20 \
   bash experiments/icassp2027/configs/run_pilot.sh SEED-V upper4
-EPOCHS=20 MODEL_ROOT=output/icassp2027_depth_health20 \
+EPOCHS=20 MODEL_ROOT=output/icassp2027_depth/health20 \
   bash experiments/icassp2027/configs/run_pilot.sh SEED-V full
+```
+
+The launcher and Slurm wrapper default to this same 20-epoch health root, but
+the explicit values above should remain in any submitted job record. Audit all
+16 active cells before scheduling with:
+
+```bash
+python experiments/icassp2027/scripts/test_icassp_matrix_contract.py
 ```
 
 The default health policy uses AdamW, `lr=1e-4`, component multipliers
@@ -92,10 +103,10 @@ For the ACCRE GPU queue, use the same launcher through the checked-in Slurm
 wrapper after committing the experiment:
 
 ```bash
-sbatch --export=ALL,DATASET=SEED-V,METHOD=depth_aggregation experiments/icassp2027/configs/submit_pilot.slurm
-sbatch --export=ALL,DATASET=ISRUC,METHOD=upper4 experiments/icassp2027/configs/submit_pilot.slurm
-sbatch --export=ALL,DATASET=PhysioNet-MI,METHOD=frozen experiments/icassp2027/configs/submit_pilot.slurm
-sbatch --export=ALL,DATASET=FACED,METHOD=frozen experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,EXPECTED_COMMIT="$(git rev-parse HEAD)",EPOCHS=20,MODEL_ROOT="$PWD/output/icassp2027_depth/health20",DATASET=SEED-V,METHOD=depth_aggregation experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,EXPECTED_COMMIT="$(git rev-parse HEAD)",EPOCHS=20,MODEL_ROOT="$PWD/output/icassp2027_depth/health20",DATASET=ISRUC,METHOD=upper4 experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,EXPECTED_COMMIT="$(git rev-parse HEAD)",EPOCHS=20,MODEL_ROOT="$PWD/output/icassp2027_depth/health20",DATASET=PhysioNet-MI,METHOD=frozen experiments/icassp2027/configs/submit_pilot.slurm
+sbatch --export=ALL,EXPECTED_COMMIT="$(git rev-parse HEAD)",EPOCHS=20,MODEL_ROOT="$PWD/output/icassp2027_depth/health20",DATASET=FACED,METHOD=frozen experiments/icassp2027/configs/submit_pilot.slurm
 ```
 
 Override dataset roots, `MODEL_ROOT`, `CUDA_ID`, or resource settings through

@@ -505,6 +505,9 @@ class Trainer(object):
                     self.model.parameters(), lr=self.params.lr, momentum=0.9,
                     weight_decay=self.params.weight_decay)
 
+        self._trainable_parameter_names = [name for name, _ in self._named_trainable_params]
+        self._optimizer_groups_initial = self._snapshot_optimizer_groups()
+
         total_steps = max(int(self.params.epochs * self.data_length), 1)
         warmup_epochs = max(int(getattr(self.params, 'warmup_epochs', 0)), 0)
         warmup_steps = min(max(warmup_epochs * self.data_length, 0), max(total_steps - 1, 0))
@@ -949,6 +952,33 @@ class Trainer(object):
             out[name] = float(g.get('lr', 0.0))
         return out
 
+    def _snapshot_optimizer_groups(self) -> List[Dict[str, Any]]:
+        """Capture the resolved optimizer recipe before the scheduler changes LRs."""
+        names_by_parameter_id = {
+            id(parameter): name for name, parameter in self.model.named_parameters()
+        }
+        default_weight_decay = float(self.optimizer.defaults.get('weight_decay', 0.0))
+        snapshot: List[Dict[str, Any]] = []
+        for index, group in enumerate(self.optimizer.param_groups):
+            parameters = list(group.get('params', []))
+            named_parameters = [
+                names_by_parameter_id.get(id(parameter), f'<unnamed_parameter_{index}>')
+                for parameter in parameters
+            ]
+            snapshot.append({
+                'index': int(index),
+                'name': str(group.get('name', f'group_{index}')),
+                'lr': float(group.get('lr', 0.0)),
+                'weight_decay': float(group.get('weight_decay', default_weight_decay)),
+                'tensor_count': int(len(parameters)),
+                'parameter_count': int(sum(parameter.numel() for parameter in parameters)),
+                'trainable_parameter_count': int(sum(
+                    parameter.numel() for parameter in parameters if parameter.requires_grad
+                )),
+                'parameter_names': sorted(named_parameters),
+            })
+        return snapshot
+
     def _add_moe_auxiliary_loss(self, loss):
         if not getattr(self.params, 'moe', False):
             return loss
@@ -1323,6 +1353,15 @@ class Trainer(object):
             if torch.cuda.is_available() else 0.0
         )
         pair_sha256 = pair_contract_sha256(self.params)
+        foundation_path = str(getattr(self.params, 'foundation_dir', '') or '')
+        foundation_sha256 = ''
+        if foundation_path:
+            if os.path.isfile(foundation_path):
+                foundation_sha256 = _sha256_file(foundation_path)
+            elif getattr(self.params, 'experiment_profile', 'none') == 'icassp2027':
+                raise RuntimeError(
+                    f'ICASSP foundation checkpoint is unavailable at summary time: {foundation_path}'
+                )
 
         summary_payload = {
             'timestamp_utc': ts,
@@ -1338,10 +1377,14 @@ class Trainer(object):
                 **git_info,
                 'manifest_path': manifest_path,
                 'manifest_sha256': manifest_sha256,
+                'foundation_checkpoint_path': foundation_path,
+                'foundation_checkpoint_sha256': foundation_sha256,
                 'config_sha256': config_sha256,
                 'pair_contract_sha256': pair_sha256,
                 'trainability_mode': self.trainability_mode,
                 'trainable_parameter_counts': self._trainable_parameter_counts,
+                'trainable_parameter_names': self._trainable_parameter_names,
+                'resolved_optimizer_groups': self._optimizer_groups_initial,
                 'peak_cuda_mb': peak_cuda_mb,
                 'peak_cuda_scope': 'trainer_run',
                 'total_wall_seconds': float(timer() - self._run_start_time),
@@ -1379,6 +1422,7 @@ class Trainer(object):
             'ema_eval_only': bool(getattr(self.params, 'ema_eval_only', True)),
             'classifier': getattr(self.params, 'classifier', ''),
             'attnres_variant': getattr(self.params, 'attnres_variant', ''),
+            'attnres_start_layer': getattr(self.params, 'attnres_start_layer', ''),
             'experiment_profile': getattr(self.params, 'experiment_profile', ''),
             'moe': bool(getattr(self.params, 'moe', False)),
             'moe_num_layers': getattr(self.params, 'moe_num_layers', ''),
@@ -1434,6 +1478,9 @@ class Trainer(object):
             'trainable_depth': self._trainable_parameter_counts['depth'],
             'manifest_path': manifest_path,
             'manifest_sha256': manifest_sha256,
+            'foundation_checkpoint_sha256': foundation_sha256,
+            'trainable_parameter_names': json.dumps(self._trainable_parameter_names, sort_keys=True),
+            'resolved_optimizer_groups': json.dumps(self._optimizer_groups_initial, sort_keys=True),
             'config_sha256': config_sha256,
             'pair_contract_sha256': pair_sha256,
             'git_commit': git_info.get('git_commit', ''),

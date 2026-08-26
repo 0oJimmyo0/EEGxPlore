@@ -72,6 +72,7 @@ def _depth_args(*extra: str) -> argparse.Namespace:
         "--trainability_mode", "depth_aggregation",
         "--attnres_variant", "pre_attn",
         "--attnres_start_layer", "8",
+        "--use_component_lr",
         "--lr_depth_mult", "1.0",
     ]
     return _parser().parse_args(base + list(extra))
@@ -113,6 +114,14 @@ def main() -> None:
         assert "start_layer=8" in str(exc)
     else:
         raise AssertionError("invalid DepthAgg start layer was accepted")
+
+    invalid_optimizer = _depth_args("--optimizer", "SGD")
+    try:
+        validate_args(invalid_optimizer)
+    except ValueError as exc:
+        assert "locked profile" in str(exc)
+    else:
+        raise AssertionError("non-AdamW DepthAgg optimizer was accepted")
 
     print("ICASSP wiring contract: PASS")
 

@@ -682,6 +682,32 @@ def validate_args(args: argparse.Namespace) -> None:
                 raise ValueError('[icassp2027] depth_aggregation requires attnres_start_layer=8.')
             if args.attnres_gated:
                 raise ValueError('[icassp2027] depth_aggregation requires ungated AttnRes.')
+            locked_values = {
+                'optimizer': (args.optimizer, 'AdamW'),
+                'use_component_lr': (args.use_component_lr, True),
+                'multi_lr': (args.multi_lr, False),
+                'lr': (args.lr, 1e-4),
+                'lr_backbone_mult': (args.lr_backbone_mult, 0.5),
+                'lr_depth_mult': (args.lr_depth_mult, 1.0),
+                'lr_classifier_mult': (args.lr_classifier_mult, 3.5),
+                'weight_decay': (args.weight_decay, 5e-2),
+                'label_smoothing': (args.label_smoothing, 0.1),
+                'warmup_epochs': (args.warmup_epochs, 0),
+                'class_weight_mode': (args.class_weight_mode, 'none'),
+            }
+            profile_mismatch = {
+                name: (actual, expected)
+                for name, (actual, expected) in locked_values.items()
+                if (
+                    abs(float(actual) - float(expected)) > 1e-12
+                    if isinstance(expected, (int, float))
+                    else actual != expected
+                )
+            }
+            if profile_mismatch:
+                raise ValueError(
+                    f'[icassp2027] depth_aggregation locked profile mismatch: {profile_mismatch}'
+                )
         else:
             if effective_mode not in {'frozen', 'upper4', 'full', 'typed_conditional'}:
                 raise ValueError(f'[icassp2027] unsupported trainability mode: {effective_mode}')

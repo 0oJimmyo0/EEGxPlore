@@ -22,6 +22,17 @@ DATASET="${DATASET:?DATASET must be exported, e.g. DATASET=SEED-V}"
 METHOD="${METHOD:?METHOD must be exported, e.g. METHOD=static}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 REQUIRE_CLEAN_TREE="${REQUIRE_CLEAN_TREE:-1}"
+EPOCHS="${EPOCHS:-20}"
+if [[ -z "${MODEL_ROOT+x}" ]]; then
+  if [[ "$METHOD" == "static" || "$METHOD" == "routed" ]]; then
+    MODEL_ROOT="$REPO_DIR/output/icassp2027_pilots"
+  else
+    MODEL_ROOT="$REPO_DIR/output/icassp2027_depth/health20"
+  fi
+fi
+SEED="${SEED:-42}"
+NUM_WORKERS="${NUM_WORKERS:-0}"
+export EPOCHS MODEL_ROOT SEED NUM_WORKERS
 
 if [[ ! -x "$ENV_DIR/bin/python" ]]; then
   echo "ERROR: Python environment is unavailable: $ENV_DIR" >&2
