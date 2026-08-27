@@ -12,7 +12,7 @@ import csv
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -24,6 +24,8 @@ FIELDNAMES = [
     "run_status",
     "dataset",
     "condition",
+    "historical_family_id",
+    "historical_recipe_sha256",
     "seed",
     "split",
     "preprocessing",
@@ -150,6 +152,8 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
         "run_status": run_status,
         "dataset": str(summary.get("dataset") or manifest.get("dataset") or ""),
         "condition": str(summary.get("revision_condition") or manifest.get("condition") or ""),
+        "historical_family_id": str(summary.get("historical_family_id") or manifest.get("historical_family_id") or ""),
+        "historical_recipe_sha256": str(summary.get("historical_recipe_sha256") or manifest.get("historical_recipe_sha256") or ""),
         "seed": str(summary.get("seed") or manifest.get("seed") or ""),
         "split": protocol,
         "preprocessing": f"{split_source};dataset_dir={manifest.get('dataset_dir', '')}",
@@ -172,9 +176,34 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
     }
 
 
-def build_registry(output_root: Path, registry_path: Path, hash_checkpoints: bool = False) -> int:
+def _historical_rows(index_path: Optional[Path]) -> List[Dict[str, str]]:
+    if index_path is None or not index_path.is_file():
+        return []
+    try:
+        with index_path.open(newline="", encoding="utf-8") as handle:
+            source_rows = list(csv.DictReader(handle))
+    except (OSError, csv.Error):
+        return []
+    rows: List[Dict[str, str]] = []
+    for source_row in source_rows:
+        row = {field: str(source_row.get(field, "") or "") for field in FIELDNAMES}
+        row["source_kind"] = "rejected_paper_historical"
+        row["run_status"] = row["run_status"] or "candidate"
+        row["tmlr_overlap_status"] = row["tmlr_overlap_status"] or "unreviewed_pending_row_audit"
+        row["reuse_decision"] = row["reuse_decision"] or "candidate_pending_audit"
+        rows.append(row)
+    return rows
+
+
+def build_registry(
+    output_root: Path,
+    registry_path: Path,
+    hash_checkpoints: bool = False,
+    historical_index: Optional[Path] = None,
+) -> int:
     manifests = sorted(output_root.rglob("run_manifest.json")) if output_root.is_dir() else []
     rows = [_row_for_run(path, hash_checkpoints=hash_checkpoints) for path in manifests]
+    rows.extend(_historical_rows(historical_index))
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     with registry_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
@@ -188,12 +217,23 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     parser.add_argument(
+        "--historical-index",
+        type=Path,
+        default=REPO_ROOT / "experiments" / "icassp2027" / "revision" / "historical_candidates.csv",
+        help="CSV index of rejected-paper candidate rows to append to the generated registry.",
+    )
+    parser.add_argument(
         "--hash-checkpoints",
         action="store_true",
         help="Compute missing checkpoint SHA-256 hashes; this can be expensive for large runs.",
     )
     args = parser.parse_args()
-    count = build_registry(args.output_root, args.registry, hash_checkpoints=args.hash_checkpoints)
+    count = build_registry(
+        args.output_root,
+        args.registry,
+        hash_checkpoints=args.hash_checkpoints,
+        historical_index=args.historical_index,
+    )
     print(f"evidence registry: wrote {count} rows to {args.registry}")
 
 

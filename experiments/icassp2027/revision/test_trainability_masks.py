@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from finetune_main import resolve_revision_condition
 from finetune_trainer import configure_trainability
 
 
@@ -80,6 +81,14 @@ def main() -> None:
     assert any('spatial_specialists' in name for name in combined)
     assert any('spatial_router' in name for name in combined)
     assert not any('.moe_ffn.shared.' in name for name in combined)
+
+    historical_params = _params('historical_selective')
+    resolve_revision_condition(historical_params)
+    assert historical_params.trainability_mode == 'combined'
+    mode, _ = configure_trainability(model, historical_params)
+    assert mode == 'combined'
+    historical = _names(model)
+    assert historical == combined
 
     print('trainability mask contract: PASS')
 

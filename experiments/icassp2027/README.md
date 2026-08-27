@@ -45,6 +45,10 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/revision/audit_revision_config.py`
 - `experiments/icassp2027/revision/build_evidence_registry.py`
 - `experiments/icassp2027/revision/HISTORICAL_RECIPE_AUDIT.md`
+- `experiments/icassp2027/revision/historical_recipe_1785556.json`
+- `experiments/icassp2027/revision/verify_historical_recipe.py`
+- `experiments/icassp2027/revision/audit_historical_bundle.py`
+- `experiments/icassp2027/revision/historical_candidates.csv`
 - `experiments/icassp2027/revision/test_*.py`
 
 The retained legacy launchers still contain historical defaults. Do not use them as the active experiment interface until the focused revision launcher described in `REVISION_PLAN.md` is added. In particular, do not aggregate results from `output/icassp2027_depth` into the main table.

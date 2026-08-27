@@ -20,7 +20,10 @@ Use the following decisions:
 The generated registry defaults every new row to `unreviewed_pending_row_audit`
 and `candidate_pending_audit`; a complete run is not automatically promoted to
 the paper table. Historical rows must be entered only after the separate
-`revision/HISTORICAL_RECIPE_AUDIT.md` checklist is complete.
+`revision/HISTORICAL_RECIPE_AUDIT.md` checklist is complete. The tracked
+`revision/historical_candidates.csv` index is intentionally seed-level and
+candidate-only; run `revision/audit_historical_bundle.py --strict` before
+claiming that the three historical SEED-V families are matched.
 
 The current `output/icassp2027_depth` pilots are supplemental candidates only. The old ISRUC non-frozen jobs that ended in OOM are invalid evidence. Existing logs can save compute, but only after this row-level audit.
 
@@ -29,6 +32,11 @@ The current `output/icassp2027_depth` pilots are supplemental candidates only. T
 Use the single launcher under `experiments/icassp2027/revision/` that calls the existing CBraMod training entry point. It takes dataset, condition, seed, split/protocol, GPU count, and output directory through explicit arguments/environment variables and rejects forbidden datasets/backbones and historical output roots. The `historical_selective` label is guarded until the `1785556` recipe audit is complete.
 
 The launcher should create a self-contained run manifest before training and a result manifest after training. It must not implement a new model. It should expose the named conditions in `REVISION_CONTRACT.md`, with the depth-independent specialist condition as the default candidate and any depth-enabled condition behind an explicit supplemental flag.
+
+For `historical_selective`, `audit_revision_config.py` also verifies the
+resolved arguments against `revision/historical_recipe_1785556.json` and records
+the recipe hash. The recipe remains pending until the historical bundle audit
+recovers all required values.
 
 Before submitting a batch, run one smoke job per dataset with the smallest valid budget and verify: data loading, label counts, validation-only selection, checkpoint creation, metric extraction, and output isolation.
 

@@ -61,15 +61,32 @@ def main() -> None:
             })
 
         registry = Path(tmp) / "evidence_registry.csv"
-        assert build_registry(root, registry) == 1
+        historical_index = Path(tmp) / "historical_candidates.csv"
+        with historical_index.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=["dataset", "condition", "historical_family_id", "seed", "run_status"],
+            )
+            writer.writeheader()
+            writer.writerow({
+                "dataset": "SEED-V",
+                "condition": "historical_selective",
+                "historical_family_id": "1785556",
+                "seed": "42",
+                "run_status": "candidate",
+            })
+        assert build_registry(root, registry, historical_index=historical_index) == 2
         with registry.open(newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
-        assert set(rows[0]) == set(FIELDNAMES)
+        assert all(set(row) == set(FIELDNAMES) for row in rows)
         assert rows[0]["condition"] == "combined"
         assert rows[0]["tmlr_overlap_status"] == "unreviewed_pending_row_audit"
         assert rows[0]["reuse_decision"] == "candidate_pending_audit"
         assert rows[0]["gpu"] == "1"
         assert rows[0]["split"] == "cbramod_benchmark"
+        assert rows[1]["source_kind"] == "rejected_paper_historical"
+        assert rows[1]["historical_family_id"] == "1785556"
+        assert rows[1]["reuse_decision"] == "candidate_pending_audit"
 
     print("evidence registry contract: PASS")
 

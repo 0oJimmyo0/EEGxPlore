@@ -21,12 +21,6 @@ MODEL_ROOT="${6:-${MODEL_ROOT:-$REPO_DIR/output/icassp2027_revision}}"
 EXPECTED_COMMIT="${7:-${EXPECTED_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}}"
 HISTORICAL_RECIPE_CONFIRMED="${HISTORICAL_RECIPE_CONFIRMED:-0}"
 
-if [[ "$CONDITION" == "historical_selective" && "$HISTORICAL_RECIPE_CONFIRMED" != "1" && "$HISTORICAL_RECIPE_CONFIRMED" != "true" ]]; then
-  echo "historical_selective is locked until run family 1785556 has passed the recipe audit" >&2
-  echo "set HISTORICAL_RECIPE_CONFIRMED=1 only after completing experiments/icassp2027/revision/HISTORICAL_RECIPE_AUDIT.md" >&2
-  exit 2
-fi
-
 CUDA_ID="${CUDA_ID:-0}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
@@ -41,6 +35,20 @@ EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-1000}"
 REQUIRE_CLEAN="${REQUIRE_CLEAN:-1}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/data/neurogroup/mingyangjiang/data/weights/pretrained_weights.pth}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
+HISTORICAL_RECIPE_PATH="${HISTORICAL_RECIPE_PATH:-$SCRIPT_DIR/historical_recipe_1785556.json}"
+HISTORICAL_FAMILY_ID="${HISTORICAL_FAMILY_ID:-1785556}"
+
+if [[ "$CONDITION" == "historical_selective" ]]; then
+  if [[ "$HISTORICAL_RECIPE_CONFIRMED" != "1" && "$HISTORICAL_RECIPE_CONFIRMED" != "true" ]]; then
+    echo "historical_selective is locked until the historical recipe audit is complete" >&2
+    echo "set HISTORICAL_RECIPE_CONFIRMED=1 only after completing experiments/icassp2027/revision/HISTORICAL_RECIPE_AUDIT.md" >&2
+    exit 2
+  fi
+  if [[ ! -f "$HISTORICAL_RECIPE_PATH" ]]; then
+    echo "historical recipe is unavailable: $HISTORICAL_RECIPE_PATH" >&2
+    exit 2
+  fi
+fi
 
 case "$DATASET" in
   SEED-V)
@@ -148,6 +156,10 @@ RUN_ARGS=(
   "${SPLIT_ARGS[@]}"
 )
 
+if [[ "$CONDITION" == "historical_selective" ]]; then
+  RUN_ARGS+=(--historical_recipe_path "$HISTORICAL_RECIPE_PATH" --historical_family_id "$HISTORICAL_FAMILY_ID")
+fi
+
 if [[ "$DATASET" == "FACED" ]]; then
   RUN_ARGS+=(--faced_meta_csv "$FACED_META_CSV")
 fi
@@ -159,6 +171,9 @@ elif [[ "$USE_EMA" != "0" && "$USE_EMA" != "false" ]]; then
 fi
 
 AUDIT_ARGS=("${RUN_ARGS[@]}" --expected-commit "$EXPECTED_COMMIT")
+if [[ "$CONDITION" == "historical_selective" ]]; then
+  AUDIT_ARGS+=(--historical-recipe "$HISTORICAL_RECIPE_PATH")
+fi
 if [[ "$REQUIRE_CLEAN" == "1" || "$REQUIRE_CLEAN" == "true" ]]; then
   AUDIT_ARGS+=(--require-clean)
 elif [[ "$REQUIRE_CLEAN" != "0" && "$REQUIRE_CLEAN" != "false" ]]; then
@@ -175,11 +190,15 @@ MANIFEST_SHA256=""
 if [[ -n "$MANIFEST_PATH" ]]; then
   MANIFEST_SHA256="$(sha256sum "$MANIFEST_PATH" | awk '{print $1}')"
 fi
+HISTORICAL_RECIPE_SHA256=""
+if [[ "$CONDITION" == "historical_selective" ]]; then
+  HISTORICAL_RECIPE_SHA256="$(sha256sum "$HISTORICAL_RECIPE_PATH" | awk '{print $1}')"
+fi
 GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
 RUN_MANIFEST="$MODEL_DIR/run_manifest.json"
 
-export DATASET CONDITION PROTOCOL SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH
+export DATASET CONDITION PROTOCOL SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH HISTORICAL_RECIPE_PATH HISTORICAL_FAMILY_ID HISTORICAL_RECIPE_SHA256
 "$PYTHON_BIN" - "$RUN_MANIFEST" "$GIT_COMMIT" "$GIT_DIRTY" "$FOUNDATION_SHA256" "$MANIFEST_SHA256" "${RUN_ARGS[@]}" <<'PY'
 import json
 import os
@@ -211,6 +230,9 @@ payload = {
     'foundation_checkpoint_sha256': foundation_sha256,
     'manifest_path': os.environ.get('MANIFEST_PATH', ''),
     'manifest_sha256': manifest_sha256,
+    'historical_family_id': os.environ.get('HISTORICAL_FAMILY_ID', '') if os.environ['CONDITION'] == 'historical_selective' else '',
+    'historical_recipe_path': os.environ.get('HISTORICAL_RECIPE_PATH', '') if os.environ['CONDITION'] == 'historical_selective' else '',
+    'historical_recipe_sha256': os.environ.get('HISTORICAL_RECIPE_SHA256', '') if os.environ['CONDITION'] == 'historical_selective' else '',
     'command': command,
 }
 with open(path, 'w', encoding='utf-8') as handle:

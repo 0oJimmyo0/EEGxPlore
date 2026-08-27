@@ -1379,6 +1379,11 @@ class Trainer(object):
         experiment_profile = str(getattr(self.params, 'experiment_profile', '') or '')
         revision_condition = str(getattr(self.params, 'revision_condition', '') or '')
         revision_protocol = str(getattr(self.params, 'revision_protocol', '') or '')
+        historical_family_id = str(getattr(self.params, 'historical_family_id', '') or '')
+        historical_recipe_path = str(getattr(self.params, 'historical_recipe_path', '') or '')
+        historical_recipe_sha256 = ''
+        if historical_recipe_path and os.path.isfile(historical_recipe_path):
+            historical_recipe_sha256 = _sha256_file(historical_recipe_path)
         config_bytes = json.dumps(vars(self.params), sort_keys=True, default=str).encode('utf-8')
         config_sha256 = hashlib.sha256(config_bytes).hexdigest()
         if experiment_profile == 'icassp2027_revision':
@@ -1441,6 +1446,9 @@ class Trainer(object):
             'run_name': run_name,
             'revision_condition': revision_condition,
             'revision_protocol': revision_protocol,
+            'historical_family_id': historical_family_id,
+            'historical_recipe_path': historical_recipe_path,
+            'historical_recipe_sha256': historical_recipe_sha256,
             'split_manifest_field': manifest_field,
             'split_manifest_source': manifest_source,
             'best_epoch': int(best_epoch),
@@ -1456,6 +1464,9 @@ class Trainer(object):
                 'manifest_sha256': manifest_sha256,
                 'manifest_field': manifest_field,
                 'manifest_source': manifest_source,
+                'historical_family_id': historical_family_id,
+                'historical_recipe_path': historical_recipe_path,
+                'historical_recipe_sha256': historical_recipe_sha256,
                 'foundation_checkpoint_path': foundation_path,
                 'foundation_checkpoint_sha256': foundation_sha256,
                 'config_sha256': config_sha256,
@@ -1481,6 +1492,9 @@ class Trainer(object):
             'run_name': run_name,
             'revision_condition': revision_condition,
             'revision_protocol': revision_protocol,
+            'historical_family_id': historical_family_id,
+            'historical_recipe_path': historical_recipe_path,
+            'historical_recipe_sha256': historical_recipe_sha256,
             'split_manifest_field': manifest_field,
             'split_manifest_source': manifest_source,
             'model_dir': md,

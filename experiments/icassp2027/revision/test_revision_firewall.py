@@ -52,7 +52,7 @@ def main() -> None:
             'moe_router_base_feature_mode': 'full',
         },
         'historical_selective': {
-            'trainability_mode': 'historical_selective',
+            'trainability_mode': 'combined',
             'attnres_variant': 'pre_attn',
             'moe': True,
             'moe_router_base_feature_mode': 'full',

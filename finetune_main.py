@@ -97,6 +97,18 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         help='Primary benchmark cohort or the separate subject-disjoint SEED-V supplement.',
     )
     parser.add_argument(
+        '--historical_recipe_path',
+        type=str,
+        default='',
+        help='Machine-verified historical recipe used by the ICASSP provenance condition.',
+    )
+    parser.add_argument(
+        '--historical_family_id',
+        type=str,
+        default='',
+        help='Historical run-family identifier recorded in ICASSP provenance summaries.',
+    )
+    parser.add_argument(
         '--icassp_split_manifest',
         type=str,
         default='',
@@ -618,7 +630,10 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
         )
 
     args.frozen = condition == 'frozen'
-    args.trainability_mode = condition
+    # ``historical_selective`` is a provenance/recipe label, not a new
+    # trainability mask.  Keep the implementation mask canonical so that the
+    # trainer cannot silently reject or reinterpret the historical condition.
+    args.trainability_mode = 'combined' if condition == 'historical_selective' else condition
     args.attnres_variant = 'pre_attn' if condition in {
         'attnres_only',
         'combined',
