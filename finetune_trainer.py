@@ -1376,19 +1376,43 @@ class Trainer(object):
         dataset = str(getattr(self.params, 'downstream_dataset', 'unknown'))
         dataset_tag = _safe_tag(dataset).lower()
         run_name = str(getattr(self.params, 'routing_run_name', '') or '')
+        experiment_profile = str(getattr(self.params, 'experiment_profile', '') or '')
+        revision_condition = str(getattr(self.params, 'revision_condition', '') or '')
+        revision_protocol = str(getattr(self.params, 'revision_protocol', '') or '')
         config_bytes = json.dumps(vars(self.params), sort_keys=True, default=str).encode('utf-8')
         config_sha256 = hashlib.sha256(config_bytes).hexdigest()
-        manifest_path = str(getattr(self.params, 'icassp_split_manifest', '') or '')
+        if experiment_profile == 'icassp2027_revision':
+            if revision_protocol == 'seedv_subject_disjoint':
+                manifest_field = 'seedv_split_manifest'
+                manifest_path = str(getattr(self.params, 'seedv_split_manifest', '') or '')
+                manifest_source = 'seedv_subject_disjoint_manifest'
+            else:
+                # The primary revision protocol intentionally follows the
+                # CBraMod LMDB __keys__ cohort and therefore has no frozen
+                # split-manifest file to hash.
+                manifest_field = 'lmdb_keys'
+                manifest_path = ''
+                manifest_source = 'lmdb___keys__'
+        else:
+            manifest_field = 'icassp_split_manifest'
+            manifest_path = str(getattr(self.params, 'icassp_split_manifest', '') or '')
+            manifest_source = 'frozen_split_manifest' if manifest_path else 'unspecified'
         manifest_sha256 = ''
         if manifest_path:
             manifest_sha256 = validate_manifest_integrity(
                 manifest_path,
-                require_sidecar=getattr(self.params, 'experiment_profile', 'none') == 'icassp2027',
+                require_sidecar=(
+                    experiment_profile == 'icassp2027'
+                    or (
+                        experiment_profile == 'icassp2027_revision'
+                        and revision_protocol == 'seedv_subject_disjoint'
+                    )
+                ),
             )
-        elif getattr(self.params, 'experiment_profile', 'none') == 'icassp2027':
+        elif experiment_profile == 'icassp2027':
             raise RuntimeError('ICASSP manifest is required at summary time')
         git_info = _git_provenance()
-        if getattr(self.params, 'experiment_profile', 'none') == 'icassp2027' and git_info.get('git_dirty'):
+        if experiment_profile in {'icassp2027', 'icassp2027_revision'} and git_info.get('git_dirty'):
             print('[provenance] WARNING: ICASSP run summary was written from a dirty git worktree.', flush=True)
         peak_cuda_mb = (
             float(torch.cuda.max_memory_allocated() / (1024 ** 2))
@@ -1404,21 +1428,34 @@ class Trainer(object):
                 raise RuntimeError(
                     f'ICASSP foundation checkpoint is unavailable at summary time: {foundation_path}'
                 )
+        checkpoint_sha256 = ''
+        checkpoint_size_bytes = 0
+        if model_path and os.path.isfile(model_path):
+            checkpoint_sha256 = _sha256_file(model_path)
+            checkpoint_size_bytes = os.path.getsize(model_path)
 
         summary_payload = {
             'timestamp_utc': ts,
             'dataset': dataset,
             'task_type': task_type,
             'run_name': run_name,
+            'revision_condition': revision_condition,
+            'revision_protocol': revision_protocol,
+            'split_manifest_field': manifest_field,
+            'split_manifest_source': manifest_source,
             'best_epoch': int(best_epoch),
             'model_path': model_path,
             'best_val_metrics': _to_jsonable(best_val_metrics),
             'test_metrics': _to_jsonable(test_metrics),
+            'checkpoint_sha256': checkpoint_sha256,
+            'checkpoint_size_bytes': checkpoint_size_bytes,
             'config': _to_jsonable(vars(self.params)),
             'provenance': {
                 **git_info,
                 'manifest_path': manifest_path,
                 'manifest_sha256': manifest_sha256,
+                'manifest_field': manifest_field,
+                'manifest_source': manifest_source,
                 'foundation_checkpoint_path': foundation_path,
                 'foundation_checkpoint_sha256': foundation_sha256,
                 'config_sha256': config_sha256,
@@ -1442,8 +1479,14 @@ class Trainer(object):
             'dataset': dataset,
             'task_type': task_type,
             'run_name': run_name,
+            'revision_condition': revision_condition,
+            'revision_protocol': revision_protocol,
+            'split_manifest_field': manifest_field,
+            'split_manifest_source': manifest_source,
             'model_dir': md,
             'model_path': model_path,
+            'checkpoint_sha256': checkpoint_sha256,
+            'checkpoint_size_bytes': checkpoint_size_bytes,
             'best_epoch': int(best_epoch),
             'val_balanced_accuracy': best_val_metrics.get('balanced_accuracy', ''),
             'val_kappa': best_val_metrics.get('kappa', ''),
@@ -1462,10 +1505,11 @@ class Trainer(object):
             'ema_decay': getattr(self.params, 'ema_decay', ''),
             'ema_warmup_steps': getattr(self.params, 'ema_warmup_steps', ''),
             'ema_eval_only': bool(getattr(self.params, 'ema_eval_only', True)),
+            'selection_metric': str(getattr(self.params, 'selection_metric', '')),
             'classifier': getattr(self.params, 'classifier', ''),
             'attnres_variant': getattr(self.params, 'attnres_variant', ''),
             'attnres_start_layer': getattr(self.params, 'attnres_start_layer', ''),
-            'experiment_profile': getattr(self.params, 'experiment_profile', ''),
+            'experiment_profile': experiment_profile,
             'moe': bool(getattr(self.params, 'moe', False)),
             'moe_num_layers': getattr(self.params, 'moe_num_layers', ''),
             'moe_route_mode': getattr(self.params, 'moe_route_mode', ''),
@@ -1622,6 +1666,14 @@ class Trainer(object):
                 grad_ratio_experts_vs_backbone.append(float(g.get('experts', 0.0)) / bb)
                 grad_ratio_depth_vs_backbone.append(float(g.get('depth_summary_path', 0.0)) / bb)
 
+        original_backbone_trainable = any(
+            name.startswith('backbone.') and parameter.requires_grad
+            for name, parameter in self._named_trainable_params
+        )
+        backbone_gradient_reference_valid = bool(
+            original_backbone_trainable and any(value > 0.0 for value in grad_backbone)
+        )
+
         moe_rows = [row for row in epoch_history if row.get('moe')]
         sp_eff = [row.get('moe', {}).get('specialization_effective_experts_post_spatial') for row in moe_rows]
         sc_eff = [row.get('moe', {}).get('specialization_effective_experts_post_spectral') for row in moe_rows]
@@ -1645,6 +1697,13 @@ class Trainer(object):
             'test_metrics': _to_jsonable(test_metrics),
             'final_epoch_metrics': _to_jsonable(epoch_history[-1].get('metrics', {})),
             'grad_activity': {
+                'original_backbone_trainable': original_backbone_trainable,
+                'backbone_gradient_reference_valid': backbone_gradient_reference_valid,
+                'gradient_ratio_reference': (
+                    'original_backbone'
+                    if backbone_gradient_reference_valid
+                    else 'not_applicable_original_backbone_frozen_or_inactive'
+                ),
                 'avg_backbone': _avg(grad_backbone),
                 'avg_router': _avg(grad_router),
                 'avg_experts': _avg(grad_experts),
@@ -1677,9 +1736,22 @@ class Trainer(object):
         }
 
         observations = []
-        if diagnosis['grad_activity']['avg_router_vs_backbone'] < 0.05 and bool(getattr(self.params, 'moe', False)):
+        if bool(getattr(self.params, 'moe', False)) and not backbone_gradient_reference_valid:
+            observations.append(
+                'The original backbone is frozen or inactive; router/expert gradients are reported in absolute terms, '
+                'and backbone-relative gradient ratios are not applicable.'
+            )
+        if (
+            diagnosis['grad_activity']['avg_router_vs_backbone'] < 0.05
+            and bool(getattr(self.params, 'moe', False))
+            and backbone_gradient_reference_valid
+        ):
             observations.append('Router gradients are much smaller than backbone gradients; routing may be too weak to strongly affect downstream performance.')
-        if diagnosis['grad_activity']['avg_experts_vs_backbone'] < 0.02 and bool(getattr(self.params, 'moe', False)):
+        if (
+            diagnosis['grad_activity']['avg_experts_vs_backbone'] < 0.02
+            and bool(getattr(self.params, 'moe', False))
+            and backbone_gradient_reference_valid
+        ):
             observations.append('Expert gradients are tiny relative to the backbone; specialists may be under-trained or too lightly used.')
         if diagnosis['moe_effectiveness']['avg_depth_block_top2_mass_spatial'] > 0.95:
             observations.append('Depth-summary routing is heavily concentrated in the top two blocks, so later blocks contribute very little.')

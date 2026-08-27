@@ -4,4 +4,6 @@ TMLR,axis-agnostic matched residual control,none,not reused,excluded from ICASSP
 TMLR,numerical results,none,forbidden,regenerate all ICASSP cells
 TMLR,figures and prose,none,forbidden,write ICASSP manuscript from blank template
 ICASSP focused revision,upper-layer AttnRes plus existing specialist adaptation,native channel/patch residual adapter,isolated_pending,distinct CBraMod-only estimand; promote or regenerate only after artifact audit
+ICASSP focused revision,historical_selective (AttnRes plus typed specialists),TMLR native channel/patch residual adapter,recipe_audit_pending,independent ICASSP row; do not enable historical reproduction before HISTORICAL_RECIPE_AUDIT.md is complete
+ICASSP focused revision,combined implementation control,TMLR native channel/patch residual adapter,new_run_pending,CBraMod-only implementation control; record every result in output/icassp2027_revision/evidence_registry.csv
 ICASSP routing archive,typed conditional specialists,none,archived,not part of focused revision evidence

@@ -1,0 +1,51 @@
+# Historical selective recipe audit
+
+This checklist must be complete before launching a run labeled
+`historical_selective`. The current implementation maps that label to the
+existing AttnRes-plus-typed-specialist parameter family, but the label is not a
+claim that it reproduces run family `1785556` until every field below is
+verified from the original command, log, and checkpoint provenance.
+
+## Target artifact
+
+- Historical run family: `1785556`
+- Historical log: `docs/logs/SEED-V/out/seedv_SEEDV_TUNE_1785556.out`
+- Historical checkpoint root: `/gpfs/radev/scratch/xu_hua/shared/models/checkpoints/SEEDV_manual_1785556/`
+- Historical reported three-seed mean: balanced accuracy `0.40720`, kappa `0.26616`, weighted F1 `0.41525`
+
+## Required fields
+
+Mark each item `verified` and record the evidence location before enabling the
+launcher guard.
+
+| Field | Required value/evidence | Status | Evidence location |
+|---|---|---|---|
+| dataset and class count | SEED-V, 5 classes | pending | |
+| split/cohort | rejected-paper CBraMod benchmark cohort | pending | |
+| seeds | exact three historical seeds | pending | |
+| preprocessing and scale | exact loader and tensor divisor | pending | |
+| epochs and batch size | exact values | pending | |
+| optimizer and schedule | optimizer, LR, min LR, warmup, clipping | pending | |
+| checkpoint selector | validation metric and raw/EMA policy | pending | |
+| AttnRes | variant, start layer, gating, depth settings | pending | |
+| specialists | layer count, expert count, typed branches, router | pending | |
+| routing extras | dispatch, temperature, regularizers, jitter, context features | pending | |
+| trainable parameter mask | exact parameter groups and count | pending | |
+| code commit | commit that produced the historical checkpoint | pending | |
+| checkpoint hashes | selected checkpoint for every seed | pending | |
+
+When complete, record the audit date and reviewer below, then launch with:
+
+```bash
+HISTORICAL_RECIPE_CONFIRMED=1 \
+  experiments/icassp2027/revision/run_revision.sh SEED-V historical_selective 42
+```
+
+Do not change the current implementation to force a match based only on the
+reported metric. If a field cannot be recovered, mark the historical result as
+`candidate` or `rerun` in the evidence registry and use `combined` for a new
+implementation control instead.
+
+Audit date: ____________________
+
+Reviewer: ______________________

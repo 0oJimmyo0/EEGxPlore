@@ -4,7 +4,8 @@ This plan turns the revision contract into a small number of auditable artifacts
 
 ## 1. Build the artifact-reuse registry
 
-Create one registry under `output/icassp2027_revision/` with one row per candidate run. Record:
+Create one registry under `output/icassp2027_revision/` with one row per candidate run. Use
+`revision/build_evidence_registry.py` to regenerate it from immutable run artifacts. Record:
 
 `dataset, condition, seed, split, preprocessing, epoch budget, selection rule, code commit, checkpoint path, checkpoint hash, metric files, trainable parameters, runtime, GPU, TMLR-overlap status, reuse decision, notes`.
 
@@ -16,13 +17,18 @@ Use the following decisions:
 - `supplement`: valid diagnostic with a different protocol;
 - `forbidden`: TMLR-derived or otherwise out of scope.
 
+The generated registry defaults every new row to `unreviewed_pending_row_audit`
+and `candidate_pending_audit`; a complete run is not automatically promoted to
+the paper table. Historical rows must be entered only after the separate
+`revision/HISTORICAL_RECIPE_AUDIT.md` checklist is complete.
+
 The current `output/icassp2027_depth` pilots are supplemental candidates only. The old ISRUC non-frozen jobs that ended in OOM are invalid evidence. Existing logs can save compute, but only after this row-level audit.
 
 ## 2. Add one focused launcher
 
-Add a single launcher under `experiments/icassp2027/revision/` that calls the existing CBraMod training entry point. It should take dataset, condition, seed, split/protocol, GPU count, and output directory as explicit arguments and reject forbidden datasets/backbones and historical output roots.
+Use the single launcher under `experiments/icassp2027/revision/` that calls the existing CBraMod training entry point. It takes dataset, condition, seed, split/protocol, GPU count, and output directory through explicit arguments/environment variables and rejects forbidden datasets/backbones and historical output roots. The `historical_selective` label is guarded until the `1785556` recipe audit is complete.
 
-The launcher should create a self-contained run manifest before training and a result manifest after training. It must not implement a new model. It should expose only the six conditions in `REVISION_CONTRACT.md`, with the depth-independent specialist condition as the default candidate and any depth-enabled condition behind an explicit supplemental flag.
+The launcher should create a self-contained run manifest before training and a result manifest after training. It must not implement a new model. It should expose the named conditions in `REVISION_CONTRACT.md`, with the depth-independent specialist condition as the default candidate and any depth-enabled condition behind an explicit supplemental flag.
 
 Before submitting a batch, run one smoke job per dataset with the smallest valid budget and verify: data loading, label counts, validation-only selection, checkpoint creation, metric extraction, and output isolation.
 
@@ -35,7 +41,7 @@ Priority order for compute:
 3. PhysioNet-MI;
 4. ISRUC after resolving the known memory/resource issue.
 
-For each dataset, run Frozen + head, Full FT, and AttnRes-only first. These are the minimum baselines needed to determine whether the observed gains are real and whether a dataset is wired correctly. Then run Specialist-only and the combined condition using exactly the same split, selection rule, budget, and seeds.
+For each dataset, run Frozen + head, Full FT, and AttnRes-only first. These are the minimum baselines needed to determine whether the observed gains are real and whether a dataset is wired correctly. Then run Specialist-only and the combined condition using exactly the same split, selection rule, budget, and seeds. Use `historical_selective` only for the audited historical-recipe reproduction; use `combined` for the implementation control before that audit.
 
 Promote a dataset to the main table only when the core conditions have a complete matched three-seed block. A weak result is still useful; an unmatched result is not.
 

@@ -51,6 +51,12 @@ def main() -> None:
             'moe': True,
             'moe_router_base_feature_mode': 'full',
         },
+        'historical_selective': {
+            'trainability_mode': 'historical_selective',
+            'attnres_variant': 'pre_attn',
+            'moe': True,
+            'moe_router_base_feature_mode': 'full',
+        },
     }
     for condition, fields in expected.items():
         args = _args(condition)

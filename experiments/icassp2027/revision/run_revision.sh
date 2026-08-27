@@ -19,6 +19,13 @@ PROTOCOL="${4:-${REVISION_PROTOCOL:-cbramod_benchmark}}"
 EPOCHS="${5:-${EPOCHS:-40}}"
 MODEL_ROOT="${6:-${MODEL_ROOT:-$REPO_DIR/output/icassp2027_revision}}"
 EXPECTED_COMMIT="${7:-${EXPECTED_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}}"
+HISTORICAL_RECIPE_CONFIRMED="${HISTORICAL_RECIPE_CONFIRMED:-0}"
+
+if [[ "$CONDITION" == "historical_selective" && "$HISTORICAL_RECIPE_CONFIRMED" != "1" && "$HISTORICAL_RECIPE_CONFIRMED" != "true" ]]; then
+  echo "historical_selective is locked until run family 1785556 has passed the recipe audit" >&2
+  echo "set HISTORICAL_RECIPE_CONFIRMED=1 only after completing experiments/icassp2027/revision/HISTORICAL_RECIPE_AUDIT.md" >&2
+  exit 2
+fi
 
 CUDA_ID="${CUDA_ID:-0}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
@@ -188,6 +195,16 @@ payload = {
     'condition': os.environ['CONDITION'],
     'protocol': os.environ['PROTOCOL'],
     'seed': int(os.environ['SEED']),
+    'split_manifest_field': (
+        'seedv_split_manifest'
+        if os.environ['PROTOCOL'] == 'seedv_subject_disjoint'
+        else 'lmdb_keys'
+    ),
+    'split_manifest_source': (
+        'seedv_subject_disjoint_manifest'
+        if os.environ['PROTOCOL'] == 'seedv_subject_disjoint'
+        else 'lmdb___keys__'
+    ),
     'model_dir': os.environ['MODEL_DIR'],
     'dataset_dir': os.environ['DATASET_DIR'],
     'foundation_dir': os.environ['FOUNDATION_DIR'],
@@ -223,6 +240,11 @@ summary = os.path.join(os.environ['MODEL_DIR'], 'experiment_summary.csv')
 payload = {
     'completed_utc': datetime.now(timezone.utc).isoformat(),
     'exit_code': int(exit_code),
+    'dataset': os.environ.get('DATASET', ''),
+    'condition': os.environ.get('CONDITION', ''),
+    'protocol': os.environ.get('PROTOCOL', ''),
+    'seed': int(os.environ.get('SEED', '0')),
+    'model_dir': os.environ.get('MODEL_DIR', ''),
     'experiment_summary': summary if os.path.isfile(summary) else '',
     'summary_present': os.path.isfile(summary),
 }

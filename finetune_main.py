@@ -77,7 +77,16 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         '--revision_condition',
         type=str,
         default='none',
-        choices=['none', 'frozen', 'upper1', 'full', 'attnres_only', 'specialist_only', 'combined'],
+        choices=[
+            'none',
+            'frozen',
+            'upper1',
+            'full',
+            'attnres_only',
+            'specialist_only',
+            'combined',
+            'historical_selective',
+        ],
         help='Canonical condition for the focused ICASSP revision profile.',
     )
     parser.add_argument(
@@ -531,6 +540,7 @@ REVISION_CONDITIONS = {
     'attnres_only',
     'specialist_only',
     'combined',
+    'historical_selective',
 }
 
 
@@ -609,10 +619,14 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
 
     args.frozen = condition == 'frozen'
     args.trainability_mode = condition
-    args.attnres_variant = 'pre_attn' if condition in {'attnres_only', 'combined'} else 'none'
+    args.attnres_variant = 'pre_attn' if condition in {
+        'attnres_only',
+        'combined',
+        'historical_selective',
+    } else 'none'
     args.attnres_start_layer = 0
     args.attnres_gated = False
-    args.moe = condition in {'specialist_only', 'combined'}
+    args.moe = condition in {'specialist_only', 'combined', 'historical_selective'}
     args.moe_attnres_depth_context_mode = 'compact_shared'
     args.moe_attnres_depth_summary_mode = 'auto'
     args.moe_attnres_depth_probe_mlp_for_router = False
