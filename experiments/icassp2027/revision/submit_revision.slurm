@@ -7,8 +7,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=0-12:00:00
-#SBATCH --output=/data/neurogroup/mingyangjiang/EEGxPlore/EEGxPlore/logs/ICASSP_REV/out/revision_%x_%j.out
-#SBATCH --error=/data/neurogroup/mingyangjiang/EEGxPlore/EEGxPlore/logs/ICASSP_REV/err/revision_%x_%j.err
+#SBATCH --output=/data/neurogroup/mingyangjiang/EEGxPlore/EEGxPlore/icassp_logs/revision_%x_%j.out
+#SBATCH --error=/data/neurogroup/mingyangjiang/EEGxPlore/EEGxPlore/icassp_logs/revision_%x_%j.err
 
 set -euo pipefail
 
@@ -19,8 +19,17 @@ if [[ "$#" -lt 2 ]]; then
   exit 2
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="${REPO_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+# Slurm executes a submitted script from a spool path, so BASH_SOURCE is not
+# a reliable way to locate the repository. Submit from the repository root or
+# provide REPO_DIR explicitly; SLURM_SUBMIT_DIR is the canonical fallback.
+REPO_DIR="${REPO_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
+REPO_DIR="$(realpath -m "$REPO_DIR")"
+SCRIPT_DIR="$REPO_DIR/experiments/icassp2027/revision"
+if [[ ! -f "$SCRIPT_DIR/run_revision.sh" ]]; then
+  echo "Revision launcher not found under REPO_DIR: $REPO_DIR" >&2
+  echo "Submit from the repository root or export REPO_DIR explicitly." >&2
+  exit 2
+fi
 SEED="${3:-${SEED:-42}}"
 PROTOCOL="${4:-${REVISION_PROTOCOL:-cbramod_benchmark}}"
 EPOCHS="${5:-${EPOCHS:-40}}"
@@ -52,7 +61,7 @@ else
   export PYTHON_BIN="${PYTHON_BIN:-python}"
 fi
 
-mkdir -p "$REPO_DIR/logs/ICASSP_REV/out" "$REPO_DIR/logs/ICASSP_REV/err"
+mkdir -p "$REPO_DIR/icassp_logs"
 unset PYTHONPATH
 unset PYTHONHOME
 export PYTHONNOUSERSITE=1
