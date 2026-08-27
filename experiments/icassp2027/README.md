@@ -43,6 +43,7 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/revision/run_revision.sh`
 - `experiments/icassp2027/revision/submit_revision.slurm`
 - `experiments/icassp2027/revision/audit_revision_config.py`
+- `experiments/icassp2027/revision/verify_data_contract.py`
 - `experiments/icassp2027/revision/build_evidence_registry.py`
 - `experiments/icassp2027/revision/HISTORICAL_RECIPE_AUDIT.md`
 - `experiments/icassp2027/revision/historical_recipe_1785556.json`

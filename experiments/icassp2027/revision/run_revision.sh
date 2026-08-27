@@ -59,18 +59,18 @@ case "$DATASET" in
   FACED)
     DATASET_TAG="faced"
     NUM_CLASSES=9
-    DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/FACED}"
-    FACED_META_CSV="${FACED_META_CSV:-/gpfs/radev/project/xu_hua/mj756/EEG_F/model_rep/CLEEG/data/faced_data_info/FACED_meta/Recording_info.csv}"
+    DATASET_DIR="${DATASET_DIR:-/data/neurogroup/mingyangjiang/data/FACED}"
+    FACED_META_CSV="${FACED_META_CSV:-/data/neurogroup/mingyangjiang/data/metadata/Recording_info.csv}"
     ;;
   ISRUC)
     DATASET_TAG="isruc"
     NUM_CLASSES=5
-    DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/ISRUC/precessed_filter_35}"
+    DATASET_DIR="${DATASET_DIR:-/data/neurogroup/mingyangjiang/data/ISRUC}"
     ;;
   PhysioNet-MI)
     DATASET_TAG="physionet_mi"
     NUM_CLASSES=4
-    DATASET_DIR="${DATASET_DIR:-/gpfs/radev/pi/xu_hua/shared/datasets/downstream_preped/physionet_mi}"
+    DATASET_DIR="${DATASET_DIR:-/data/neurogroup/mingyangjiang/data/PHYSIO_MI}"
     ;;
   *)
     echo "Unsupported dataset: $DATASET" >&2
@@ -119,6 +119,12 @@ fi
 MODEL_ROOT="$(realpath -m "$MODEL_ROOT")"
 MODEL_DIR="$MODEL_ROOT/$DATASET_TAG/$CONDITION/seed_$SEED"
 mkdir -p "$MODEL_DIR"
+
+DATA_CONTRACT_PATH="$MODEL_DIR/data_contract.json"
+"$PYTHON_BIN" "$SCRIPT_DIR/verify_data_contract.py" \
+  --dataset "$DATASET" \
+  --data-dir "$DATASET_DIR" \
+  --output "$DATA_CONTRACT_PATH"
 
 RUN_ARGS=(
   --seed "$SEED"
@@ -194,11 +200,12 @@ HISTORICAL_RECIPE_SHA256=""
 if [[ "$CONDITION" == "historical_selective" ]]; then
   HISTORICAL_RECIPE_SHA256="$(sha256sum "$HISTORICAL_RECIPE_PATH" | awk '{print $1}')"
 fi
+DATA_CONTRACT_SHA256="$(sha256sum "$DATA_CONTRACT_PATH" | awk '{print $1}')"
 GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
 RUN_MANIFEST="$MODEL_DIR/run_manifest.json"
 
-export DATASET CONDITION PROTOCOL SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH HISTORICAL_RECIPE_PATH HISTORICAL_FAMILY_ID HISTORICAL_RECIPE_SHA256
+export DATASET CONDITION PROTOCOL SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH HISTORICAL_RECIPE_PATH HISTORICAL_FAMILY_ID HISTORICAL_RECIPE_SHA256 DATA_CONTRACT_PATH DATA_CONTRACT_SHA256
 "$PYTHON_BIN" - "$RUN_MANIFEST" "$GIT_COMMIT" "$GIT_DIRTY" "$FOUNDATION_SHA256" "$MANIFEST_SHA256" "${RUN_ARGS[@]}" <<'PY'
 import json
 import os
@@ -230,6 +237,8 @@ payload = {
     'foundation_checkpoint_sha256': foundation_sha256,
     'manifest_path': os.environ.get('MANIFEST_PATH', ''),
     'manifest_sha256': manifest_sha256,
+    'data_contract_path': os.environ['DATA_CONTRACT_PATH'],
+    'data_contract_sha256': os.environ['DATA_CONTRACT_SHA256'],
     'historical_family_id': os.environ.get('HISTORICAL_FAMILY_ID', '') if os.environ['CONDITION'] == 'historical_selective' else '',
     'historical_recipe_path': os.environ.get('HISTORICAL_RECIPE_PATH', '') if os.environ['CONDITION'] == 'historical_selective' else '',
     'historical_recipe_sha256': os.environ.get('HISTORICAL_RECIPE_SHA256', '') if os.environ['CONDITION'] == 'historical_selective' else '',

@@ -23,7 +23,28 @@ This identity is separate from the TMLR study. The ICASSP paper must not reuse T
 - Development seeds: `42`, `1024`, and `3407`, unless the artifact audit proves that an existing, larger matched block is valid.
 - Model changes: none. Use the existing CBraMod implementation and existing adaptation components.
 
+The primary runs reuse the rejected-paper serialized artifacts already mounted
+under `/data/neurogroup/mingyangjiang/data`: `SEED-V_processed_lmdb`, `FACED`,
+`ISRUC`, and `PHYSIO_MI`. The active revision launcher verifies these roots
+before training. It also verifies the legacy split source and representative
+tensor schema, then checks that the EEGxPlore loader applies the historical
+single `/100` scaling exactly once. Do not regenerate or substitute a dataset
+root for a paper-facing run without recording a new provenance audit.
+
 The exact split, preprocessing, optimizer, epoch budget, checkpoint-selection rule, and data-root mapping must be recorded before launching the first matched block.
+
+The stored-data fidelity contract is:
+
+| Dataset | Stored representation | Rejected-paper split and loader contract |
+|---|---|---|
+| SEED-V | LMDB, `(62, 1, 200)` | `__keys__`; trials `0–4/5–9/10–14`; drop `M1/M2/VEO/HEO`, 200 Hz, 0.3–75 Hz, no average reference; loader `/100` |
+| FACED | LMDB, `(32, 10, 200)` | `__keys__`; serialized artifact split; loader `/100` |
+| ISRUC | `seq/` and `labels/`, `(20, 6, 6000)` plus `(20,)` labels | subjects `1–80/81–90/91–100`; loader `/100` |
+| PhysioNet-MI | LMDB, `(64, 4, 200)` | `__keys__`; serialized artifact split; loader `/100` |
+
+These are the CBraMod-compatible EEGxPlore loaders. The separate LaBraM
+implementation intentionally returns raw tensors and owns `/100` scaling in
+its training engine; it is not part of this paper.
 
 ## Main method ladder
 
