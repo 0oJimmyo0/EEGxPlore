@@ -54,19 +54,24 @@ The smallest publishable comparison is:
 2. Upper-1 selective fine-tuning;
 3. Full fine-tuning;
 4. AttnRes-only adaptation;
-5. Historical selective adaptation: AttnRes + typed specialists, using the
-   verified rejected-paper recipe;
+5. Fresh selective adaptation: AttnRes + typed specialists, using the locked
+   `revision/fresh_selective_recipe.json`;
 6. Specialist-only adaptation with depth-independent selection, as an optional
    component control.
 
 For `specialist_only`, use the existing typed spatial/spectral specialist bank with the normalized layer representation as its baseline-only router input; the original CBraMod parameters and dense shared FFN remain frozen. The historical “MoE-only, no depth router” runs already include `pre_attn` AttnRes, so they are reuse candidates for the combined condition, not evidence for the specialist-only row.
 
-`historical_selective` is the paper-facing label for the historical selective
-system. It currently resolves to the same existing AttnRes-plus-specialist
-parameter family as `combined`, but it must not be launched as a historical
-reproduction until the complete configuration of run family `1785556` has been
-audited and frozen. `combined` remains the clean implementation control;
-`historical_selective` carries the provenance claim.
+`selective_fresh` is the paper-facing label for a new, independently
+provenanced run family. It resolves to the existing AttnRes-plus-specialist
+parameter path, but every run must carry the hash of the locked
+`fresh_selective_recipe.json`; the recipe cannot be changed in response to test
+results. `combined` remains an implementation/debug control.
+
+`historical_selective` is archival context only. The original family `1785556`
+has no recoverable checkpoint and lacks required raw recipe/provenance fields,
+so it is permanently non-launchable and its reported values must not appear in
+the ICASSP main table. The same rule applies to the historical dense and
+AttnRes candidate families until their provenance is complete.
 
 The selective method is the candidate contribution, not an assumed winner. If
 it does not beat the relevant controls, the paper must be framed as a

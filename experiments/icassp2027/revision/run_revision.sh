@@ -19,8 +19,6 @@ PROTOCOL="${4:-${REVISION_PROTOCOL:-cbramod_benchmark}}"
 EPOCHS="${5:-${EPOCHS:-40}}"
 MODEL_ROOT="${6:-${MODEL_ROOT:-$REPO_DIR/output/icassp2027_revision}}"
 EXPECTED_COMMIT="${7:-${EXPECTED_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}}"
-HISTORICAL_RECIPE_CONFIRMED="${HISTORICAL_RECIPE_CONFIRMED:-0}"
-
 CUDA_ID="${CUDA_ID:-0}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
@@ -35,19 +33,16 @@ EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-1000}"
 REQUIRE_CLEAN="${REQUIRE_CLEAN:-1}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/data/neurogroup/mingyangjiang/data/weights/pretrained_weights.pth}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-HISTORICAL_RECIPE_PATH="${HISTORICAL_RECIPE_PATH:-$SCRIPT_DIR/historical_recipe_1785556.json}"
-HISTORICAL_FAMILY_ID="${HISTORICAL_FAMILY_ID:-1785556}"
+FRESH_SELECTIVE_RECIPE_PATH="${FRESH_SELECTIVE_RECIPE_PATH:-$SCRIPT_DIR/fresh_selective_recipe.json}"
 
 if [[ "$CONDITION" == "historical_selective" ]]; then
-  if [[ "$HISTORICAL_RECIPE_CONFIRMED" != "1" && "$HISTORICAL_RECIPE_CONFIRMED" != "true" ]]; then
-    echo "historical_selective is locked until the historical recipe audit is complete" >&2
-    echo "set HISTORICAL_RECIPE_CONFIRMED=1 only after completing experiments/icassp2027/revision/HISTORICAL_RECIPE_AUDIT.md" >&2
-    exit 2
-  fi
-  if [[ ! -f "$HISTORICAL_RECIPE_PATH" ]]; then
-    echo "historical recipe is unavailable: $HISTORICAL_RECIPE_PATH" >&2
-    exit 2
-  fi
+  echo "historical_selective is permanently locked: historical checkpoint and complete recipe are unavailable" >&2
+  echo "use selective_fresh for an independently provenanced ICASSP run" >&2
+  exit 2
+fi
+if [[ "$CONDITION" == "selective_fresh" && ! -f "$FRESH_SELECTIVE_RECIPE_PATH" ]]; then
+  echo "fresh selective recipe is unavailable: $FRESH_SELECTIVE_RECIPE_PATH" >&2
+  exit 2
 fi
 
 case "$DATASET" in
@@ -162,8 +157,8 @@ RUN_ARGS=(
   "${SPLIT_ARGS[@]}"
 )
 
-if [[ "$CONDITION" == "historical_selective" ]]; then
-  RUN_ARGS+=(--historical_recipe_path "$HISTORICAL_RECIPE_PATH" --historical_family_id "$HISTORICAL_FAMILY_ID")
+if [[ "$CONDITION" == "selective_fresh" ]]; then
+  RUN_ARGS+=(--fresh_selective_recipe_path "$FRESH_SELECTIVE_RECIPE_PATH")
 fi
 
 if [[ "$DATASET" == "FACED" ]]; then
@@ -177,8 +172,8 @@ elif [[ "$USE_EMA" != "0" && "$USE_EMA" != "false" ]]; then
 fi
 
 AUDIT_ARGS=("${RUN_ARGS[@]}" --expected-commit "$EXPECTED_COMMIT")
-if [[ "$CONDITION" == "historical_selective" ]]; then
-  AUDIT_ARGS+=(--historical-recipe "$HISTORICAL_RECIPE_PATH")
+if [[ "$CONDITION" == "selective_fresh" ]]; then
+  AUDIT_ARGS+=(--fresh-selective-recipe "$FRESH_SELECTIVE_RECIPE_PATH")
 fi
 if [[ "$REQUIRE_CLEAN" == "1" || "$REQUIRE_CLEAN" == "true" ]]; then
   AUDIT_ARGS+=(--require-clean)
@@ -196,16 +191,16 @@ MANIFEST_SHA256=""
 if [[ -n "$MANIFEST_PATH" ]]; then
   MANIFEST_SHA256="$(sha256sum "$MANIFEST_PATH" | awk '{print $1}')"
 fi
-HISTORICAL_RECIPE_SHA256=""
-if [[ "$CONDITION" == "historical_selective" ]]; then
-  HISTORICAL_RECIPE_SHA256="$(sha256sum "$HISTORICAL_RECIPE_PATH" | awk '{print $1}')"
+FRESH_SELECTIVE_RECIPE_SHA256=""
+if [[ "$CONDITION" == "selective_fresh" ]]; then
+  FRESH_SELECTIVE_RECIPE_SHA256="$(sha256sum "$FRESH_SELECTIVE_RECIPE_PATH" | awk '{print $1}')"
 fi
 DATA_CONTRACT_SHA256="$(sha256sum "$DATA_CONTRACT_PATH" | awk '{print $1}')"
 GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
 RUN_MANIFEST="$MODEL_DIR/run_manifest.json"
 
-export DATASET CONDITION PROTOCOL SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH HISTORICAL_RECIPE_PATH HISTORICAL_FAMILY_ID HISTORICAL_RECIPE_SHA256 DATA_CONTRACT_PATH DATA_CONTRACT_SHA256
+export DATASET CONDITION PROTOCOL SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
 "$PYTHON_BIN" - "$RUN_MANIFEST" "$GIT_COMMIT" "$GIT_DIRTY" "$FOUNDATION_SHA256" "$MANIFEST_SHA256" "${RUN_ARGS[@]}" <<'PY'
 import json
 import os
@@ -239,9 +234,8 @@ payload = {
     'manifest_sha256': manifest_sha256,
     'data_contract_path': os.environ['DATA_CONTRACT_PATH'],
     'data_contract_sha256': os.environ['DATA_CONTRACT_SHA256'],
-    'historical_family_id': os.environ.get('HISTORICAL_FAMILY_ID', '') if os.environ['CONDITION'] == 'historical_selective' else '',
-    'historical_recipe_path': os.environ.get('HISTORICAL_RECIPE_PATH', '') if os.environ['CONDITION'] == 'historical_selective' else '',
-    'historical_recipe_sha256': os.environ.get('HISTORICAL_RECIPE_SHA256', '') if os.environ['CONDITION'] == 'historical_selective' else '',
+    'fresh_selective_recipe_path': os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '') if os.environ['CONDITION'] == 'selective_fresh' else '',
+    'fresh_selective_recipe_sha256': os.environ.get('FRESH_SELECTIVE_RECIPE_SHA256', '') if os.environ['CONDITION'] == 'selective_fresh' else '',
     'command': command,
 }
 with open(path, 'w', encoding='utf-8') as handle:
@@ -271,6 +265,7 @@ summary = os.path.join(os.environ['MODEL_DIR'], 'experiment_summary.csv')
 payload = {
     'completed_utc': datetime.now(timezone.utc).isoformat(),
     'exit_code': int(exit_code),
+    'repository_commit': os.environ.get('GIT_COMMIT', ''),
     'dataset': os.environ.get('DATASET', ''),
     'condition': os.environ.get('CONDITION', ''),
     'protocol': os.environ.get('PROTOCOL', ''),
@@ -278,6 +273,16 @@ payload = {
     'model_dir': os.environ.get('MODEL_DIR', ''),
     'experiment_summary': summary if os.path.isfile(summary) else '',
     'summary_present': os.path.isfile(summary),
+    'data_contract_path': os.environ.get('DATA_CONTRACT_PATH', ''),
+    'data_contract_sha256': os.environ.get('DATA_CONTRACT_SHA256', ''),
+    'fresh_selective_recipe_path': (
+        os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '')
+        if os.environ.get('CONDITION') == 'selective_fresh' else ''
+    ),
+    'fresh_selective_recipe_sha256': (
+        os.environ.get('FRESH_SELECTIVE_RECIPE_SHA256', '')
+        if os.environ.get('CONDITION') == 'selective_fresh' else ''
+    ),
 }
 with open(path, 'w', encoding='utf-8') as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)

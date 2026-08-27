@@ -26,6 +26,7 @@ FIELDNAMES = [
     "condition",
     "historical_family_id",
     "historical_recipe_sha256",
+    "fresh_selective_recipe_sha256",
     "seed",
     "split",
     "preprocessing",
@@ -114,7 +115,7 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
     summary = _last_csv_row(summary_path)
     result = _read_json(run_dir / "result_manifest.json")
 
-    protocol = str(summary.get("revision_protocol") or manifest.get("protocol") or "")
+    protocol = str(summary.get("revision_protocol") or manifest.get("protocol") or result.get("protocol") or "")
     split_source = str(
         summary.get("split_manifest_source")
         or manifest.get("split_manifest_source")
@@ -134,7 +135,12 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
     else:
         run_status = "failed"
 
-    code_commit = str(summary.get("git_commit") or manifest.get("repository_commit") or "")
+    code_commit = str(
+        summary.get("git_commit")
+        or manifest.get("repository_commit")
+        or result.get("repository_commit")
+        or ""
+    )
     gpu = _command_value(manifest.get("command"), "--cuda")
     epoch_budget = str(summary.get("epochs") or _command_value(manifest.get("command"), "--epochs") or "")
     selection_rule = str(summary.get("selection_metric") or "kappa")
@@ -151,14 +157,29 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
     return {
         "source_kind": "new_revision_run",
         "run_status": run_status,
-        "dataset": str(summary.get("dataset") or manifest.get("dataset") or ""),
-        "condition": str(summary.get("revision_condition") or manifest.get("condition") or ""),
+        "dataset": str(summary.get("dataset") or manifest.get("dataset") or result.get("dataset") or ""),
+        "condition": str(
+            summary.get("revision_condition")
+            or manifest.get("condition")
+            or result.get("condition")
+            or ""
+        ),
         "historical_family_id": str(summary.get("historical_family_id") or manifest.get("historical_family_id") or ""),
         "historical_recipe_sha256": str(summary.get("historical_recipe_sha256") or manifest.get("historical_recipe_sha256") or ""),
+        "fresh_selective_recipe_sha256": str(
+            summary.get("fresh_selective_recipe_sha256")
+            or manifest.get("fresh_selective_recipe_sha256")
+            or result.get("fresh_selective_recipe_sha256")
+            or ""
+        ),
         "seed": str(summary.get("seed") or manifest.get("seed") or ""),
         "split": protocol,
         "preprocessing": f"{split_source};dataset_dir={manifest.get('dataset_dir', '')}",
-        "data_contract_sha256": str(manifest.get("data_contract_sha256") or ""),
+        "data_contract_sha256": str(
+            manifest.get("data_contract_sha256")
+            or result.get("data_contract_sha256")
+            or ""
+        ),
         "epoch_budget": epoch_budget,
         "selection_rule": selection_rule,
         "code_commit": code_commit,

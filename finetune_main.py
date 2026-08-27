@@ -85,6 +85,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
             'attnres_only',
             'specialist_only',
             'combined',
+            'selective_fresh',
             'historical_selective',
         ],
         help='Canonical condition for the focused ICASSP revision profile.',
@@ -101,6 +102,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default='',
         help='Machine-verified historical recipe used by the ICASSP provenance condition.',
+    )
+    parser.add_argument(
+        '--fresh_selective_recipe_path',
+        type=str,
+        default='',
+        help='Machine-verified recipe used by the fresh ICASSP selective condition.',
     )
     parser.add_argument(
         '--historical_family_id',
@@ -552,6 +559,7 @@ REVISION_CONDITIONS = {
     'attnres_only',
     'specialist_only',
     'combined',
+    'selective_fresh',
     'historical_selective',
 }
 
@@ -630,18 +638,28 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
         )
 
     args.frozen = condition == 'frozen'
-    # ``historical_selective`` is a provenance/recipe label, not a new
-    # trainability mask.  Keep the implementation mask canonical so that the
-    # trainer cannot silently reject or reinterpret the historical condition.
-    args.trainability_mode = 'combined' if condition == 'historical_selective' else condition
+    # The two selective labels share the implementation mask but have
+    # different provenance claims.  ``selective_fresh`` is a new, locked
+    # ICASSP condition; ``historical_selective`` remains an audited-history
+    # label and is guarded by its historical recipe.
+    args.trainability_mode = 'combined' if condition in {
+        'selective_fresh',
+        'historical_selective',
+    } else condition
     args.attnres_variant = 'pre_attn' if condition in {
         'attnres_only',
         'combined',
+        'selective_fresh',
         'historical_selective',
     } else 'none'
     args.attnres_start_layer = 0
     args.attnres_gated = False
-    args.moe = condition in {'specialist_only', 'combined', 'historical_selective'}
+    args.moe = condition in {
+        'specialist_only',
+        'combined',
+        'selective_fresh',
+        'historical_selective',
+    }
     args.moe_attnres_depth_context_mode = 'compact_shared'
     args.moe_attnres_depth_summary_mode = 'auto'
     args.moe_attnres_depth_probe_mlp_for_router = False
@@ -656,6 +674,12 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
     if args.downstream_dataset not in REVISION_DATASETS:
         raise ValueError(
             '[icassp2027_revision] dataset must be SEED-V, FACED, ISRUC, or PhysioNet-MI.'
+        )
+    if args.revision_condition == 'historical_selective':
+        raise ValueError(
+            '[icassp2027_revision] historical_selective is permanently locked: '
+            'the rejected-paper checkpoint and complete recipe are unavailable; '
+            'use selective_fresh for independently provenanced runs.'
         )
     if args.backbone != 'cbramod':
         raise ValueError('[icassp2027_revision] only the CBraMod backbone is allowed.')

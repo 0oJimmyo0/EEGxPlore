@@ -82,6 +82,14 @@ def main() -> None:
     assert any('spatial_router' in name for name in combined)
     assert not any('.moe_ffn.shared.' in name for name in combined)
 
+    fresh_params = _params('selective_fresh')
+    resolve_revision_condition(fresh_params)
+    assert fresh_params.trainability_mode == 'combined'
+    mode, _ = configure_trainability(model, fresh_params)
+    assert mode == 'combined'
+    fresh = _names(model)
+    assert fresh == combined
+
     historical_params = _params('historical_selective')
     resolve_revision_condition(historical_params)
     assert historical_params.trainability_mode == 'combined'

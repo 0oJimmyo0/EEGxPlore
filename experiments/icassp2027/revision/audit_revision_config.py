@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from finetune_main import add_faced_args, add_seedv_args, add_shared_args, validate_args
-from verify_historical_recipe import verify_recipe
+from verify_fresh_selective_recipe import verify_recipe as verify_fresh_recipe
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,9 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
         help='Reject tracked or untracked working-tree changes.',
     )
     parser.add_argument(
-        '--historical-recipe',
-        default=str(Path(__file__).with_name('historical_recipe_1785556.json')),
-        help='Machine-readable recipe required for historical_selective.',
+        '--fresh-selective-recipe',
+        default=str(Path(__file__).with_name('fresh_selective_recipe.json')),
+        help='Machine-readable recipe required for selective_fresh.',
     )
     return parser
 
@@ -70,9 +70,11 @@ def main() -> None:
     if args.require_clean and status:
         raise SystemExit('working tree is not clean; commit the revision before an evidence run')
 
-    historical_recipe_info = {}
-    if args.revision_condition == 'historical_selective':
-        historical_recipe_info = verify_recipe(Path(args.historical_recipe), args)
+    fresh_selective_recipe_info = {}
+    if args.revision_condition == 'selective_fresh':
+        fresh_selective_recipe_info = verify_fresh_recipe(
+            Path(args.fresh_selective_recipe), args
+        )
 
     resolved = {
         'repository_root': str(REPO_ROOT),
@@ -96,9 +98,9 @@ def main() -> None:
         'input_scale_divisor': args.input_scale_divisor,
         'foundation_dir': os.path.realpath(os.path.abspath(args.foundation_dir)),
         'datasets_dir': os.path.realpath(os.path.abspath(args.datasets_dir)),
-        'historical_recipe_path': os.path.realpath(os.path.abspath(args.historical_recipe))
-        if args.revision_condition == 'historical_selective' else '',
-        **historical_recipe_info,
+        'fresh_selective_recipe_path': os.path.realpath(os.path.abspath(args.fresh_selective_recipe))
+        if args.revision_condition == 'selective_fresh' else '',
+        **fresh_selective_recipe_info,
     }
     print(json.dumps(resolved, indent=2, sort_keys=True))
 

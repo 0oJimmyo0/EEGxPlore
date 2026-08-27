@@ -51,7 +51,7 @@ def main() -> None:
             'moe': True,
             'moe_router_base_feature_mode': 'full',
         },
-        'historical_selective': {
+        'selective_fresh': {
             'trainability_mode': 'combined',
             'attnres_variant': 'pre_attn',
             'moe': True,
@@ -66,6 +66,14 @@ def main() -> None:
         assert args.backbone == 'cbramod'
         assert args.selection_metric == 'kappa'
         assert args.input_scale_divisor == 100.0
+
+    historical = _args('historical_selective')
+    try:
+        validate_args(historical)
+    except ValueError as exc:
+        assert 'permanently locked' in str(exc)
+    else:
+        raise AssertionError('historical_selective was not permanently locked')
 
     rejected = _args('combined')
     rejected.model_dir = '/tmp/not-an-icasp-output'

@@ -17,11 +17,12 @@ The active scope is deliberately limited to:
 
 There is no new architecture in the active plan. Learned depth-conditioned routing, compact-context routing, PSD/context features, new expert decompositions, LaBraM, and broad hyperparameter sweeps are excluded from the primary result.
 
-The paper-facing selective condition is named `historical_selective`. It is
-kept separate from the implementation control `combined` so that a historical
-result is never silently presented as a reproduction before its full recipe and
-provenance have been audited. The old `MoE-only` logs already used `pre_attn`
-AttnRes and must not be relabeled as `specialist_only`.
+The paper-facing selective condition is named `selective_fresh`. It is a
+freshly frozen implementation of the existing AttnRes-plus-typed-specialist
+path, with its own recipe and result provenance. `historical_selective` is an
+archival label for the unrecoverable rejected-paper family and is permanently
+locked in the active profile. The old `MoE-only` logs
+already used `pre_attn` AttnRes and must not be relabeled as `specialist_only`.
 
 ## Script status
 
@@ -44,6 +45,8 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/revision/submit_revision.slurm`
 - `experiments/icassp2027/revision/audit_revision_config.py`
 - `experiments/icassp2027/revision/verify_data_contract.py`
+- `experiments/icassp2027/revision/verify_fresh_selective_recipe.py`
+- `experiments/icassp2027/revision/fresh_selective_recipe.json`
 - `experiments/icassp2027/revision/build_evidence_registry.py`
 - `experiments/icassp2027/revision/HISTORICAL_RECIPE_AUDIT.md`
 - `experiments/icassp2027/revision/historical_recipe_1785556.json`
@@ -52,7 +55,9 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/revision/historical_candidates.csv`
 - `experiments/icassp2027/revision/test_*.py`
 
-The retained legacy launchers still contain historical defaults. Do not use them as the active experiment interface until the focused revision launcher described in `REVISION_PLAN.md` is added. In particular, do not aggregate results from `output/icassp2027_depth` into the main table.
+The retained legacy launchers still contain historical defaults. Use only the
+focused revision launcher for paper-facing runs. In particular, do not
+aggregate results from `output/icassp2027_depth` into the main table.
 
 ## Separation rule
 

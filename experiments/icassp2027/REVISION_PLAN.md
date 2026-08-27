@@ -29,14 +29,16 @@ The current `output/icassp2027_depth` pilots are supplemental candidates only. T
 
 ## 2. Add one focused launcher
 
-Use the single launcher under `experiments/icassp2027/revision/` that calls the existing CBraMod training entry point. It takes dataset, condition, seed, split/protocol, GPU count, and output directory through explicit arguments/environment variables and rejects forbidden datasets/backbones and historical output roots. The `historical_selective` label is guarded until the `1785556` recipe audit is complete.
+Use the single launcher under `experiments/icassp2027/revision/` that calls the existing CBraMod training entry point. It takes dataset, condition, seed, split/protocol, GPU count, and output directory through explicit arguments/environment variables and rejects forbidden datasets/backbones and historical output roots. The paper-facing `selective_fresh` label is tied to a locked recipe; `historical_selective` remains archival and non-launchable.
 
 The launcher should create a self-contained run manifest before training and a result manifest after training. It must not implement a new model. It should expose the named conditions in `REVISION_CONTRACT.md`, with the depth-independent specialist condition as the default candidate and any depth-enabled condition behind an explicit supplemental flag.
 
-For `historical_selective`, `audit_revision_config.py` also verifies the
-resolved arguments against `revision/historical_recipe_1785556.json` and records
-the recipe hash. The recipe remains pending until the historical bundle audit
-recovers all required values.
+The paper-facing `selective_fresh` condition is verified against the locked
+`revision/fresh_selective_recipe.json`, and its hash is recorded in every
+manifest. It is not to be tuned after inspecting test results. The
+`historical_selective` condition remains permanently locked because the
+`1785556` checkpoint and complete raw recipe are unavailable; its audit is
+archival documentation, not a launch prerequisite.
 
 Before submitting a batch, run one smoke job per dataset with the smallest valid budget and verify: data loading, label counts, validation-only selection, checkpoint creation, metric extraction, and output isolation.
 
@@ -49,7 +51,7 @@ Priority order for compute:
 3. PhysioNet-MI;
 4. ISRUC after resolving the known memory/resource issue.
 
-For each dataset, run Frozen + head, Full FT, and AttnRes-only first. These are the minimum baselines needed to determine whether the observed gains are real and whether a dataset is wired correctly. Then run Specialist-only and the combined condition using exactly the same split, selection rule, budget, and seeds. Use `historical_selective` only for the audited historical-recipe reproduction; use `combined` for the implementation control before that audit.
+For each dataset, run Frozen + head, Full FT, and AttnRes-only first. These are the minimum baselines needed to determine whether the observed gains are real and whether a dataset is wired correctly. Then run Specialist-only and `selective_fresh` using exactly the same split, selection rule, budget, and seeds. Use `combined` only as an implementation control; `historical_selective` is permanently non-launchable.
 
 Promote a dataset to the main table only when the core conditions have a complete matched three-seed block. A weak result is still useful; an unmatched result is not.
 
