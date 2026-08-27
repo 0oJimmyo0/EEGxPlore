@@ -25,6 +25,7 @@ venv/
 
 # Training / cluster (do not commit)
 logs/
+icassp_logs/
 output/
 checkpoints/
 *.pth
