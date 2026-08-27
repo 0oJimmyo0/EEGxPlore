@@ -7,7 +7,7 @@ This plan turns the revision contract into a small number of auditable artifacts
 Create one registry under `output/icassp2027_revision/` with one row per candidate run. Use
 `revision/build_evidence_registry.py` to regenerate it from immutable run artifacts. Record:
 
-`dataset, condition, seed, split, preprocessing, epoch budget, selection rule, code commit, checkpoint path, checkpoint hash, metric files, trainable parameters, runtime, GPU, TMLR-overlap status, reuse decision, notes`.
+`dataset, condition, seed, split, preprocessing, data-contract hash, epoch budget, selection rule, code commit, checkpoint path, checkpoint hash, metric files, trainable parameters, runtime, GPU, TMLR-overlap status, reuse decision, notes`.
 
 Use the following decisions:
 

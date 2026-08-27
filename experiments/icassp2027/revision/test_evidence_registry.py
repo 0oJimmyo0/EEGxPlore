@@ -24,6 +24,7 @@ def main() -> None:
                     "protocol": "cbramod_benchmark",
                     "seed": 42,
                     "dataset_dir": "/data/seedv",
+                    "data_contract_sha256": "contract123",
                     "command": ["--cuda", "1", "--epochs", "40"],
                 }
             ),
@@ -84,6 +85,7 @@ def main() -> None:
         assert rows[0]["reuse_decision"] == "candidate_pending_audit"
         assert rows[0]["gpu"] == "1"
         assert rows[0]["split"] == "cbramod_benchmark"
+        assert rows[0]["data_contract_sha256"] == "contract123"
         assert rows[1]["source_kind"] == "rejected_paper_historical"
         assert rows[1]["historical_family_id"] == "1785556"
         assert rows[1]["reuse_decision"] == "candidate_pending_audit"
