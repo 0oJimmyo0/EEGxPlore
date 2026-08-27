@@ -181,7 +181,17 @@ def _git_provenance() -> Dict[str, Any]:
         return {'git_commit': '', 'git_dirty': None, 'git_error': str(exc)}
 
 
-TRAINABILITY_MODES = {'frozen', 'full', 'upper4', 'depth_aggregation', 'typed_conditional'}
+TRAINABILITY_MODES = {
+    'frozen',
+    'full',
+    'upper1',
+    'upper4',
+    'attnres_only',
+    'specialist_only',
+    'combined',
+    'depth_aggregation',
+    'typed_conditional',
+}
 
 
 def is_depth_parameter(name: str) -> bool:
@@ -205,6 +215,21 @@ def is_depth_aggregation_parameter(name: str) -> bool:
     ))
 
 
+def is_specialist_adaptation_parameter(name: str) -> bool:
+    """Return whether a parameter belongs to the focused typed-specialist path."""
+    return any(
+        token in name
+        for token in (
+            '.moe_ffn.spatial_specialists.',
+            '.moe_ffn.spectral_specialists.',
+            '.moe_ffn.spatial_router.',
+            '.moe_ffn.spectral_router.',
+            '.moe_ffn.spatial_router_input_norm.',
+            '.moe_ffn.spectral_router_input_norm.',
+        )
+    )
+
+
 def resolve_trainability_mode(params) -> str:
     """Resolve the centralized backbone trainability contract."""
     mode = str(getattr(params, 'trainability_mode', 'auto')).strip().lower()
@@ -215,6 +240,12 @@ def resolve_trainability_mode(params) -> str:
             and getattr(params, 'moe_route_mode', '') == 'typed_conditional'
         ):
             mode = 'typed_conditional'
+        elif getattr(params, 'experiment_profile', 'none') == 'icassp2027_revision':
+            mode = str(getattr(params, 'revision_condition', '')).strip().lower()
+            if not mode or mode == 'none':
+                raise ValueError(
+                    'icassp2027_revision requires a named revision_condition when trainability_mode=auto.'
+                )
         elif getattr(params, 'frozen', False):
             mode = 'frozen'
         else:
@@ -270,9 +301,20 @@ def configure_trainability(model: torch.nn.Module, params) -> Tuple[str, List[Tu
                 parameter.requires_grad = False
             elif mode == 'typed_conditional':
                 parameter.requires_grad = is_icasp_conditional_parameter(name)
+            elif mode == 'upper1':
+                layer_match = re.search(r'backbone\.encoder\.layers\.(\d+)\.', name)
+                parameter.requires_grad = bool(layer_match and int(layer_match.group(1)) == 11)
             elif mode == 'upper4':
                 layer_match = re.search(r'backbone\.encoder\.layers\.(\d+)\.', name)
                 parameter.requires_grad = bool(layer_match and int(layer_match.group(1)) >= 8)
+            elif mode == 'attnres_only':
+                parameter.requires_grad = is_depth_parameter(name)
+            elif mode == 'specialist_only':
+                parameter.requires_grad = is_specialist_adaptation_parameter(name)
+            elif mode == 'combined':
+                parameter.requires_grad = (
+                    is_depth_parameter(name) or is_specialist_adaptation_parameter(name)
+                )
             else:
                 parameter.requires_grad = True
         if parameter.requires_grad:

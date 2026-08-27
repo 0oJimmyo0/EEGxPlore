@@ -142,14 +142,25 @@ class CBraMod(nn.Module):
                 raise ValueError(
                     "moe_route_mode must be one of {'typed_capacity_domain', 'typed_conditional'}"
                 )
-            if moe_route_mode == "typed_capacity_domain" and attnres_variant not in ("pre_attn", "full"):
+            if moe_route_mode == "typed_capacity_domain" and attnres_variant not in ("none", "pre_attn", "full"):
                 raise ValueError(
-                    "typed_capacity_domain requires attnres_variant pre_attn or full "
-                    "(pre-attn AttnRes path for router inputs)."
+                    "typed_capacity_domain requires attnres_variant none, pre_attn, or full."
                 )
             if moe_route_mode == "typed_conditional" and attnres_variant != "none":
                 raise ValueError("typed_conditional requires attnres_variant=none")
-            if moe_route_mode == "typed_capacity_domain" and attnres_start_layer > moe_start:
+            if (
+                moe_route_mode == "typed_capacity_domain"
+                and attnres_variant == "none"
+                and moe_router_base_feature_mode != "baseline_only"
+            ):
+                raise ValueError(
+                    "typed_capacity_domain without AttnRes requires router_base_feature_mode=baseline_only."
+                )
+            if (
+                moe_route_mode == "typed_capacity_domain"
+                and attnres_variant != "none"
+                and attnres_start_layer > moe_start
+            ):
                 raise ValueError(
                     f"attnres_start_layer must be <= first MoE layer index ({moe_start}); "
                     f"got {attnres_start_layer}. Otherwise MoE runs without baseline/attnres."

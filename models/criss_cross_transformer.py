@@ -578,6 +578,13 @@ class TransformerEncoderLayer(nn.Module):
             router_context = None
             if self.moe_ffn is not None and getattr(self.moe_ffn, "moe_kind", "") == "typed_conditional":
                 router_context = {"sample": ffn_in}
+            elif self.moe_ffn is not None and getattr(self.moe_ffn, "moe_kind", "") == "typed_capacity_domain":
+                # The focused revision's specialist-only control uses the
+                # existing typed bank without AttnRes.  Supplying the same
+                # normalized representation for both slots preserves the
+                # router interface while the model enforces baseline_only
+                # router features for this condition.
+                router_context = {"baseline": ffn_in, "attnres": ffn_in}
             x = x + self._ff_block(ffn_in, router_context=router_context)
             return x, [x]
 
@@ -627,7 +634,9 @@ class TransformerEncoderLayer(nn.Module):
             if self.moe_attnres_depth_probe_mlp_for_router and hasattr(self, 'pre_mlp_res'):
                 _, mlp_alpha = self.pre_mlp_res(mlp_source_pool, return_alpha=True)
         ffn_in = self.norm2(mlp_in)
-        # typed_capacity_domain MoE needs pre-attn baseline/attnres [B,C,S,D] (PSD is set from backbone context).
+        # typed_capacity_domain MoE normally receives pre-attn baseline/attnres
+        # [B,C,S,D] (PSD is set from backbone context).  The no-AttnRes
+        # specialist-only control is handled in the branch above.
         router_ctx: Optional[Dict[str, Tensor]] = None
         moe = self.moe_ffn
         needs_pre_attn_ctx = moe is not None and getattr(moe, "moe_kind", "") == "typed_capacity_domain"

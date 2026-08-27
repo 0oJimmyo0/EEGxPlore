@@ -31,6 +31,8 @@ The smallest publishable comparison is:
 5. Specialist-only adaptation with depth-independent selection;
 6. AttnRes + specialist adaptation, if the matched artifact audit supports it.
 
+For `specialist_only`, use the existing typed spatial/spectral specialist bank with the normalized layer representation as its baseline-only router input; the original CBraMod parameters and dense shared FFN remain frozen. The historical “MoE-only, no depth router” runs already include `pre_attn` AttnRes, so they are reuse candidates for the combined condition, not evidence for the specialist-only row.
+
 The combined method is the candidate contribution, not an assumed winner. If it does not beat the relevant controls, the paper must be framed as a controlled empirical study and the claim narrowed accordingly.
 
 Learned depth-conditioned routing, compact-context routing, PSD/context inputs, new expert layouts, new low-rank operators, and broad depth/expert sweeps are not part of the primary result. At most one already-implemented depth-enabled condition may appear as a clearly labeled supplemental diagnostic if it is cheap and its provenance is complete.

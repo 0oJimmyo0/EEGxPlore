@@ -32,6 +32,10 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/scripts/extract_metadata.py`
 - `experiments/icassp2027/scripts/generate_manifests.py`
 - `experiments/icassp2027/scripts/frozen_probe.py`
+- `experiments/icassp2027/revision/run_revision.sh`
+- `experiments/icassp2027/revision/submit_revision.slurm`
+- `experiments/icassp2027/revision/audit_revision_config.py`
+- `experiments/icassp2027/revision/test_*.py`
 
 The retained legacy launchers still contain historical defaults. Do not use them as the active experiment interface until the focused revision launcher described in `REVISION_PLAN.md` is added. In particular, do not aggregate results from `output/icassp2027_depth` into the main table.
 

@@ -70,8 +70,22 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         '--experiment_profile',
         type=str,
         default='none',
-        choices=['none', 'icassp2027'],
+        choices=['none', 'icassp2027', 'icassp2027_revision'],
         help='Enable a fail-fast reproducibility firewall for the ICASSP study.',
+    )
+    parser.add_argument(
+        '--revision_condition',
+        type=str,
+        default='none',
+        choices=['none', 'frozen', 'upper1', 'full', 'attnres_only', 'specialist_only', 'combined'],
+        help='Canonical condition for the focused ICASSP revision profile.',
+    )
+    parser.add_argument(
+        '--revision_protocol',
+        type=str,
+        default='cbramod_benchmark',
+        choices=['cbramod_benchmark', 'seedv_subject_disjoint'],
+        help='Primary benchmark cohort or the separate subject-disjoint SEED-V supplement.',
     )
     parser.add_argument(
         '--icassp_split_manifest',
@@ -147,7 +161,18 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         '--trainability_mode',
         type=str,
         default='auto',
-        choices=['auto', 'frozen', 'full', 'upper4', 'depth_aggregation', 'typed_conditional'],
+        choices=[
+            'auto',
+            'frozen',
+            'full',
+            'upper1',
+            'upper4',
+            'attnres_only',
+            'specialist_only',
+            'combined',
+            'depth_aggregation',
+            'typed_conditional',
+        ],
         help='Centralized backbone trainability contract; auto preserves legacy behavior outside ICASSP.',
     )
     parser.add_argument('--use_pretrained_weights', action='store_true')
@@ -498,7 +523,175 @@ def add_seedv_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+REVISION_DATASETS = {'SEED-V', 'FACED', 'ISRUC', 'PhysioNet-MI'}
+REVISION_CONDITIONS = {
+    'frozen',
+    'upper1',
+    'full',
+    'attnres_only',
+    'specialist_only',
+    'combined',
+}
+
+
+def _revision_output_root() -> str:
+    return os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output', 'icassp2027_revision'))
+
+
+def _set_revision_moe_defaults(args: argparse.Namespace, router_base_feature_mode: str) -> None:
+    """Set the small, fixed specialist configuration used by the revision ladder."""
+    args.moe = True
+    args.moe_num_layers = 1
+    args.moe_num_experts = 4
+    args.moe_route_mode = 'typed_capacity_domain'
+    args.moe_router_policy = 'sample'
+    args.moe_capacity_factor = 1.0
+    args.moe_load_balance = 0.0
+    args.moe_domain_bias = False
+    args.moe_domain_bias_reg = 0.0
+    args.moe_router_arch = 'mlp'
+    args.moe_router_mlp_hidden = 128
+    args.moe_use_psd_router_features = False
+    args.moe_use_attnres_depth_router_features = False
+    args.moe_attnres_depth_context_mode = 'compact_shared'
+    args.moe_attnres_depth_block_count = 4
+    args.moe_attnres_depth_summary_mode = 'auto'
+    args.moe_attnres_depth_probe_mlp_for_router = False
+    args.moe_attnres_depth_router_init = 'xavier'
+    args.moe_attnres_depth_router_norm_gate = True
+    args.moe_attnres_depth_router_gate_init = 0.075
+    args.moe_attnres_depth_router_norm_eps = 1e-6
+    args.moe_attnres_depth_block_separation_coef = 0.0
+    args.moe_attnres_depth_block_separation_target_js = 0.03
+    args.moe_attnres_depth_summary_grad_mode = 'detached'
+    args.moe_attnres_depth_summary_unfreeze_epoch = 1
+    args.moe_router_dispatch_mode = 'soft'
+    args.moe_router_temperature = 1.0
+    args.moe_router_entropy_coef = 0.0
+    args.moe_router_balance_kl_coef = 0.0
+    args.moe_router_z_loss_coef = 0.0
+    args.moe_router_jitter_std = 0.0
+    args.moe_router_jitter_final_std = 0.0
+    args.moe_router_jitter_anneal_epochs = 0
+    args.moe_router_soft_warmup_epochs = 0
+    args.moe_uniform_dispatch_warmup_epochs = 0
+    args.moe_shared_blend_warmup_epochs = 0
+    args.moe_shared_blend_start = 1.0
+    args.moe_shared_blend_end = 0.0
+    args.moe_shared_output_scale = 1.0
+    args.moe_expert_output_scale = 1.0
+    args.moe_router_base_feature_mode = router_base_feature_mode
+    args.moe_router_entropy_coef_spatial = -1.0
+    args.moe_router_entropy_coef_spectral = -1.0
+    args.moe_router_balance_kl_coef_spatial = -1.0
+    args.moe_router_balance_kl_coef_spectral = -1.0
+    args.moe_specialist_branch_mode = 'both'
+    args.moe_router_compact_feature_mode = 'none'
+    args.moe_router_compact_feature_dim = 8
+    args.moe_router_compact_warmup_epochs = 0
+    args.moe_router_compact_gate_init = 1.0
+    args.moe_expert_init_noise_std = 0.0
+
+
+def resolve_revision_condition(args: argparse.Namespace) -> None:
+    """Resolve a named revision condition into one canonical model configuration."""
+    if args.experiment_profile != 'icassp2027_revision':
+        if args.revision_condition != 'none':
+            raise ValueError('--revision_condition requires --experiment_profile icassp2027_revision.')
+        return
+
+    condition = str(args.revision_condition).strip().lower()
+    if condition not in REVISION_CONDITIONS:
+        raise ValueError(
+            '[icassp2027_revision] --revision_condition must be one of '
+            f'{sorted(REVISION_CONDITIONS)}.'
+        )
+
+    args.frozen = condition == 'frozen'
+    args.trainability_mode = condition
+    args.attnres_variant = 'pre_attn' if condition in {'attnres_only', 'combined'} else 'none'
+    args.attnres_start_layer = 0
+    args.attnres_gated = False
+    args.moe = condition in {'specialist_only', 'combined'}
+    args.moe_attnres_depth_context_mode = 'compact_shared'
+    args.moe_attnres_depth_summary_mode = 'auto'
+    args.moe_attnres_depth_probe_mlp_for_router = False
+    if args.moe:
+        _set_revision_moe_defaults(
+            args,
+            router_base_feature_mode='baseline_only' if condition == 'specialist_only' else 'full',
+        )
+
+
+def _validate_icassp_revision(args: argparse.Namespace) -> None:
+    if args.downstream_dataset not in REVISION_DATASETS:
+        raise ValueError(
+            '[icassp2027_revision] dataset must be SEED-V, FACED, ISRUC, or PhysioNet-MI.'
+        )
+    if args.backbone != 'cbramod':
+        raise ValueError('[icassp2027_revision] only the CBraMod backbone is allowed.')
+    if args.selection_metric != 'kappa':
+        raise ValueError('[icassp2027_revision] checkpoint selection must use validation kappa.')
+    if abs(float(args.input_scale_divisor) - 100.0) > 1e-12:
+        raise ValueError('[icassp2027_revision] input_scale_divisor is fixed at 100.0.')
+
+    output_root = _revision_output_root()
+    model_dir = os.path.realpath(os.path.abspath(args.model_dir))
+    try:
+        common_root = os.path.commonpath([output_root, model_dir])
+    except ValueError as exc:
+        raise ValueError('[icassp2027_revision] model_dir must be under output/icassp2027_revision/.') from exc
+    if common_root != output_root:
+        raise ValueError(
+            '[icassp2027_revision] model_dir must be under '
+            f'{output_root}, got {model_dir}.'
+        )
+
+    if args.revision_protocol == 'seedv_subject_disjoint':
+        if args.downstream_dataset != 'SEED-V':
+            raise ValueError('[icassp2027_revision] subject-disjoint protocol is SEED-V-only.')
+        manifest = args.seedv_split_manifest or args.icassp_split_manifest
+        if not manifest:
+            raise ValueError(
+                '[icassp2027_revision] subject-disjoint SEED-V requires --seedv_split_manifest.'
+            )
+        if not os.path.isfile(manifest):
+            raise ValueError(f'[icassp2027_revision] split manifest does not exist: {manifest}')
+        try:
+            validate_manifest_integrity(manifest, require_sidecar=True)
+        except (FileNotFoundError, RuntimeError) as exc:
+            raise ValueError(f'[icassp2027_revision] manifest integrity check failed: {exc}') from exc
+    else:
+        if args.icassp_split_manifest:
+            raise ValueError(
+                '[icassp2027_revision] primary benchmark does not use --icassp_split_manifest.'
+            )
+        if args.downstream_dataset == 'SEED-V' and args.seedv_split_manifest:
+            raise ValueError(
+                '[icassp2027_revision] primary SEED-V uses the LMDB __keys__ cohort; '
+                'remove --seedv_split_manifest.'
+            )
+
+    if args.routing_export_dir:
+        raise ValueError('[icassp2027_revision] routing exports are outside the focused primary profile.')
+    if args.moe:
+        forbidden_features = {
+            'moe_use_psd_router_features': args.moe_use_psd_router_features,
+            'moe_use_attnres_depth_router_features': args.moe_use_attnres_depth_router_features,
+            'moe_domain_bias': args.moe_domain_bias,
+            'moe_router_compact_feature_mode': args.moe_router_compact_feature_mode,
+        }
+        active = {key: value for key, value in forbidden_features.items() if value not in (False, 'none')}
+        if active:
+            raise ValueError(f'[icassp2027_revision] forbidden specialist features are active: {active}')
+        if args.moe_route_mode != 'typed_capacity_domain':
+            raise ValueError('[icassp2027_revision] specialist conditions require typed_capacity_domain.')
+        if args.moe_num_layers != 1:
+            raise ValueError('[icassp2027_revision] specialist conditions use exactly the top layer.')
+
+
 def validate_args(args: argparse.Namespace) -> None:
+    resolve_revision_condition(args)
     if args.min_lr <= 0:
         raise ValueError('--min_lr must be > 0.')
     if args.ema_decay < 0.0 or args.ema_decay >= 1.0:
@@ -785,6 +978,9 @@ def validate_args(args: argparse.Namespace) -> None:
                 raise ValueError('[icassp2027] Static/Routed must use trainability_mode=typed_conditional or auto.')
         elif effective_mode == 'typed_conditional':
             raise ValueError('[icassp2027] typed_conditional requires --moe.')
+
+    if args.experiment_profile == 'icassp2027_revision':
+        _validate_icassp_revision(args)
 
 
 def build_dataset(args: argparse.Namespace):
