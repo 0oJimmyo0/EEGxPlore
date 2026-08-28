@@ -1,0 +1,25 @@
+row_id,table_role,dataset,paper_label,executable_condition,seed,source_class,source_reference,paper_eligibility,required_new_run,status,notes
+main_seedv_dense,main_cross_dataset,SEED-V,Dense,full,42,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy row; do not pool with new rows
+main_seedv_dense,main_cross_dataset,SEED-V,Dense,full,3407,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy row; do not pool with new rows
+main_seedv_dense,main_cross_dataset,SEED-V,Dense,full,2024,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy row; do not pool with new rows
+main_seedv_selective,main_cross_dataset,SEED-V,Selective,historical_selective,42,legacy_reported_paper,rejected_manuscript_table_8_and_table_13,main_table_legacy_labeled,no,planned,MoE-only historical mapping; not specialist-only
+main_seedv_selective,main_cross_dataset,SEED-V,Selective,historical_selective,3407,legacy_reported_paper,rejected_manuscript_table_8_and_table_13,main_table_legacy_labeled,no,planned,MoE-only historical mapping; not specialist-only
+main_seedv_selective,main_cross_dataset,SEED-V,Selective,historical_selective,2024,legacy_reported_paper,rejected_manuscript_table_8_and_table_13,main_table_legacy_labeled,no,planned,MoE-only historical mapping; not specialist-only
+main_faced_dense,main_cross_dataset,FACED,Dense,full,42,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived FACED protocol
+main_faced_dense,main_cross_dataset,FACED,Dense,full,3407,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived FACED protocol
+main_faced_dense,main_cross_dataset,FACED,Dense,full,2024,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived FACED protocol
+main_faced_selective,main_cross_dataset,FACED,Selective,selective_paper,42,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived FACED protocol
+main_faced_selective,main_cross_dataset,FACED,Selective,selective_paper,3407,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived FACED protocol
+main_faced_selective,main_cross_dataset,FACED,Selective,selective_paper,2024,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived FACED protocol
+main_isruc_dense,main_cross_dataset,ISRUC,Dense,full,42,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived ISRUC protocol
+main_isruc_dense,main_cross_dataset,ISRUC,Dense,full,3407,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived ISRUC protocol
+main_isruc_dense,main_cross_dataset,ISRUC,Dense,full,2024,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived ISRUC protocol
+main_isruc_selective,main_cross_dataset,ISRUC,Selective,selective_paper,42,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived ISRUC protocol
+main_isruc_selective,main_cross_dataset,ISRUC,Selective,selective_paper,3407,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived ISRUC protocol
+main_isruc_selective,main_cross_dataset,ISRUC,Selective,selective_paper,2024,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,Paper-derived ISRUC protocol
+ablation_seedv_attnres,seedv_component_ablation,SEED-V,AttnRes-only,historical_attnres_only,42,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy component row
+ablation_seedv_attnres,seedv_component_ablation,SEED-V,AttnRes-only,historical_attnres_only,3407,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy component row
+ablation_seedv_attnres,seedv_component_ablation,SEED-V,AttnRes-only,historical_attnres_only,2024,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy component row
+ablation_seedv_upper1,seedv_component_ablation,SEED-V,Upper-1,upper1,42,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,New control against top-block fine-tuning
+ablation_seedv_upper1,seedv_component_ablation,SEED-V,Upper-1,upper1,3407,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,New control against top-block fine-tuning
+ablation_seedv_upper1,seedv_component_ablation,SEED-V,Upper-1,upper1,2024,new_multiseed,planned_new_run,primary_new_evidence,yes,planned,New control against top-block fine-tuning

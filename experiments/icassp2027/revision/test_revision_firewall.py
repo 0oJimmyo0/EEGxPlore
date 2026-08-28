@@ -57,6 +57,12 @@ def main() -> None:
             'moe': True,
             'moe_router_base_feature_mode': 'full',
         },
+        'selective_paper': {
+            'trainability_mode': 'combined',
+            'attnres_variant': 'pre_attn',
+            'moe': True,
+            'moe_router_base_feature_mode': 'full',
+        },
     }
     for condition, fields in expected.items():
         args = _args(condition)
@@ -74,6 +80,37 @@ def main() -> None:
         assert 'permanently locked' in str(exc)
     else:
         raise AssertionError('historical_selective was not permanently locked')
+
+    archived_protocol = _args('upper1')
+    archived_protocol.revision_protocol = 'seedv_subject_disjoint'
+    try:
+        validate_args(archived_protocol)
+    except ValueError as exc:
+        assert 'archived' in str(exc)
+    else:
+        raise AssertionError('archived subject-disjoint protocol was accepted')
+
+    archived_dataset = _parser().parse_args([
+        '--datasets_dir', '/tmp/icassp_revision_dataset',
+        '--num_of_classes', '4',
+        '--model_dir', str(REPO_ROOT / 'output/icassp2027_revision/contract_test/seed_42'),
+        '--downstream_dataset', 'PhysioNet-MI',
+        '--experiment_profile', 'icassp2027_revision',
+        '--revision_condition', 'full',
+        '--revision_protocol', 'cbramod_benchmark',
+    ])
+    try:
+        validate_args(archived_dataset)
+    except ValueError as exc:
+        assert 'active dataset' in str(exc)
+    else:
+        raise AssertionError('archived PhysioNet-MI dataset was accepted')
+
+    smoke = _args('upper1')
+    smoke.revision_run_mode = 'smoke'
+    smoke.epochs = 1
+    smoke.model_dir = str(REPO_ROOT / 'output/icassp2027_smoke/contract_test/seed_42')
+    validate_args(smoke)
 
     rejected = _args('combined')
     rejected.model_dir = '/tmp/not-an-icasp-output'

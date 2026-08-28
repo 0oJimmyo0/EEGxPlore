@@ -86,6 +86,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
             'specialist_only',
             'combined',
             'selective_fresh',
+            'selective_paper',
             'historical_selective',
         ],
         help='Canonical condition for the focused ICASSP revision profile.',
@@ -96,6 +97,13 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         default='cbramod_benchmark',
         choices=['cbramod_benchmark', 'seedv_subject_disjoint'],
         help='Primary benchmark cohort or the separate subject-disjoint SEED-V supplement.',
+    )
+    parser.add_argument(
+        '--revision_run_mode',
+        type=str,
+        default='paper',
+        choices=['paper', 'smoke', 'internal'],
+        help='Execution provenance mode for the focused ICASSP revision.',
     )
     parser.add_argument(
         '--historical_recipe_path',
@@ -551,7 +559,7 @@ def add_seedv_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-REVISION_DATASETS = {'SEED-V', 'FACED', 'ISRUC', 'PhysioNet-MI'}
+REVISION_DATASETS = {'SEED-V', 'FACED', 'ISRUC'}
 REVISION_CONDITIONS = {
     'frozen',
     'upper1',
@@ -560,12 +568,14 @@ REVISION_CONDITIONS = {
     'specialist_only',
     'combined',
     'selective_fresh',
+    'selective_paper',
     'historical_selective',
 }
 
 
-def _revision_output_root() -> str:
-    return os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output', 'icassp2027_revision'))
+def _revision_output_root(run_mode: str = 'paper') -> str:
+    root_name = 'icassp2027_smoke' if str(run_mode).strip().lower() == 'smoke' else 'icassp2027_revision'
+    return os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output', root_name))
 
 
 def _set_revision_moe_defaults(args: argparse.Namespace, router_base_feature_mode: str) -> None:
@@ -638,18 +648,20 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
         )
 
     args.frozen = condition == 'frozen'
-    # The two selective labels share the implementation mask but have
-    # different provenance claims.  ``selective_fresh`` is a new, locked
-    # ICASSP condition; ``historical_selective`` remains an audited-history
-    # label and is guarded by its historical recipe.
+    # Selective labels share the implementation mask but have different
+    # provenance claims. ``selective_fresh`` is a separately locked
+    # independent recipe; ``selective_paper`` uses the paper-derived dataset
+    # protocol; ``historical_selective`` is archival and non-launchable.
     args.trainability_mode = 'combined' if condition in {
         'selective_fresh',
+        'selective_paper',
         'historical_selective',
     } else condition
     args.attnres_variant = 'pre_attn' if condition in {
         'attnres_only',
         'combined',
         'selective_fresh',
+        'selective_paper',
         'historical_selective',
     } else 'none'
     args.attnres_start_layer = 0
@@ -658,6 +670,7 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
         'specialist_only',
         'combined',
         'selective_fresh',
+        'selective_paper',
         'historical_selective',
     }
     args.moe_attnres_depth_context_mode = 'compact_shared'
@@ -673,22 +686,31 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
 def _validate_icassp_revision(args: argparse.Namespace) -> None:
     if args.downstream_dataset not in REVISION_DATASETS:
         raise ValueError(
-            '[icassp2027_revision] dataset must be SEED-V, FACED, ISRUC, or PhysioNet-MI.'
+            '[icassp2027_revision] active dataset must be SEED-V, FACED, or ISRUC.'
         )
     if args.revision_condition == 'historical_selective':
         raise ValueError(
             '[icassp2027_revision] historical_selective is permanently locked: '
             'the rejected-paper checkpoint and complete recipe are unavailable; '
-            'use selective_fresh for independently provenanced runs.'
+            'use selective_paper or selective_fresh for independently provenanced runs.'
         )
     if args.backbone != 'cbramod':
         raise ValueError('[icassp2027_revision] only the CBraMod backbone is allowed.')
+    run_mode = str(getattr(args, 'revision_run_mode', 'paper')).strip().lower()
+    if run_mode not in {'paper', 'smoke', 'internal'}:
+        raise ValueError('[icassp2027_revision] revision_run_mode must be paper, smoke, or internal.')
+    if run_mode == 'smoke' and args.epochs != 1:
+        raise ValueError('[icassp2027_revision] smoke runs must use exactly one epoch.')
+    if args.revision_protocol != 'cbramod_benchmark':
+        raise ValueError(
+            '[icassp2027_revision] subject-disjoint SEED-V is archived and unavailable in the active profile.'
+        )
     if args.selection_metric != 'kappa':
         raise ValueError('[icassp2027_revision] checkpoint selection must use validation kappa.')
     if abs(float(args.input_scale_divisor) - 100.0) > 1e-12:
         raise ValueError('[icassp2027_revision] input_scale_divisor is fixed at 100.0.')
 
-    output_root = _revision_output_root()
+    output_root = _revision_output_root(run_mode)
     model_dir = os.path.realpath(os.path.abspath(args.model_dir))
     try:
         common_root = os.path.commonpath([output_root, model_dir])
@@ -700,30 +722,15 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
             f'{output_root}, got {model_dir}.'
         )
 
-    if args.revision_protocol == 'seedv_subject_disjoint':
-        if args.downstream_dataset != 'SEED-V':
-            raise ValueError('[icassp2027_revision] subject-disjoint protocol is SEED-V-only.')
-        manifest = args.seedv_split_manifest or args.icassp_split_manifest
-        if not manifest:
-            raise ValueError(
-                '[icassp2027_revision] subject-disjoint SEED-V requires --seedv_split_manifest.'
-            )
-        if not os.path.isfile(manifest):
-            raise ValueError(f'[icassp2027_revision] split manifest does not exist: {manifest}')
-        try:
-            validate_manifest_integrity(manifest, require_sidecar=True)
-        except (FileNotFoundError, RuntimeError) as exc:
-            raise ValueError(f'[icassp2027_revision] manifest integrity check failed: {exc}') from exc
-    else:
-        if args.icassp_split_manifest:
-            raise ValueError(
-                '[icassp2027_revision] primary benchmark does not use --icassp_split_manifest.'
-            )
-        if args.downstream_dataset == 'SEED-V' and args.seedv_split_manifest:
-            raise ValueError(
-                '[icassp2027_revision] primary SEED-V uses the LMDB __keys__ cohort; '
-                'remove --seedv_split_manifest.'
-            )
+    if args.icassp_split_manifest:
+        raise ValueError(
+            '[icassp2027_revision] active benchmark does not use --icassp_split_manifest.'
+        )
+    if args.downstream_dataset == 'SEED-V' and args.seedv_split_manifest:
+        raise ValueError(
+            '[icassp2027_revision] active SEED-V uses the LMDB __keys__ cohort; '
+            'remove --seedv_split_manifest.'
+        )
 
     if args.routing_export_dir:
         raise ValueError('[icassp2027_revision] routing exports are outside the focused primary profile.')

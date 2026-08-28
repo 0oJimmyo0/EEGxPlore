@@ -32,7 +32,7 @@ if [[ ! -f "$SCRIPT_DIR/run_revision.sh" ]]; then
 fi
 SEED="${3:-${SEED:-42}}"
 PROTOCOL="${4:-${REVISION_PROTOCOL:-cbramod_benchmark}}"
-EPOCHS="${5:-${EPOCHS:-40}}"
+REQUESTED_EPOCHS="${5:-${EPOCHS:-}}"
 
 USE_ACCRE_STACK="${USE_ACCRE_STACK:-0}"
 if [[ "$USE_ACCRE_STACK" == "1" ]]; then
@@ -66,4 +66,7 @@ unset PYTHONPATH
 unset PYTHONHOME
 export PYTHONNOUSERSITE=1
 
-exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL" "$EPOCHS"
+if [[ -n "$REQUESTED_EPOCHS" ]]; then
+  exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL" "$REQUESTED_EPOCHS"
+fi
+exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL"

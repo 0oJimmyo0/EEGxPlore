@@ -82,13 +82,17 @@ def main() -> None:
             rows = list(csv.DictReader(handle))
         assert all(set(row) == set(FIELDNAMES) for row in rows)
         assert rows[0]["condition"] == "combined"
+        assert rows[0]["provenance_class"] == "new_multiseed"
+        assert rows[0]["run_mode"] == "paper"
         assert rows[0]["tmlr_overlap_status"] == "unreviewed_pending_row_audit"
         assert rows[0]["reuse_decision"] == "candidate_pending_audit"
         assert rows[0]["gpu"] == "1"
         assert rows[0]["split"] == "cbramod_benchmark"
         assert rows[0]["data_contract_sha256"] == "contract123"
         assert rows[0]["fresh_selective_recipe_sha256"] == "recipe123"
-        assert rows[1]["source_kind"] == "rejected_paper_historical"
+        assert rows[1]["source_kind"] == "rejected_paper_report"
+        assert rows[1]["provenance_class"] == "legacy_context_only"
+        assert rows[1]["run_mode"] == "legacy_report"
         assert rows[1]["historical_family_id"] == "1785556"
         assert rows[1]["reuse_decision"] == "candidate_pending_audit"
 

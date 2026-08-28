@@ -1,5 +1,5 @@
-contract_version: 2
-last_updated: "2026-08-26"
+contract_version: 3
+last_updated: "2026-08-27"
 status: active_icaspp_focused_revision
 active_contract: experiments/icassp2027/REVISION_CONTRACT.md
 active_plan: experiments/icassp2027/REVISION_PLAN.md
@@ -13,30 +13,42 @@ primary_datasets:
   - SEED-V
   - FACED
   - ISRUC
+archived_datasets:
   - PhysioNet-MI
-excluded_datasets:
   - TUEV
+excluded_datasets:
   - Mumtaz2016
 primary_protocol: rejected_paper_cbramod_benchmark
-supplemental_protocol: seedv_subject_disjoint
+archived_protocols:
+  - seedv_subject_disjoint
 output_root: output/icassp2027_revision
 seeds:
   - 42
-  - 1024
   - 3407
+  - 2024
 selection:
   development_metric: validation_cohen_kappa
   primary_test_metrics:
     - balanced_accuracy
     - macro_f1
   test_access_during_development: false
-methods:
-  - frozen_probe
-  - upper1_finetune
-  - full_finetune
+main_conditions:
+  - full
+  - selective_paper
+seedv_ablation_conditions:
+  - full
   - attnres_only
-  - specialist_only
-  - attnres_specialist
+  - selective_paper
+  - upper1
+required_new_rows:
+  - SEED-V/upper1
+  - FACED/full
+  - FACED/selective_paper
+  - ISRUC/full
+  - ISRUC/selective_paper
+optional_conditions:
+  - attnres_only
+  - depth_routing_diagnostic
 forbidden_methods:
   - depthagg_only
   - typed_conditional_primary
@@ -46,4 +58,5 @@ evidence:
   tmlr_results: forbidden
   tmlr_figures: forbidden
   tmlr_prose: forbidden
-  unmatched_historical_runs: supplement_or_rerun
+  tmlr_checkpoints: forbidden
+  unmatched_historical_runs: legacy_context_only_or_rerun

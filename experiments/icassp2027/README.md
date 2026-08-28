@@ -11,18 +11,29 @@ new backbone or a second foundation-model study.
 The active scope is deliberately limited to:
 
 - CBraMod only;
-- SEED-V, FACED, ISRUC, and PhysioNet-MI;
+- SEED-V, FACED, and ISRUC;
 - the existing upper-layer selective adaptation, AttnRes, and specialist components;
 - one matched benchmark protocol and a small, predeclared method ladder.
 
+PhysioNet-MI, TUEV, and the subject-disjoint SEED-V protocol are archived
+evidence only. They are not part of the active ICASSP compute plan. The new
+paper-facing rows are SEED-V Upper-1 and matched Dense/Selective rows on FACED
+and ISRUC, using seeds `42`, `3407`, and `2024`.
+
 There is no new architecture in the active plan. Learned depth-conditioned routing, compact-context routing, PSD/context features, new expert decompositions, LaBraM, and broad hyperparameter sweeps are excluded from the primary result.
 
-The paper-facing selective condition is named `selective_fresh`. It is a
-freshly frozen implementation of the existing AttnRes-plus-typed-specialist
-path, with its own recipe and result provenance. `historical_selective` is an
-archival label for the unrecoverable rejected-paper family and is permanently
-locked in the active profile. The old `MoE-only` logs
+The existing `selective_fresh` condition is a separately locked independent
+recipe and remains unchanged. New paper-derived selective runs use the
+explicit `selective_paper` executable condition, which shares the same
+AttnRes-plus-typed-specialist implementation but resolves dataset-specific
+paper-derived training protocols. `historical_selective` is an archival label
+for the unrecoverable rejected-paper family and is permanently locked in the
+active profile. The old `MoE-only` logs
 already used `pre_attn` AttnRes and must not be relabeled as `specialist_only`.
+
+Legacy SEED-V values reported in the rejected manuscript are eligible only as
+clearly labeled `legacy_reported_paper` evidence. They are not current
+reproductions and must not be combined into pooled statistics with new rows.
 
 ## Script status
 
@@ -43,6 +54,10 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/scripts/frozen_probe.py`
 - `experiments/icassp2027/revision/run_revision.sh`
 - `experiments/icassp2027/revision/submit_revision.slurm`
+- `experiments/icassp2027/revision/verify_paper_protocol.py`
+- `experiments/icassp2027/revision/paper_protocol_*.json`
+- `experiments/icassp2027/revision/paper_table_manifest.csv`
+- `experiments/icassp2027/revision/audit_paper_scope.py`
 - `experiments/icassp2027/revision/audit_revision_config.py`
 - `experiments/icassp2027/revision/verify_data_contract.py`
 - `experiments/icassp2027/revision/verify_fresh_selective_recipe.py`
@@ -57,7 +72,9 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 
 The retained legacy launchers still contain historical defaults. Use only the
 focused revision launcher for paper-facing runs. In particular, do not
-aggregate results from `output/icassp2027_depth` into the main table.
+aggregate results from `output/icassp2027_depth` into the main table. Smoke
+runs use `output/icassp2027_smoke` and are permanently ineligible for the
+paper registry.
 
 ## Separation rule
 

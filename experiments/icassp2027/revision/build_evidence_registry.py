@@ -21,12 +21,20 @@ DEFAULT_REGISTRY = DEFAULT_OUTPUT_ROOT / "evidence_registry.csv"
 
 FIELDNAMES = [
     "source_kind",
+    "provenance_class",
+    "verification_level",
+    "paper_eligibility",
+    "source_location",
+    "run_mode",
     "run_status",
     "dataset",
     "condition",
     "historical_family_id",
     "historical_recipe_sha256",
     "fresh_selective_recipe_sha256",
+    "paper_protocol_id",
+    "paper_protocol_sha256",
+    "paper_protocol_path",
     "seed",
     "split",
     "preprocessing",
@@ -43,6 +51,7 @@ FIELDNAMES = [
     "peak_memory_mb",
     "test_balanced_accuracy",
     "test_macro_f1",
+    "reported_weighted_f1",
     "test_kappa",
     "tmlr_overlap_status",
     "reuse_decision",
@@ -114,6 +123,7 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
     summary_path = run_dir / "experiment_summary.csv"
     summary = _last_csv_row(summary_path)
     result = _read_json(run_dir / "result_manifest.json")
+    run_mode = str(manifest.get("run_mode") or result.get("run_mode") or "paper")
 
     protocol = str(summary.get("revision_protocol") or manifest.get("protocol") or result.get("protocol") or "")
     split_source = str(
@@ -153,9 +163,28 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
         notes.append("code_commit_missing")
     if run_status != "complete":
         notes.append("not_eligible_for_main_table")
+    if run_mode == "smoke":
+        notes.append("smoke_run_not_paper_evidence")
+    elif run_mode == "internal":
+        notes.append("internal_run_not_paper_evidence")
+
+    if run_mode == "smoke":
+        paper_eligibility = "not_eligible_smoke"
+        reuse_decision = "not_paper_smoke"
+    elif run_mode == "internal":
+        paper_eligibility = "not_eligible_internal"
+        reuse_decision = "internal_not_paper"
+    else:
+        paper_eligibility = "primary_new_evidence_pending_audit"
+        reuse_decision = "candidate_pending_audit" if run_status == "complete" else "invalid_failed_or_incomplete"
 
     return {
         "source_kind": "new_revision_run",
+        "provenance_class": "new_multiseed",
+        "verification_level": "run_artifacts_present" if run_status == "complete" else "run_artifacts_incomplete",
+        "paper_eligibility": paper_eligibility,
+        "source_location": str(run_manifest_path),
+        "run_mode": run_mode,
         "run_status": run_status,
         "dataset": str(summary.get("dataset") or manifest.get("dataset") or result.get("dataset") or ""),
         "condition": str(
@@ -170,6 +199,24 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
             summary.get("fresh_selective_recipe_sha256")
             or manifest.get("fresh_selective_recipe_sha256")
             or result.get("fresh_selective_recipe_sha256")
+            or ""
+        ),
+        "paper_protocol_id": str(
+            summary.get("paper_protocol_id")
+            or manifest.get("paper_protocol_id")
+            or result.get("paper_protocol_id")
+            or ""
+        ),
+        "paper_protocol_sha256": str(
+            summary.get("paper_protocol_sha256")
+            or manifest.get("paper_protocol_sha256")
+            or result.get("paper_protocol_sha256")
+            or ""
+        ),
+        "paper_protocol_path": str(
+            summary.get("paper_protocol_path")
+            or manifest.get("paper_protocol_path")
+            or result.get("paper_protocol_path")
             or ""
         ),
         "seed": str(summary.get("seed") or manifest.get("seed") or ""),
@@ -192,9 +239,10 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
         "peak_memory_mb": str(summary.get("peak_cuda_mb") or ""),
         "test_balanced_accuracy": str(summary.get("test_balanced_accuracy") or ""),
         "test_macro_f1": str(summary.get("test_macro_f1") or ""),
+        "reported_weighted_f1": "",
         "test_kappa": str(summary.get("test_kappa") or ""),
         "tmlr_overlap_status": "unreviewed_pending_row_audit",
-        "reuse_decision": "candidate_pending_audit" if run_status == "complete" else "invalid_failed_or_incomplete",
+        "reuse_decision": reuse_decision,
         "notes": ";".join(notes),
     }
 
@@ -210,8 +258,13 @@ def _historical_rows(index_path: Optional[Path]) -> List[Dict[str, str]]:
     rows: List[Dict[str, str]] = []
     for source_row in source_rows:
         row = {field: str(source_row.get(field, "") or "") for field in FIELDNAMES}
-        row["source_kind"] = "rejected_paper_historical"
-        row["run_status"] = row["run_status"] or "candidate"
+        row["source_kind"] = row["source_kind"] or "rejected_paper_report"
+        row["provenance_class"] = row["provenance_class"] or "legacy_context_only"
+        row["verification_level"] = row["verification_level"] or "unverified_historical"
+        row["paper_eligibility"] = row["paper_eligibility"] or "not_eligible_pending_audit"
+        row["source_location"] = row["source_location"] or "historical_candidates.csv"
+        row["run_mode"] = row["run_mode"] or "legacy_report"
+        row["run_status"] = row["run_status"] or "reported_not_reproduced"
         row["tmlr_overlap_status"] = row["tmlr_overlap_status"] or "unreviewed_pending_row_audit"
         row["reuse_decision"] = row["reuse_decision"] or "candidate_pending_audit"
         rows.append(row)

@@ -90,6 +90,14 @@ def main() -> None:
     fresh = _names(model)
     assert fresh == combined
 
+    paper_params = _params('selective_paper')
+    resolve_revision_condition(paper_params)
+    assert paper_params.trainability_mode == 'combined'
+    mode, _ = configure_trainability(model, paper_params)
+    assert mode == 'combined'
+    paper = _names(model)
+    assert paper == combined
+
     historical_params = _params('historical_selective')
     resolve_revision_condition(historical_params)
     assert historical_params.trainability_mode == 'combined'

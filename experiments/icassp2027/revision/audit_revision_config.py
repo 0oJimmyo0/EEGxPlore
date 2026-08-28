@@ -15,6 +15,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from finetune_main import add_faced_args, add_seedv_args, add_shared_args, validate_args
 from verify_fresh_selective_recipe import verify_recipe as verify_fresh_recipe
+from verify_paper_protocol import (
+    validate_args_against_protocol,
+    verify_protocol as verify_paper_protocol,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
         '--fresh-selective-recipe',
         default=str(Path(__file__).with_name('fresh_selective_recipe.json')),
         help='Machine-readable recipe required for selective_fresh.',
+    )
+    parser.add_argument(
+        '--paper-protocol',
+        default='',
+        help='Locked dataset-specific protocol required for paper-facing new rows.',
     )
     return parser
 
@@ -63,6 +72,12 @@ def main() -> None:
     args = parser.parse_args()
     validate_args(args)
 
+    if args.revision_run_mode in {'paper', 'smoke'} and not args.paper_protocol:
+        raise SystemExit(
+            'paper/smoke revision audits require --paper-protocol; '
+            'use the dataset-specific locked protocol'
+        )
+
     commit, status = _git_state()
     expected = str(args.expected_commit).strip()
     if expected and expected != 'HEAD' and commit != expected:
@@ -76,6 +91,14 @@ def main() -> None:
             Path(args.fresh_selective_recipe), args
         )
 
+    paper_protocol_info = {}
+    if args.paper_protocol:
+        paper_protocol_info = verify_paper_protocol(
+            Path(args.paper_protocol), args.downstream_dataset
+        )
+        if args.revision_run_mode in {'paper', 'smoke'}:
+            validate_args_against_protocol(args, paper_protocol_info)
+
     resolved = {
         'repository_root': str(REPO_ROOT),
         'git_commit': commit,
@@ -83,6 +106,7 @@ def main() -> None:
         'dataset': args.downstream_dataset,
         'condition': args.revision_condition,
         'protocol': args.revision_protocol,
+        'revision_run_mode': args.revision_run_mode,
         'model_dir': os.path.realpath(os.path.abspath(args.model_dir)),
         'backbone': args.backbone,
         'trainability_mode': args.trainability_mode,
@@ -100,7 +124,14 @@ def main() -> None:
         'datasets_dir': os.path.realpath(os.path.abspath(args.datasets_dir)),
         'fresh_selective_recipe_path': os.path.realpath(os.path.abspath(args.fresh_selective_recipe))
         if args.revision_condition == 'selective_fresh' else '',
+        'paper_protocol_path': os.path.realpath(os.path.abspath(args.paper_protocol))
+        if args.paper_protocol else '',
         **fresh_selective_recipe_info,
+        **{
+            'paper_protocol_id': paper_protocol_info.get('protocol_id', ''),
+            'paper_protocol_sha256': paper_protocol_info.get('sha256', ''),
+            'paper_protocol_status': 'locked' if paper_protocol_info else '',
+        },
     }
     print(json.dumps(resolved, indent=2, sort_keys=True))
 

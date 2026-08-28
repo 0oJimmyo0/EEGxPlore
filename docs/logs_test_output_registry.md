@@ -1,5 +1,9 @@
 # Logs Test Output Registry
 
+> Archived generated snapshot. It is retained for historical context only and
+> is not eligible for the active ICASSP table without row-level provenance
+> review.
+
 Generated from `logs`.
 
 - Total `.out` logs: 313
