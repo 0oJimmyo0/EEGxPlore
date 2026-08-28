@@ -22,7 +22,7 @@
     "classifier": "all_patch_reps",
     "input_scale_divisor": 100.0,
     "selection_metric": "kappa",
-    "num_workers": 4
+    "num_workers": 0
   },
   "parameter_sources": {
     "epochs": "rejected_manuscript_table_19",
@@ -40,7 +40,7 @@
     "classifier": "focused_revision_contract",
     "input_scale_divisor": "rejected_paper_loader_contract",
     "selection_metric": "rejected_manuscript_table_19",
-    "num_workers": "focused_revision_launcher_default"
+    "num_workers": "seedv_lmdb_single_process_loader_safeguard"
   },
-  "audit_note": "Paper-derived execution protocol; not a claim that the unavailable historical checkpoint and every historical field have been recovered."
+  "audit_note": "Paper-derived execution protocol; SEED-V uses a single-process LMDB loader because the multi-worker path stalls with worker MemoryError during validation in this environment. This changes loader parallelism only, not preprocessing, split membership, serialization, or model configuration; it is not a claim that the unavailable historical checkpoint and every historical field have been recovered."
 }

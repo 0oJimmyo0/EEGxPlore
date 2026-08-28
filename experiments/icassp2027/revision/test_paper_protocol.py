@@ -14,11 +14,11 @@ ROOT = Path(__file__).parent
 
 def main() -> None:
     expected = {
-        "SEED-V": ("paper_protocol_seedv_v1.json", 25, 64, 3e-5, 3e-2),
-        "FACED": ("paper_protocol_faced_v1.json", 40, 32, 2e-4, 2e-2),
-        "ISRUC": ("paper_protocol_isruc_v1.json", 30, 16, 3e-5, 2e-2),
+        "SEED-V": ("paper_protocol_seedv_v1.json", 25, 64, 3e-5, 3e-2, 0),
+        "FACED": ("paper_protocol_faced_v1.json", 40, 32, 2e-4, 2e-2, 4),
+        "ISRUC": ("paper_protocol_isruc_v1.json", 30, 16, 3e-5, 2e-2, 4),
     }
-    for dataset, (filename, epochs, batch, lr, weight_decay) in expected.items():
+    for dataset, (filename, epochs, batch, lr, weight_decay, num_workers) in expected.items():
         path = ROOT / filename
         info = verify_protocol(path, dataset)
         parameters = info["parameters"]
@@ -26,6 +26,7 @@ def main() -> None:
         assert parameters["batch_size"] == batch
         assert parameters["lr"] == lr
         assert parameters["weight_decay"] == weight_decay
+        assert parameters["num_workers"] == num_workers
         assert parameters["use_component_lr"] is False
         assert info["sha256"]
         payload = json.loads(path.read_text(encoding="utf-8"))
