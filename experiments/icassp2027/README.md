@@ -37,7 +37,7 @@ reproductions and must not be combined into pooled statistics with new rows.
 
 ## Script status
 
-Superseded DepthAgg and Static/Routed launchers, contract tests, and exploratory sweep scripts have been removed from the active tree. Their outputs and Git history remain available for provenance checks and recovery, but they are not valid commands for the current paper.
+Superseded DepthAgg and Static/Routed launchers, contract tests, and exploratory sweep scripts have been removed from the active tree. Their outputs and Git history remain available for provenance checks and recovery, but they are not valid commands for the current paper. The old historical-reconstruction and Phase-0 utilities are retained under `archive/` for forensic reference only.
 
 Retained utilities are limited to data/provenance checks and existing CBraMod training paths:
 
@@ -48,10 +48,6 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `scripts/SEED-V/audit_seedv_lmdb_split.py`
 - `scripts/SEED-V/build_seedv_subject_disjoint_manifest.py`
 - `scripts/FACED/write_faced_channel_manifest.py`
-- `experiments/icassp2027/scripts/audit_phase0.py`
-- `experiments/icassp2027/scripts/extract_metadata.py`
-- `experiments/icassp2027/scripts/generate_manifests.py`
-- `experiments/icassp2027/scripts/frozen_probe.py`
 - `experiments/icassp2027/revision/run_revision.sh`
 - `experiments/icassp2027/revision/submit_revision.slurm`
 - `experiments/icassp2027/revision/verify_paper_protocol.py`
@@ -60,15 +56,19 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/revision/audit_paper_scope.py`
 - `experiments/icassp2027/revision/audit_revision_config.py`
 - `experiments/icassp2027/revision/verify_data_contract.py`
-- `experiments/icassp2027/revision/verify_fresh_selective_recipe.py`
-- `experiments/icassp2027/revision/fresh_selective_recipe.json`
 - `experiments/icassp2027/revision/build_evidence_registry.py`
-- `experiments/icassp2027/revision/HISTORICAL_RECIPE_AUDIT.md`
-- `experiments/icassp2027/revision/historical_recipe_1785556.json`
-- `experiments/icassp2027/revision/verify_historical_recipe.py`
-- `experiments/icassp2027/revision/audit_historical_bundle.py`
-- `experiments/icassp2027/revision/historical_candidates.csv`
 - `experiments/icassp2027/revision/test_*.py`
+
+The independently locked `fresh_selective_recipe.json` and its verifier remain
+at their existing paths because the implementation and contract tests depend
+on them, but they are archived independent-recipe artifacts and are not
+paper-facing rows. The manuscript-reported historical index remains active in
+the registry path as `historical_candidates.csv`.
+
+Archived utilities:
+
+- `experiments/icassp2027/archive/historical_reconstruction/`
+- `experiments/icassp2027/archive/phase0_scripts/`
 
 The retained legacy launchers still contain historical defaults. Use only the
 focused revision launcher for paper-facing runs. In particular, do not

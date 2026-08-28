@@ -1,4 +1,4 @@
-row_id,table_role,dataset,paper_label,executable_condition,seed,source_class,source_reference,paper_eligibility,required_new_run,status,notes
+cell_id,table_role,dataset,paper_label,executable_condition,seed,source_class,source_reference,paper_eligibility,required_new_run,status,notes
 main_seedv_dense,main_cross_dataset,SEED-V,Dense,full,42,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy row; do not pool with new rows
 main_seedv_dense,main_cross_dataset,SEED-V,Dense,full,3407,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy row; do not pool with new rows
 main_seedv_dense,main_cross_dataset,SEED-V,Dense,full,2024,legacy_reported_paper,rejected_manuscript_table_13,main_table_legacy_labeled,no,planned,Reported legacy row; do not pool with new rows

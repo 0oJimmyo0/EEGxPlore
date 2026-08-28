@@ -1,4 +1,8 @@
-"""Verify the locked, fresh ICASSP selective-adaptation recipe."""
+"""Verify the locked ARCHIVED_INDEPENDENT selective-adaptation recipe.
+
+This recipe remains available for reproducibility and implementation tests;
+paper-facing runs must use the dataset-specific ``selective_paper`` protocol.
+"""
 
 from __future__ import annotations
 

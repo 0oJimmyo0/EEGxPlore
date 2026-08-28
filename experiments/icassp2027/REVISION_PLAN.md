@@ -13,8 +13,9 @@ review fields.
 
 The manuscript-reported SEED-V Dense, AttnRes-only, and MoE/selective rows use
 seeds `42`, `3407`, and `2024`. Their weighted-F1 values remain explicitly
-weighted-F1, not macro-F1. Missing checkpoints, commits, and raw logs remain
-unknown.
+weighted-F1, not macro-F1. The uniform comparison therefore uses balanced
+accuracy, weighted-F1, and kappa; new-run macro-F1 remains recorded as an
+additional metric. Missing checkpoints, commits, and raw logs remain unknown.
 
 ## 2. Use locked paper-derived protocols
 

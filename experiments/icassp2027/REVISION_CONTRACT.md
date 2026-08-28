@@ -85,12 +85,15 @@ runs use locked dataset protocol files. The manuscript-supported settings are:
 These are paper-derived ICASSP execution protocols, not claims that every
 historical implementation field has been recovered. Each protocol records
 which fields came from the manuscript and which are explicit current-run
-defaults.
+defaults. Component-wise learning-rate scaling is explicitly disabled in all
+three paper-facing protocols; it remains enabled only in the archived
+independent `fresh_selective` recipe.
 
 ## Provenance and reporting rules
 
 - Select checkpoints using validation Cohen's kappa only.
-- Report balanced accuracy and macro-F1 for new runs as mean ± standard deviation.
+- Report balanced accuracy, weighted-F1, and kappa for the uniform cross-source comparison as mean ± standard deviation.
+- Record macro-F1 for every new run as an additional metric; it is not the primary cross-source metric because the legacy SEED-V rows do not contain it.
 - Historical manuscript weighted-F1 values remain weighted-F1; never relabel them as macro-F1.
 - Record repository commit, data-contract hash, protocol hash, method condition, seed, checkpoint, metrics, runtime, GPU, and trainable parameters for every new run.
 - Failed, OOM, incomplete, smoke, or provenance-incomplete runs are not result rows.

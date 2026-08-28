@@ -20,6 +20,7 @@ REQUIRED_PARAMETERS = (
     "dropout",
     "label_smoothing",
     "use_ema",
+    "use_component_lr",
     "ema_decay",
     "ema_warmup_steps",
     "ema_eval_only",
@@ -67,6 +68,9 @@ def verify_protocol(path: Path, dataset: str) -> Dict[str, Any]:
     sources = payload.get("parameter_sources")
     if not isinstance(sources, dict) or set(sources) != set(REQUIRED_PARAMETERS):
         raise ValueError("paper protocol must provide a source for every execution parameter")
+    for field in ("use_ema", "use_component_lr", "ema_eval_only"):
+        if not isinstance(parameters[field], bool):
+            raise ValueError(f"paper protocol parameter {field} must be boolean")
     if int(parameters["epochs"]) < 1 or int(parameters["batch_size"]) < 1:
         raise ValueError("paper protocol epochs and batch_size must be positive")
     if float(parameters["lr"]) <= 0 or float(parameters["min_lr"]) <= 0:
@@ -103,6 +107,7 @@ def shell_exports(info: Dict[str, Any]) -> str:
         "PAPER_PROTOCOL_DROPOUT": parameters["dropout"],
         "PAPER_PROTOCOL_LABEL_SMOOTHING": parameters["label_smoothing"],
         "PAPER_PROTOCOL_USE_EMA": "1" if parameters["use_ema"] else "0",
+        "PAPER_PROTOCOL_USE_COMPONENT_LR": "1" if parameters["use_component_lr"] else "0",
         "PAPER_PROTOCOL_EMA_DECAY": parameters["ema_decay"],
         "PAPER_PROTOCOL_EMA_WARMUP_STEPS": parameters["ema_warmup_steps"],
         "PAPER_PROTOCOL_EMA_EVAL_ONLY": "1" if parameters["ema_eval_only"] else "0",
@@ -144,7 +149,7 @@ def validate_args_against_protocol(args: Any, info: Dict[str, Any]) -> None:
                 f"paper protocol drift for {field}: expected {expected}, got {actual}"
             )
 
-    for field in ("use_ema", "ema_eval_only"):
+    for field in ("use_ema", "use_component_lr", "ema_eval_only"):
         actual = bool(getattr(args, field))
         expected = bool(parameters[field])
         if actual != expected:

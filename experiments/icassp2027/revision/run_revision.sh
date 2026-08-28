@@ -33,6 +33,7 @@ REQUESTED_USE_EMA="${USE_EMA:-}"
 REQUESTED_EMA_DECAY="${EMA_DECAY:-}"
 REQUESTED_EMA_WARMUP_STEPS="${EMA_WARMUP_STEPS:-}"
 REQUESTED_EMA_EVAL_ONLY="${EMA_EVAL_ONLY:-}"
+REQUESTED_USE_COMPONENT_LR="${USE_COMPONENT_LR:-}"
 REQUESTED_NUM_WORKERS="${NUM_WORKERS:-}"
 REQUIRE_CLEAN="${REQUIRE_CLEAN:-1}"
 FRESH_SELECTIVE_RECIPE_PATH="${FRESH_SELECTIVE_RECIPE_PATH:-$SCRIPT_DIR/fresh_selective_recipe.json}"
@@ -110,6 +111,7 @@ fi
 PAPER_PROTOCOL_PATH=""
 PAPER_PROTOCOL_ID=""
 PAPER_PROTOCOL_SHA256=""
+PAPER_PROTOCOL_USE_COMPONENT_LR=""
 USE_PAPER_PROTOCOL=1
 if [[ "$RUN_MODE" == "internal" && "$CONDITION" == "selective_fresh" ]]; then
   USE_PAPER_PROTOCOL=0
@@ -138,7 +140,7 @@ import math
 import sys
 
 name, requested, expected = sys.argv[1:]
-if name in {'use_ema', 'ema_eval_only'}:
+if name in {'use_ema', 'use_component_lr', 'ema_eval_only'}:
     requested_bool = requested.lower() in {'1', 'true', 'yes', 'on'}
     expected_bool = expected == '1'
     equal = requested_bool == expected_bool
@@ -163,6 +165,7 @@ PY
   check_numeric_override dropout "$REQUESTED_DROPOUT" "$PAPER_PROTOCOL_DROPOUT"
   check_numeric_override label_smoothing "$REQUESTED_LABEL_SMOOTHING" "$PAPER_PROTOCOL_LABEL_SMOOTHING"
   check_numeric_override use_ema "$REQUESTED_USE_EMA" "$PAPER_PROTOCOL_USE_EMA"
+  check_numeric_override use_component_lr "$REQUESTED_USE_COMPONENT_LR" "$PAPER_PROTOCOL_USE_COMPONENT_LR"
   check_numeric_override ema_decay "$REQUESTED_EMA_DECAY" "$PAPER_PROTOCOL_EMA_DECAY"
   check_numeric_override ema_warmup_steps "$REQUESTED_EMA_WARMUP_STEPS" "$PAPER_PROTOCOL_EMA_WARMUP_STEPS"
   check_numeric_override ema_eval_only "$REQUESTED_EMA_EVAL_ONLY" "$PAPER_PROTOCOL_EMA_EVAL_ONLY"
@@ -264,16 +267,23 @@ RUN_ARGS=(
   --revision_protocol "$PROTOCOL"
   --revision_run_mode "$RUN_MODE"
   --selection_metric kappa
-  --use_component_lr
-  --lr_backbone_mult 0.5
-  --lr_router_mult 3.0
-  --lr_expert_mult 1.5
-  --lr_classifier_mult 1.0
-  --lr_other_mult 1.0
-  --lr_depth_mult 1.0
   --no-tqdm
   "${SPLIT_ARGS[@]}"
 )
+
+COMPONENT_LR_ENABLED=0
+if [[ "$USE_PAPER_PROTOCOL" == "0" || "$PAPER_PROTOCOL_USE_COMPONENT_LR" == "1" ]]; then
+  COMPONENT_LR_ENABLED=1
+  RUN_ARGS+=(
+    --use_component_lr
+    --lr_backbone_mult 0.5
+    --lr_router_mult 3.0
+    --lr_expert_mult 1.5
+    --lr_classifier_mult 1.0
+    --lr_other_mult 1.0
+    --lr_depth_mult 1.0
+  )
+fi
 
 if [[ "$CONDITION" == "selective_fresh" ]]; then
   RUN_ARGS+=(--fresh_selective_recipe_path "$FRESH_SELECTIVE_RECIPE_PATH")
@@ -321,7 +331,7 @@ GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
 RUN_MANIFEST="$MODEL_DIR/run_manifest.json"
 
-export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
+export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 PAPER_PROTOCOL_USE_COMPONENT_LR COMPONENT_LR_ENABLED FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
 "$PYTHON_BIN" - "$RUN_MANIFEST" "$GIT_COMMIT" "$GIT_DIRTY" "$FOUNDATION_SHA256" "$MANIFEST_SHA256" "${RUN_ARGS[@]}" <<'PY'
 import json
 import os
@@ -360,6 +370,7 @@ payload = {
     'paper_protocol_path': os.environ.get('PAPER_PROTOCOL_PATH', ''),
     'paper_protocol_id': os.environ.get('PAPER_PROTOCOL_ID', ''),
     'paper_protocol_sha256': os.environ.get('PAPER_PROTOCOL_SHA256', ''),
+    'use_component_lr': os.environ.get('COMPONENT_LR_ENABLED', '0') == '1',
     'fresh_selective_recipe_path': os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '') if os.environ['CONDITION'] == 'selective_fresh' else '',
     'fresh_selective_recipe_sha256': os.environ.get('FRESH_SELECTIVE_RECIPE_SHA256', '') if os.environ['CONDITION'] == 'selective_fresh' else '',
     'command': command,
@@ -407,6 +418,7 @@ payload = {
     'paper_protocol_path': os.environ.get('PAPER_PROTOCOL_PATH', ''),
     'paper_protocol_id': os.environ.get('PAPER_PROTOCOL_ID', ''),
     'paper_protocol_sha256': os.environ.get('PAPER_PROTOCOL_SHA256', ''),
+    'use_component_lr': os.environ.get('COMPONENT_LR_ENABLED', '0') == '1',
     'fresh_selective_recipe_path': (
         os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '')
         if os.environ.get('CONDITION') == 'selective_fresh' else ''

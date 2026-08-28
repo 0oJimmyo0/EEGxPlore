@@ -26,6 +26,7 @@ def main() -> None:
                     "dataset_dir": "/data/seedv",
                     "data_contract_sha256": "contract123",
                     "fresh_selective_recipe_sha256": "recipe123",
+                    "use_component_lr": True,
                     "command": ["--cuda", "1", "--epochs", "40"],
                 }
             ),
@@ -40,7 +41,7 @@ def main() -> None:
                 fieldnames=[
                     "dataset", "revision_condition", "revision_protocol", "seed",
                     "epochs", "selection_metric", "git_commit", "model_path",
-                    "test_balanced_accuracy", "test_macro_f1", "test_kappa",
+                    "test_balanced_accuracy", "test_macro_f1", "test_weighted_f1", "test_kappa",
                     "trainable_parameter_count", "total_wall_seconds", "peak_cuda_mb",
                 ],
             )
@@ -54,9 +55,10 @@ def main() -> None:
                 "selection_metric": "kappa",
                 "git_commit": "abc123",
                 "model_path": "",
-                "test_balanced_accuracy": "0.41",
-                "test_macro_f1": "0.40",
-                "test_kappa": "0.27",
+                    "test_balanced_accuracy": "0.41",
+                    "test_macro_f1": "0.40",
+                    "test_weighted_f1": "0.41",
+                    "test_kappa": "0.27",
                 "trainable_parameter_count": "123",
                 "total_wall_seconds": "12.5",
                 "peak_cuda_mb": "2048",
@@ -90,6 +92,8 @@ def main() -> None:
         assert rows[0]["split"] == "cbramod_benchmark"
         assert rows[0]["data_contract_sha256"] == "contract123"
         assert rows[0]["fresh_selective_recipe_sha256"] == "recipe123"
+        assert rows[0]["use_component_lr"] == "True"
+        assert rows[0]["test_weighted_f1"] == "0.41"
         assert rows[1]["source_kind"] == "rejected_paper_report"
         assert rows[1]["provenance_class"] == "legacy_context_only"
         assert rows[1]["run_mode"] == "legacy_report"

@@ -26,6 +26,7 @@ def main() -> None:
         assert parameters["batch_size"] == batch
         assert parameters["lr"] == lr
         assert parameters["weight_decay"] == weight_decay
+        assert parameters["use_component_lr"] is False
         assert info["sha256"]
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["status"] == "locked"

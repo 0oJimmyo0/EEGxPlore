@@ -1,4 +1,4 @@
-"""Static contract test for the locked paper-facing selective recipe."""
+"""Static contract test for the locked ARCHIVED_INDEPENDENT recipe."""
 
 from __future__ import annotations
 

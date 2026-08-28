@@ -35,6 +35,7 @@ FIELDNAMES = [
     "paper_protocol_id",
     "paper_protocol_sha256",
     "paper_protocol_path",
+    "use_component_lr",
     "seed",
     "split",
     "preprocessing",
@@ -51,6 +52,7 @@ FIELDNAMES = [
     "peak_memory_mb",
     "test_balanced_accuracy",
     "test_macro_f1",
+    "test_weighted_f1",
     "reported_weighted_f1",
     "test_kappa",
     "tmlr_overlap_status",
@@ -178,6 +180,12 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
         paper_eligibility = "primary_new_evidence_pending_audit"
         reuse_decision = "candidate_pending_audit" if run_status == "complete" else "invalid_failed_or_incomplete"
 
+    use_component_lr = manifest.get("use_component_lr")
+    if use_component_lr is None:
+        use_component_lr = result.get("use_component_lr")
+    if use_component_lr is None:
+        use_component_lr = "--use_component_lr" in (manifest.get("command") or [])
+
     return {
         "source_kind": "new_revision_run",
         "provenance_class": "new_multiseed",
@@ -219,6 +227,7 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
             or result.get("paper_protocol_path")
             or ""
         ),
+        "use_component_lr": str(use_component_lr),
         "seed": str(summary.get("seed") or manifest.get("seed") or ""),
         "split": protocol,
         "preprocessing": f"{split_source};dataset_dir={manifest.get('dataset_dir', '')}",
@@ -239,6 +248,7 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
         "peak_memory_mb": str(summary.get("peak_cuda_mb") or ""),
         "test_balanced_accuracy": str(summary.get("test_balanced_accuracy") or ""),
         "test_macro_f1": str(summary.get("test_macro_f1") or ""),
+        "test_weighted_f1": str(summary.get("test_weighted_f1") or ""),
         "reported_weighted_f1": "",
         "test_kappa": str(summary.get("test_kappa") or ""),
         "tmlr_overlap_status": "unreviewed_pending_row_audit",

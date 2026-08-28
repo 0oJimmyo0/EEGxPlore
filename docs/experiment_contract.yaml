@@ -30,6 +30,9 @@ selection:
   development_metric: validation_cohen_kappa
   primary_test_metrics:
     - balanced_accuracy
+    - weighted_f1
+    - kappa
+  recorded_additional_metrics:
     - macro_f1
   test_access_during_development: false
 main_conditions:
