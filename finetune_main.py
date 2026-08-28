@@ -1,6 +1,7 @@
 import argparse
 import os
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -8,6 +9,7 @@ import torch
 from datasets import faced_dataset, isruc_dataset, mumtaz_dataset, physio_dataset, seedv_dataset, tuev_dataset
 from finetune_trainer import Trainer, validate_manifest_integrity
 from models import model_for_faced, model_for_isruc, model_for_mumtaz, model_for_physio, model_for_seedv, model_for_tuev
+from experiments.icassp2027.revision.historical_candidate_schema import apply_method_recipe, load_recipe
 
 
 def add_shared_args(parser: argparse.ArgumentParser) -> None:
@@ -88,6 +90,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
             'selective_fresh',
             'selective_paper',
             'historical_selective',
+            'historical_candidate',
         ],
         help='Canonical condition for the focused ICASSP revision profile.',
     )
@@ -110,6 +113,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default='',
         help='Machine-verified historical recipe used by the ICASSP provenance condition.',
+    )
+    parser.add_argument(
+        '--historical_candidate_recipe',
+        type=str,
+        default='',
+        help='Development-only historical candidate recipe; never paper eligible.',
     )
     parser.add_argument(
         '--fresh_selective_recipe_path',
@@ -570,12 +579,23 @@ REVISION_CONDITIONS = {
     'selective_fresh',
     'selective_paper',
     'historical_selective',
+    'historical_candidate',
 }
 
 
 def _revision_output_root(run_mode: str = 'paper') -> str:
     root_name = 'icassp2027_smoke' if str(run_mode).strip().lower() == 'smoke' else 'icassp2027_revision'
     return os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'output', root_name))
+
+
+def _historical_candidate_output_root() -> str:
+    return os.path.realpath(
+        os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            'output',
+            'icassp2027_historical_candidate',
+        )
+    )
 
 
 def _set_revision_moe_defaults(args: argparse.Namespace, router_base_feature_mode: str) -> None:
@@ -652,10 +672,13 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
     # provenance claims. ``selective_fresh`` is a separately locked
     # independent recipe; ``selective_paper`` uses the paper-derived dataset
     # protocol; ``historical_selective`` is archival and non-launchable.
+    # ``historical_candidate`` is development-only and is overwritten by its
+    # explicit candidate recipe below.
     args.trainability_mode = 'combined' if condition in {
         'selective_fresh',
         'selective_paper',
         'historical_selective',
+        'historical_candidate',
     } else condition
     args.attnres_variant = 'pre_attn' if condition in {
         'attnres_only',
@@ -663,6 +686,7 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
         'selective_fresh',
         'selective_paper',
         'historical_selective',
+        'historical_candidate',
     } else 'none'
     args.attnres_start_layer = 0
     args.attnres_gated = False
@@ -672,6 +696,7 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
         'selective_fresh',
         'selective_paper',
         'historical_selective',
+        'historical_candidate',
     }
     args.moe_attnres_depth_context_mode = 'compact_shared'
     args.moe_attnres_depth_summary_mode = 'auto'
@@ -681,6 +706,25 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
             args,
             router_base_feature_mode='baseline_only' if condition == 'specialist_only' else 'full',
         )
+    if condition == 'historical_candidate':
+        recipe_path = str(
+            getattr(args, 'historical_candidate_recipe', '')
+            or getattr(args, 'historical_recipe_path', '')
+            or ''
+        ).strip()
+        if not recipe_path:
+            raise ValueError(
+                '[icassp2027_revision] historical_candidate requires '
+                '--historical_candidate_recipe.'
+            )
+        recipe_file = Path(recipe_path).expanduser().resolve()
+        recipe = load_recipe(recipe_file)
+        if recipe['dataset'] != args.downstream_dataset:
+            raise ValueError(
+                '[icassp2027_revision] historical candidate dataset mismatch: '
+                f"recipe={recipe['dataset']}, args={args.downstream_dataset}"
+            )
+        apply_method_recipe(args, recipe, recipe_file)
 
 
 def _validate_icassp_revision(args: argparse.Namespace) -> None:
@@ -701,6 +745,11 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
         raise ValueError('[icassp2027_revision] revision_run_mode must be paper, smoke, or internal.')
     if run_mode == 'smoke' and args.epochs != 1:
         raise ValueError('[icassp2027_revision] smoke runs must use exactly one epoch.')
+    if args.revision_condition == 'historical_candidate' and run_mode != 'internal':
+        raise ValueError(
+            '[icassp2027_revision] historical_candidate is development-only and '
+            'requires revision_run_mode=internal.'
+        )
     if args.revision_protocol != 'cbramod_benchmark':
         raise ValueError(
             '[icassp2027_revision] subject-disjoint SEED-V is archived and unavailable in the active profile.'
@@ -710,7 +759,11 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
     if abs(float(args.input_scale_divisor) - 100.0) > 1e-12:
         raise ValueError('[icassp2027_revision] input_scale_divisor is fixed at 100.0.')
 
-    output_root = _revision_output_root(run_mode)
+    output_root = (
+        _historical_candidate_output_root()
+        if args.revision_condition == 'historical_candidate'
+        else _revision_output_root(run_mode)
+    )
     model_dir = os.path.realpath(os.path.abspath(args.model_dir))
     try:
         common_root = os.path.commonpath([output_root, model_dir])
@@ -731,6 +784,13 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
             '[icassp2027_revision] active SEED-V uses the LMDB __keys__ cohort; '
             'remove --seedv_split_manifest.'
         )
+
+    if args.revision_condition == 'historical_candidate':
+        if not args.historical_candidate_recipe and not args.historical_recipe_path:
+            raise ValueError(
+                '[icassp2027_revision] historical_candidate requires a candidate recipe path.'
+            )
+        return
 
     if args.routing_export_dir:
         raise ValueError('[icassp2027_revision] routing exports are outside the focused primary profile.')

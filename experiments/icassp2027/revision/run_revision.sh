@@ -37,6 +37,16 @@ REQUESTED_USE_COMPONENT_LR="${USE_COMPONENT_LR:-}"
 REQUESTED_NUM_WORKERS="${NUM_WORKERS:-}"
 REQUIRE_CLEAN="${REQUIRE_CLEAN:-1}"
 FRESH_SELECTIVE_RECIPE_PATH="${FRESH_SELECTIVE_RECIPE_PATH:-$SCRIPT_DIR/fresh_selective_recipe.json}"
+HISTORICAL_CANDIDATE_RECIPE_PATH="${HISTORICAL_CANDIDATE_RECIPE_PATH:-${HISTORICAL_CANDIDATE_RECIPE:-}}"
+HISTORICAL_CANDIDATE_STAGE="${HISTORICAL_CANDIDATE_STAGE:-route}"
+HISTORICAL_CANDIDATE_SMOKE="${HISTORICAL_CANDIDATE_SMOKE:-0}"
+HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID="${HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID:-}"
+DRY_RUN="${DRY_RUN:-0}"
+
+if [[ "$DRY_RUN" != "0" && "$DRY_RUN" != "1" && "$DRY_RUN" != "false" && "$DRY_RUN" != "true" ]]; then
+  echo "DRY_RUN must be 0/1 or false/true, got: $DRY_RUN" >&2
+  exit 2
+fi
 
 case "$RUN_MODE" in
   paper|smoke|internal) ;;
@@ -51,6 +61,32 @@ if [[ "$CONDITION" == "historical_selective" ]]; then
   echo "use selective_paper for the paper-derived run or selective_fresh for the independent recipe" >&2
   exit 2
 fi
+if [[ "$CONDITION" == "historical_candidate" ]]; then
+  if [[ "$RUN_MODE" != "internal" ]]; then
+    echo "historical_candidate is development-only and requires RUN_MODE=internal" >&2
+    exit 2
+  fi
+  if [[ "$HISTORICAL_CANDIDATE_STAGE" != "opt" && "$HISTORICAL_CANDIDATE_STAGE" != "route" ]]; then
+    echo "HISTORICAL_CANDIDATE_STAGE must be opt or route" >&2
+    exit 2
+  fi
+  if [[ -z "$HISTORICAL_CANDIDATE_RECIPE_PATH" || ! -f "$HISTORICAL_CANDIDATE_RECIPE_PATH" ]]; then
+    echo "historical candidate recipe is unavailable: $HISTORICAL_CANDIDATE_RECIPE_PATH" >&2
+    exit 2
+  fi
+  CANDIDATE_VERIFY_ARGS=(
+    --recipe "$HISTORICAL_CANDIDATE_RECIPE_PATH"
+    --dataset "$DATASET"
+    --stage "$HISTORICAL_CANDIDATE_STAGE"
+    --emit-shell
+  )
+  if [[ "$HISTORICAL_CANDIDATE_SMOKE" == "1" || "$HISTORICAL_CANDIDATE_SMOKE" == "true" ]]; then
+    CANDIDATE_VERIFY_ARGS+=(--smoke)
+  fi
+  CANDIDATE_SHELL_EXPORTS="$($PYTHON_BIN "$SCRIPT_DIR/verify_historical_candidate.py" "${CANDIDATE_VERIFY_ARGS[@]}")"
+  eval "$CANDIDATE_SHELL_EXPORTS"
+fi
+HISTORICAL_FAMILY_ID="${HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID:-}"
 if [[ "$CONDITION" == "selective_fresh" && ! -f "$FRESH_SELECTIVE_RECIPE_PATH" ]]; then
   echo "fresh selective recipe is unavailable: $FRESH_SELECTIVE_RECIPE_PATH" >&2
   exit 2
@@ -114,6 +150,9 @@ PAPER_PROTOCOL_SHA256=""
 PAPER_PROTOCOL_USE_COMPONENT_LR=""
 USE_PAPER_PROTOCOL=1
 if [[ "$RUN_MODE" == "internal" && "$CONDITION" == "selective_fresh" ]]; then
+  USE_PAPER_PROTOCOL=0
+fi
+if [[ "$CONDITION" == "historical_candidate" ]]; then
   USE_PAPER_PROTOCOL=0
 fi
 if [[ "$USE_PAPER_PROTOCOL" == "1" ]]; then
@@ -193,23 +232,44 @@ PY
   EMA_EVAL_ONLY="$PAPER_PROTOCOL_EMA_EVAL_ONLY"
   CLASSIFIER="$PAPER_PROTOCOL_CLASSIFIER"
 else
-  EPOCHS="${REQUESTED_EPOCHS:-40}"
-  BATCH_SIZE="${REQUESTED_BATCH_SIZE:-64}"
-  NUM_WORKERS="${REQUESTED_NUM_WORKERS:-4}"
-  LR="${REQUESTED_LR:-3e-5}"
-  MIN_LR="${REQUESTED_MIN_LR:-5e-6}"
-  WEIGHT_DECAY="${REQUESTED_WEIGHT_DECAY:-3e-2}"
-  DROPOUT="${REQUESTED_DROPOUT:-0.1}"
-  LABEL_SMOOTHING="${REQUESTED_LABEL_SMOOTHING:-0.05}"
-  USE_EMA="${REQUESTED_USE_EMA:-1}"
-  EMA_DECAY="${REQUESTED_EMA_DECAY:-0.9995}"
-  EMA_WARMUP_STEPS="${REQUESTED_EMA_WARMUP_STEPS:-1000}"
-  EMA_EVAL_ONLY="${REQUESTED_EMA_EVAL_ONLY:-1}"
-  CLASSIFIER="all_patch_reps"
+  if [[ "$CONDITION" == "historical_candidate" ]]; then
+    EPOCHS="$HISTORICAL_CANDIDATE_EPOCHS"
+    if [[ "$HISTORICAL_CANDIDATE_SMOKE" == "1" || "$HISTORICAL_CANDIDATE_SMOKE" == "true" ]]; then
+      EPOCHS=1
+    fi
+    BATCH_SIZE="$HISTORICAL_CANDIDATE_BATCH_SIZE"
+    NUM_WORKERS="$HISTORICAL_CANDIDATE_NUM_WORKERS"
+    LR="$HISTORICAL_CANDIDATE_LR"
+    MIN_LR="$HISTORICAL_CANDIDATE_MIN_LR"
+    WEIGHT_DECAY="$HISTORICAL_CANDIDATE_WEIGHT_DECAY"
+    DROPOUT="$HISTORICAL_CANDIDATE_DROPOUT"
+    LABEL_SMOOTHING="$HISTORICAL_CANDIDATE_LABEL_SMOOTHING"
+    USE_EMA="$HISTORICAL_CANDIDATE_USE_EMA"
+    EMA_DECAY="$HISTORICAL_CANDIDATE_EMA_DECAY"
+    EMA_WARMUP_STEPS="$HISTORICAL_CANDIDATE_EMA_WARMUP_STEPS"
+    EMA_EVAL_ONLY="$HISTORICAL_CANDIDATE_EMA_EVAL_ONLY"
+    CLASSIFIER="$HISTORICAL_CANDIDATE_CLASSIFIER"
+  else
+    EPOCHS="${REQUESTED_EPOCHS:-40}"
+    BATCH_SIZE="${REQUESTED_BATCH_SIZE:-64}"
+    NUM_WORKERS="${REQUESTED_NUM_WORKERS:-4}"
+    LR="${REQUESTED_LR:-3e-5}"
+    MIN_LR="${REQUESTED_MIN_LR:-5e-6}"
+    WEIGHT_DECAY="${REQUESTED_WEIGHT_DECAY:-3e-2}"
+    DROPOUT="${REQUESTED_DROPOUT:-0.1}"
+    LABEL_SMOOTHING="${REQUESTED_LABEL_SMOOTHING:-0.05}"
+    USE_EMA="${REQUESTED_USE_EMA:-1}"
+    EMA_DECAY="${REQUESTED_EMA_DECAY:-0.9995}"
+    EMA_WARMUP_STEPS="${REQUESTED_EMA_WARMUP_STEPS:-1000}"
+    EMA_EVAL_ONLY="${REQUESTED_EMA_EVAL_ONLY:-1}"
+    CLASSIFIER="all_patch_reps"
+  fi
 fi
 
 if [[ -n "$REQUESTED_MODEL_ROOT" ]]; then
   MODEL_ROOT="$REQUESTED_MODEL_ROOT"
+elif [[ "$CONDITION" == "historical_candidate" ]]; then
+  MODEL_ROOT="$REPO_DIR/output/icassp2027_historical_candidate"
 elif [[ "$RUN_MODE" == "smoke" ]]; then
   MODEL_ROOT="$REPO_DIR/output/icassp2027_smoke"
 else
@@ -232,7 +292,11 @@ SPLIT_ARGS=()
 MANIFEST_PATH=""
 
 MODEL_ROOT="$(realpath -m "$MODEL_ROOT")"
-MODEL_DIR="$MODEL_ROOT/$DATASET_TAG/$CONDITION/seed_$SEED"
+if [[ "$CONDITION" == "historical_candidate" ]]; then
+  MODEL_DIR="$MODEL_ROOT/$DATASET_TAG/${CONDITION}_${HISTORICAL_CANDIDATE_STAGE}/seed_$SEED"
+else
+  MODEL_DIR="$MODEL_ROOT/$DATASET_TAG/$CONDITION/seed_$SEED"
+fi
 mkdir -p "$MODEL_DIR"
 
 DATA_CONTRACT_PATH="$MODEL_DIR/data_contract.json"
@@ -266,27 +330,53 @@ RUN_ARGS=(
   --revision_condition "$CONDITION"
   --revision_protocol "$PROTOCOL"
   --revision_run_mode "$RUN_MODE"
+  --historical_candidate_recipe "$HISTORICAL_CANDIDATE_RECIPE_PATH"
+  --historical_family_id "$HISTORICAL_FAMILY_ID"
   --selection_metric kappa
   --no-tqdm
   "${SPLIT_ARGS[@]}"
 )
 
+if [[ "$CONDITION" == "historical_candidate" ]]; then
+  RUN_ARGS+=(
+    --warmup_epochs "$HISTORICAL_CANDIDATE_WARMUP_EPOCHS"
+    --warmup_start_factor "$HISTORICAL_CANDIDATE_WARMUP_START_FACTOR"
+    --class_weight_mode "$HISTORICAL_CANDIDATE_CLASS_WEIGHT_MODE"
+    --class_weight_clip_min "$HISTORICAL_CANDIDATE_CLASS_WEIGHT_CLIP_MIN"
+    --class_weight_clip_max "$HISTORICAL_CANDIDATE_CLASS_WEIGHT_CLIP_MAX"
+    --effective_num_beta "$HISTORICAL_CANDIDATE_EFFECTIVE_NUM_BETA"
+  )
+  if [[ "$HISTORICAL_CANDIDATE_PIN_MEMORY" == "true" ]]; then RUN_ARGS+=(--pin_memory); fi
+  if [[ "$HISTORICAL_CANDIDATE_PERSISTENT_WORKERS" == "true" ]]; then RUN_ARGS+=(--persistent_workers); fi
+  if [[ "$HISTORICAL_CANDIDATE_TRAIN_DROP_LAST" == "true" ]]; then RUN_ARGS+=(--train_drop_last); fi
+  if [[ "$HISTORICAL_CANDIDATE_MULTI_LR" == "true" ]]; then RUN_ARGS+=(--multi_lr); fi
+fi
+
 COMPONENT_LR_ENABLED=0
-if [[ "$USE_PAPER_PROTOCOL" == "0" || "$PAPER_PROTOCOL_USE_COMPONENT_LR" == "1" ]]; then
+if [[ "$CONDITION" == "historical_candidate" ]]; then
+  if [[ "$HISTORICAL_CANDIDATE_USE_COMPONENT_LR" == "true" ]]; then
+    COMPONENT_LR_ENABLED=1
+  fi
+elif [[ "$USE_PAPER_PROTOCOL" == "0" || "$PAPER_PROTOCOL_USE_COMPONENT_LR" == "1" ]]; then
   COMPONENT_LR_ENABLED=1
+fi
+if [[ "$COMPONENT_LR_ENABLED" == "1" ]]; then
   RUN_ARGS+=(
     --use_component_lr
-    --lr_backbone_mult 0.5
-    --lr_router_mult 3.0
-    --lr_expert_mult 1.5
-    --lr_classifier_mult 1.0
-    --lr_other_mult 1.0
-    --lr_depth_mult 1.0
+    --lr_backbone_mult "${HISTORICAL_CANDIDATE_LR_BACKBONE_MULT:-0.5}"
+    --lr_router_mult "${HISTORICAL_CANDIDATE_LR_ROUTER_MULT:-3.0}"
+    --lr_expert_mult "${HISTORICAL_CANDIDATE_LR_EXPERT_MULT:-1.5}"
+    --lr_classifier_mult "${HISTORICAL_CANDIDATE_LR_CLASSIFIER_MULT:-1.0}"
+    --lr_other_mult "${HISTORICAL_CANDIDATE_LR_OTHER_MULT:-1.0}"
+    --lr_depth_mult "${HISTORICAL_CANDIDATE_LR_DEPTH_MULT:-1.0}"
   )
 fi
 
 if [[ "$CONDITION" == "selective_fresh" ]]; then
   RUN_ARGS+=(--fresh_selective_recipe_path "$FRESH_SELECTIVE_RECIPE_PATH")
+fi
+if [[ "$CONDITION" == "historical_candidate" ]]; then
+  RUN_ARGS+=(--historical_recipe_path "$HISTORICAL_CANDIDATE_RECIPE_PATH")
 fi
 
 if [[ "$DATASET" == "FACED" ]]; then
@@ -302,6 +392,11 @@ fi
 AUDIT_ARGS=("${RUN_ARGS[@]}" --expected-commit "$EXPECTED_COMMIT")
 if [[ "$CONDITION" == "selective_fresh" ]]; then
   AUDIT_ARGS+=(--fresh-selective-recipe "$FRESH_SELECTIVE_RECIPE_PATH")
+fi
+if [[ "$CONDITION" == "historical_candidate" ]]; then
+  if [[ "$HISTORICAL_CANDIDATE_SMOKE" == "1" || "$HISTORICAL_CANDIDATE_SMOKE" == "true" ]]; then
+    AUDIT_ARGS+=(--historical-candidate-smoke)
+  fi
 fi
 if [[ -n "$PAPER_PROTOCOL_PATH" ]]; then
   AUDIT_ARGS+=(--paper-protocol "$PAPER_PROTOCOL_PATH")
@@ -326,12 +421,16 @@ FRESH_SELECTIVE_RECIPE_SHA256=""
 if [[ "$CONDITION" == "selective_fresh" ]]; then
   FRESH_SELECTIVE_RECIPE_SHA256="$(sha256sum "$FRESH_SELECTIVE_RECIPE_PATH" | awk '{print $1}')"
 fi
+HISTORICAL_CANDIDATE_RECIPE_SHA256=""
+if [[ "$CONDITION" == "historical_candidate" ]]; then
+  HISTORICAL_CANDIDATE_RECIPE_SHA256="$(sha256sum "$HISTORICAL_CANDIDATE_RECIPE_PATH" | awk '{print $1}')"
+fi
 DATA_CONTRACT_SHA256="$(sha256sum "$DATA_CONTRACT_PATH" | awk '{print $1}')"
 GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
 RUN_MANIFEST="$MODEL_DIR/run_manifest.json"
 
-export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 PAPER_PROTOCOL_USE_COMPONENT_LR COMPONENT_LR_ENABLED FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
+export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 PAPER_PROTOCOL_USE_COMPONENT_LR COMPONENT_LR_ENABLED FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 HISTORICAL_CANDIDATE_RECIPE_PATH HISTORICAL_CANDIDATE_RECIPE_SHA256 HISTORICAL_CANDIDATE_STAGE HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
 "$PYTHON_BIN" - "$RUN_MANIFEST" "$GIT_COMMIT" "$GIT_DIRTY" "$FOUNDATION_SHA256" "$MANIFEST_SHA256" "${RUN_ARGS[@]}" <<'PY'
 import json
 import os
@@ -373,12 +472,21 @@ payload = {
     'use_component_lr': os.environ.get('COMPONENT_LR_ENABLED', '0') == '1',
     'fresh_selective_recipe_path': os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '') if os.environ['CONDITION'] == 'selective_fresh' else '',
     'fresh_selective_recipe_sha256': os.environ.get('FRESH_SELECTIVE_RECIPE_SHA256', '') if os.environ['CONDITION'] == 'selective_fresh' else '',
+    'historical_candidate_recipe_path': os.environ.get('HISTORICAL_CANDIDATE_RECIPE_PATH', '') if os.environ['CONDITION'] == 'historical_candidate' else '',
+    'historical_candidate_recipe_sha256': os.environ.get('HISTORICAL_CANDIDATE_RECIPE_SHA256', '') if os.environ['CONDITION'] == 'historical_candidate' else '',
+    'historical_candidate_stage': os.environ.get('HISTORICAL_CANDIDATE_STAGE', '') if os.environ['CONDITION'] == 'historical_candidate' else '',
+    'historical_family_id': os.environ.get('HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID', '') if os.environ['CONDITION'] == 'historical_candidate' else '',
     'command': command,
 }
 with open(path, 'w', encoding='utf-8') as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
     handle.write('\n')
 PY
+
+if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
+  echo "[icassp-revision] DRY_RUN=1: launch contract passed; skipping model training" >&2
+  exit 0
+fi
 
 echo "[icassp-revision] dataset=$DATASET condition=$CONDITION seed=$SEED protocol=$PROTOCOL mode=$RUN_MODE" >&2
 echo "[icassp-revision] paper_protocol=${PAPER_PROTOCOL_ID:-none} epochs=$EPOCHS batch_size=$BATCH_SIZE lr=$LR" >&2
@@ -426,6 +534,18 @@ payload = {
     'fresh_selective_recipe_sha256': (
         os.environ.get('FRESH_SELECTIVE_RECIPE_SHA256', '')
         if os.environ.get('CONDITION') == 'selective_fresh' else ''
+    ),
+    'historical_candidate_recipe_path': (
+        os.environ.get('HISTORICAL_CANDIDATE_RECIPE_PATH', '')
+        if os.environ.get('CONDITION') == 'historical_candidate' else ''
+    ),
+    'historical_candidate_recipe_sha256': (
+        os.environ.get('HISTORICAL_CANDIDATE_RECIPE_SHA256', '')
+        if os.environ.get('CONDITION') == 'historical_candidate' else ''
+    ),
+    'historical_candidate_stage': (
+        os.environ.get('HISTORICAL_CANDIDATE_STAGE', '')
+        if os.environ.get('CONDITION') == 'historical_candidate' else ''
     ),
 }
 with open(path, 'w', encoding='utf-8') as handle:

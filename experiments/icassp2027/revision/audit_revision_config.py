@@ -14,6 +14,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from finetune_main import add_faced_args, add_seedv_args, add_shared_args, validate_args
+from historical_candidate_schema import (
+    load_recipe as load_historical_candidate_recipe,
+    sha256_file,
+    verify_args_against_recipe,
+)
 from verify_fresh_selective_recipe import verify_recipe as verify_fresh_recipe
 from verify_paper_protocol import (
     validate_args_against_protocol,
@@ -45,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
         '--paper-protocol',
         default='',
         help='Locked dataset-specific protocol required for paper-facing new rows.',
+    )
+    parser.add_argument(
+        '--historical-candidate-smoke',
+        action='store_true',
+        help='Allow the candidate recipe execution budget to be reduced to one smoke epoch.',
     )
     return parser
 
@@ -99,6 +109,29 @@ def main() -> None:
         if args.revision_run_mode in {'paper', 'smoke'}:
             validate_args_against_protocol(args, paper_protocol_info)
 
+    historical_candidate_info = {}
+    if args.revision_condition == 'historical_candidate':
+        recipe_path = Path(
+            str(args.historical_candidate_recipe or args.historical_recipe_path or '')
+        ).expanduser().resolve()
+        recipe = load_historical_candidate_recipe(recipe_path)
+        if recipe['dataset'] != args.downstream_dataset:
+            raise SystemExit(
+                'historical candidate dataset mismatch: '
+                f"recipe={recipe['dataset']}, args={args.downstream_dataset}"
+            )
+        historical_candidate_info = verify_args_against_recipe(
+            args, recipe, smoke=args.historical_candidate_smoke
+        )
+        historical_candidate_info.update(
+            {
+                'historical_candidate_recipe_path': str(recipe_path),
+                'historical_candidate_recipe_sha256': sha256_file(recipe_path),
+                'historical_candidate_recipe_stage': str(recipe['stage']),
+                'historical_candidate_trainability_basis': str(recipe['trainability_basis']),
+            }
+        )
+
     resolved = {
         'repository_root': str(REPO_ROOT),
         'git_commit': commit,
@@ -122,6 +155,10 @@ def main() -> None:
         'input_scale_divisor': args.input_scale_divisor,
         'foundation_dir': os.path.realpath(os.path.abspath(args.foundation_dir)),
         'datasets_dir': os.path.realpath(os.path.abspath(args.datasets_dir)),
+        'historical_candidate_recipe_path': str(
+            Path(str(args.historical_candidate_recipe or args.historical_recipe_path)).resolve()
+        ) if args.revision_condition == 'historical_candidate' else '',
+        **historical_candidate_info,
         'fresh_selective_recipe_path': os.path.realpath(os.path.abspath(args.fresh_selective_recipe))
         if args.revision_condition == 'selective_fresh' else '',
         'paper_protocol_path': os.path.realpath(os.path.abspath(args.paper_protocol))
