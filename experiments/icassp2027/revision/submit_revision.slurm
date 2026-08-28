@@ -53,9 +53,10 @@ if [[ "$USE_ACCRE_STACK" == "1" ]]; then
   module load scipy-stack/2026a
 fi
 
-VENV_PREFIX="${VENV_PREFIX:-/data/neurogroup/mingyangjiang/venvs/eegxplore-accre}"
+VENV_PREFIX="${VENV_PREFIX:-/data/neurogroup/mingyangjiang/venvs/cbramod-accre}"
 if [[ -x "$VENV_PREFIX/bin/python" ]]; then
   export PYTHON_BIN="$VENV_PREFIX/bin/python"
+  unset PYTHONPATH PYTHONHOME CONDA_PREFIX CONDA_DEFAULT_ENV CONDA_SHLVL
   source "$VENV_PREFIX/bin/activate"
 else
   export PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -65,6 +66,31 @@ mkdir -p "$REPO_DIR/icassp_logs"
 unset PYTHONPATH
 unset PYTHONHOME
 export PYTHONNOUSERSITE=1
+
+python - <<'PY'
+import os
+import sys
+
+import einops
+import lmdb
+import numpy
+import torch
+import yaml
+
+expected = os.path.realpath(os.environ.get('VIRTUAL_ENV', ''))
+actual = os.path.realpath(sys.prefix)
+if expected and actual != expected:
+    raise RuntimeError(f'Activated environment mismatch: VIRTUAL_ENV={expected} sys.prefix={actual}')
+print(f'python={sys.executable}', flush=True)
+print(f'sys_prefix={sys.prefix}', flush=True)
+print(f'numpy={numpy.__version__}', flush=True)
+print(f'torch={torch.__version__}', flush=True)
+print(f'cuda_available={torch.cuda.is_available()} cuda_count={torch.cuda.device_count()}', flush=True)
+print(f'einops={einops.__version__}', flush=True)
+print(f'lmdb={lmdb.__file__}', flush=True)
+print(f'pyyaml={yaml.__version__}', flush=True)
+PY
+nvidia-smi || true
 
 if [[ -n "$REQUESTED_EPOCHS" ]]; then
   exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL" "$REQUESTED_EPOCHS"
