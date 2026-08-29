@@ -2,7 +2,7 @@
 
 > Archived legacy snapshot. This document is not the active ICASSP scope or
 > evidence registry. Use `experiments/icassp2027/REVISION_CONTRACT.md`,
-> `revision/paper_table_manifest.csv`, and generated row-level manifests for
+> `revision/paper_table_manifest_v2.csv`, and generated row-level manifests for
 > paper decisions. Its five-dataset inventory must not be read as the current
 > three-dataset compute plan.
 

@@ -4,11 +4,10 @@ Status: active focused revision of the rejected CBraMod selective-adaptation pap
 
 ## Paper identity
 
-The paper studies robust selective adaptation of CBraMod with AttnRes and
-typed spatial/spectral specialists. Its central comparison is selective
-upper-layer adaptation versus dense fine-tuning under fixed downstream
-protocols. Depth-conditioned routing is a secondary diagnostic, not the main
-claim.
+The paper studies robust CBraMod adaptation with AttnRes and typed
+spatial/spectral specialists. The confirmed method intentionally fine-tunes
+the full backbone and adds one top-layer specialist block. Depth-conditioned
+routing is a development diagnostic, not the main claim.
 
 This is separate from the TMLR study. The ICASSP package must not reuse TMLR
 numerical rows, figures, prose, checkpoints, or registries. TMLR-native
@@ -21,7 +20,8 @@ interaction-alignment and axis-comparison experiments are outside this paper.
 - Archived datasets: PhysioNet-MI and TUEV; no new paper-facing runs.
 - Active protocol: `cbramod_benchmark` only.
 - Archived protocol: `seedv_subject_disjoint`; it is not a readiness gate.
-- Declared seeds: `42`, `3407`, and `2024`.
+- Development seed: `42`.
+- Confirmatory seeds: `3407`, `2024`, and newly prespecified `2027`.
 - New-run output root: `output/icassp2027_revision/`.
 - Smoke output root: `output/icassp2027_smoke/`; smoke rows are ineligible.
 - Model changes: none. Reuse the existing CBraMod adaptation components.
@@ -44,18 +44,19 @@ registry. Do not pool legacy and new values into a single statistical summary.
 
 ## Main evidence plan
 
-The main cross-dataset comparison is Dense versus Selective:
+The main confirmatory cross-dataset comparison is Dense versus
+AttnRes + Typed Specialists:
 
 | Dataset | Dense | Selective |
 |---|---|---|
-| SEED-V | legacy reported, three seeds | legacy reported, three seeds |
-| FACED | new, three seeds | new, three seeds |
-| ISRUC | new, three seeds | new, three seeds |
+| FACED | new, three unseen seeds | new, three unseen seeds |
+| ISRUC | new, three unseen seeds | new, three unseen seeds |
 
-The SEED-V component table contains Dense, AttnRes-only, Selective, and a new
-Upper-1 control. The old rejected-paper “MoE-only” rows are interpreted as
-AttnRes plus typed specialists without depth routing; they are not
-`specialist_only` evidence.
+The rejected-paper SEED-V Dense, AttnRes-only, and Selective rows remain a
+separately labeled legacy component/context table. They are not pooled with
+the new confirmatory rows. Seed-42 FACED/ISRUC comparisons, including the
+historical-route candidate and opt-only candidate, remain development
+evidence and are excluded from confirmatory mean ± SD.
 
 Executable condition names are deliberately separate from paper labels:
 
@@ -63,13 +64,12 @@ Executable condition names are deliberately separate from paper labels:
 |---|---|
 | Dense | `full` |
 | AttnRes-only | `attnres_only` |
-| Selective, new paper-derived | `selective_paper` |
-| Selective, existing independent recipe | `selective_fresh` |
-| Upper-1 | `upper1` |
+| AttnRes + Typed Specialists | `specialist_augmented_full` |
 
-`specialist_only`, `combined`, and `selective_fresh` remain available for
-implementation tests or separately archived studies, but are not required
-paper rows. `historical_selective` is permanently non-launchable.
+`selective_paper`, `specialist_only`, `combined`, and `selective_fresh` remain
+available for implementation tests or archived diagnostics, but are not part
+of the final confirmatory table. `historical_selective` is permanently
+non-launchable.
 
 ## Dataset-derived protocols
 
@@ -95,7 +95,9 @@ independent `fresh_selective` recipe.
 - Report balanced accuracy, weighted-F1, and kappa for the uniform cross-source comparison as mean ± standard deviation.
 - Record macro-F1 for every new run as an additional metric; it is not the primary cross-source metric because the legacy SEED-V rows do not contain it.
 - Historical manuscript weighted-F1 values remain weighted-F1; never relabel them as macro-F1.
-- Record repository commit, data-contract hash, protocol hash, method condition, seed, checkpoint, metrics, runtime, GPU, and trainable parameters for every new run.
+- Record repository commit, data-contract hash, protocol hash, locked method
+  recipe hash, method condition, seed, checkpoint, metrics, runtime, GPU, and
+  trainable parameters for every new run.
 - Failed, OOM, incomplete, smoke, or provenance-incomplete runs are not result rows.
 - Do not calculate pooled statistics across legacy and new provenance classes.
 
@@ -104,12 +106,14 @@ independent `fresh_selective` recipe.
 LaBraM, TUEV, PhysioNet-MI as a primary dataset, Mumtaz2016, a second
 backbone, subject-disjoint SEED-V as a readiness requirement, TMLR-native-axis
 experiments, new operators, new routing designs, and broad hyperparameter
-sweeps are outside the active revision.
+sweeps are outside the active revision. The explicit depth-aware routing
+candidate is retained only as a small development control.
 
 ## Readiness gate
 
 The paper is ready for assembly when the declared legacy rows are visibly
-labeled, the new Upper-1 and FACED/ISRUC Dense/Selective blocks are complete
-over the three declared seeds, and one efficiency summary is available. If
-Selective is not consistently better, narrow the claim to a controlled
-empirical study rather than adding architecture variants.
+labeled, the 12 rows in `paper_table_manifest_v2.csv` are complete over the
+three unseen seeds, and one accuracy/overhead summary is available. If the
+specialist method is not consistently better than full fine-tuning, narrow the
+claim to a controlled simplification study rather than adding architecture
+variants.

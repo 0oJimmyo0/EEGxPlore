@@ -67,7 +67,7 @@ unset PYTHONPATH
 unset PYTHONHOME
 export PYTHONNOUSERSITE=1
 
-python - <<'PY'
+"$PYTHON_BIN" - <<'PY'
 import os
 import sys
 

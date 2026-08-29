@@ -19,6 +19,11 @@ from historical_candidate_schema import (
     sha256_file,
     verify_args_against_recipe,
 )
+from paper_method_schema import (
+    load_method_recipe,
+    sha256_file as sha256_method_file,
+    verify_args_against_method,
+)
 from verify_fresh_selective_recipe import verify_recipe as verify_fresh_recipe
 from verify_paper_protocol import (
     validate_args_against_protocol,
@@ -132,6 +137,18 @@ def main() -> None:
             }
         )
 
+    paper_method_info = {}
+    if args.revision_condition == 'specialist_augmented_full':
+        recipe_path = Path(str(args.paper_method_recipe or '')).expanduser().resolve()
+        recipe = load_method_recipe(recipe_path)
+        paper_method_info = verify_args_against_method(args, recipe)
+        paper_method_info.update(
+            {
+                'paper_method_recipe_path': str(recipe_path),
+                'paper_method_recipe_sha256': sha256_method_file(recipe_path),
+            }
+        )
+
     resolved = {
         'repository_root': str(REPO_ROOT),
         'git_commit': commit,
@@ -158,6 +175,10 @@ def main() -> None:
         'historical_candidate_recipe_path': str(
             Path(str(args.historical_candidate_recipe or args.historical_recipe_path)).resolve()
         ) if args.revision_condition == 'historical_candidate' else '',
+        'paper_method_recipe_path': str(
+            Path(str(args.paper_method_recipe)).expanduser().resolve()
+        ) if args.revision_condition == 'specialist_augmented_full' else '',
+        **paper_method_info,
         **historical_candidate_info,
         'fresh_selective_recipe_path': os.path.realpath(os.path.abspath(args.fresh_selective_recipe))
         if args.revision_condition == 'selective_fresh' else '',

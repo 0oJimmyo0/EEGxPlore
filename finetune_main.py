@@ -10,6 +10,10 @@ from datasets import faced_dataset, isruc_dataset, mumtaz_dataset, physio_datase
 from finetune_trainer import Trainer, validate_manifest_integrity
 from models import model_for_faced, model_for_isruc, model_for_mumtaz, model_for_physio, model_for_seedv, model_for_tuev
 from experiments.icassp2027.revision.historical_candidate_schema import apply_method_recipe, load_recipe
+from experiments.icassp2027.revision.paper_method_schema import (
+    apply_method_recipe as apply_paper_method_recipe,
+    load_method_recipe,
+)
 
 
 def add_shared_args(parser: argparse.ArgumentParser) -> None:
@@ -91,6 +95,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
             'selective_paper',
             'historical_selective',
             'historical_candidate',
+            'specialist_augmented_full',
         ],
         help='Canonical condition for the focused ICASSP revision profile.',
     )
@@ -119,6 +124,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default='',
         help='Development-only historical candidate recipe; never paper eligible.',
+    )
+    parser.add_argument(
+        '--paper_method_recipe',
+        type=str,
+        default='',
+        help='Locked paper-facing architecture/method recipe for specialist_augmented_full.',
     )
     parser.add_argument(
         '--fresh_selective_recipe_path',
@@ -580,6 +591,7 @@ REVISION_CONDITIONS = {
     'selective_paper',
     'historical_selective',
     'historical_candidate',
+    'specialist_augmented_full',
 }
 
 
@@ -674,12 +686,12 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
     # protocol; ``historical_selective`` is archival and non-launchable.
     # ``historical_candidate`` is development-only and is overwritten by its
     # explicit candidate recipe below.
-    args.trainability_mode = 'combined' if condition in {
+    args.trainability_mode = 'full' if condition == 'specialist_augmented_full' else ('combined' if condition in {
         'selective_fresh',
         'selective_paper',
         'historical_selective',
         'historical_candidate',
-    } else condition
+    } else condition)
     args.attnres_variant = 'pre_attn' if condition in {
         'attnres_only',
         'combined',
@@ -687,6 +699,7 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
         'selective_paper',
         'historical_selective',
         'historical_candidate',
+        'specialist_augmented_full',
     } else 'none'
     args.attnres_start_layer = 0
     args.attnres_gated = False
@@ -697,6 +710,7 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
         'selective_paper',
         'historical_selective',
         'historical_candidate',
+        'specialist_augmented_full',
     }
     args.moe_attnres_depth_context_mode = 'compact_shared'
     args.moe_attnres_depth_summary_mode = 'auto'
@@ -725,6 +739,21 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
                 f"recipe={recipe['dataset']}, args={args.downstream_dataset}"
             )
         apply_method_recipe(args, recipe, recipe_file)
+    if condition == 'specialist_augmented_full':
+        recipe_path = str(getattr(args, 'paper_method_recipe', '') or '').strip()
+        if not recipe_path:
+            raise ValueError(
+                '[icassp2027_revision] specialist_augmented_full requires '
+                '--paper_method_recipe.'
+            )
+        recipe_file = Path(recipe_path).expanduser().resolve()
+        recipe = load_method_recipe(recipe_file)
+        if args.downstream_dataset not in set(recipe['datasets']):
+            raise ValueError(
+                '[icassp2027_revision] paper method recipe does not cover '
+                f"{args.downstream_dataset}: {recipe['datasets']}"
+            )
+        apply_paper_method_recipe(args, recipe, recipe_file)
 
 
 def _validate_icassp_revision(args: argparse.Namespace) -> None:
@@ -738,6 +767,15 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
             'the rejected-paper checkpoint and complete recipe are unavailable; '
             'use selective_paper or selective_fresh for independently provenanced runs.'
         )
+    if args.revision_condition == 'specialist_augmented_full':
+        if args.downstream_dataset not in {'FACED', 'ISRUC'}:
+            raise ValueError(
+                '[icassp2027_revision] specialist_augmented_full is locked to FACED and ISRUC.'
+            )
+        if not args.paper_method_recipe:
+            raise ValueError(
+                '[icassp2027_revision] specialist_augmented_full requires a locked method recipe.'
+            )
     if args.backbone != 'cbramod':
         raise ValueError('[icassp2027_revision] only the CBraMod backbone is allowed.')
     run_mode = str(getattr(args, 'revision_run_mode', 'paper')).strip().lower()
@@ -791,6 +829,18 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
                 '[icassp2027_revision] historical_candidate requires a candidate recipe path.'
             )
         return
+
+    if args.revision_condition == 'specialist_augmented_full':
+        if args.trainability_mode != 'full':
+            raise ValueError('[icassp2027_revision] specialist_augmented_full requires full trainability.')
+        if args.moe_use_attnres_depth_router_features:
+            raise ValueError(
+                '[icassp2027_revision] specialist_augmented_full forbids depth-aware router features.'
+            )
+        if args.moe_attnres_depth_context_mode != 'compact_shared':
+            raise ValueError(
+                '[icassp2027_revision] specialist_augmented_full requires compact_shared depth context.'
+            )
 
     if args.routing_export_dir:
         raise ValueError('[icassp2027_revision] routing exports are outside the focused primary profile.')

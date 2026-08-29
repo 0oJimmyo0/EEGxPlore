@@ -12,17 +12,19 @@ import csv
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "output" / "icassp2027_revision"
 DEFAULT_REGISTRY = DEFAULT_OUTPUT_ROOT / "evidence_registry.csv"
+DEFAULT_PAPER_MANIFEST = REPO_ROOT / "experiments" / "icassp2027" / "revision" / "paper_table_manifest_v2.csv"
 
 FIELDNAMES = [
     "source_kind",
     "provenance_class",
     "verification_level",
+    "evidence_role",
     "paper_eligibility",
     "source_location",
     "run_mode",
@@ -32,6 +34,9 @@ FIELDNAMES = [
     "historical_family_id",
     "historical_recipe_sha256",
     "fresh_selective_recipe_sha256",
+    "paper_method_recipe_id",
+    "paper_method_recipe_sha256",
+    "paper_method_recipe_path",
     "paper_protocol_id",
     "paper_protocol_sha256",
     "paper_protocol_path",
@@ -119,7 +124,31 @@ def _metric_files(run_dir: Path) -> str:
     return ";".join(sorted(names))
 
 
-def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, str]:
+def _primary_cells(manifest_path: Optional[Path]) -> Optional[Set[Tuple[str, str, str]]]:
+    """Load exact paper-facing cells; None preserves legacy function behavior."""
+    if manifest_path is None:
+        return None
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"paper manifest not found: {manifest_path}")
+    with manifest_path.open(newline="", encoding="utf-8") as handle:
+        rows = csv.DictReader(handle)
+        return {
+            (
+                str(row.get("dataset", "") or ""),
+                str(row.get("executable_condition", "") or ""),
+                str(row.get("seed", "") or ""),
+            )
+            for row in rows
+            if row.get("paper_eligibility") == "primary_new_evidence"
+            and row.get("required_new_run") == "yes"
+        }
+
+
+def _row_for_run(
+    run_manifest_path: Path,
+    hash_checkpoints: bool,
+    primary_cells: Optional[Set[Tuple[str, str, str]]] = None,
+) -> Dict[str, str]:
     run_dir = run_manifest_path.parent
     manifest = _read_json(run_manifest_path)
     summary_path = run_dir / "experiment_summary.csv"
@@ -170,15 +199,43 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
     elif run_mode == "internal":
         notes.append("internal_run_not_paper_evidence")
 
+    dataset = str(summary.get("dataset") or manifest.get("dataset") or result.get("dataset") or "")
+    condition = str(
+        summary.get("revision_condition")
+        or manifest.get("condition")
+        or result.get("condition")
+        or ""
+    )
+    seed = str(summary.get("seed") or manifest.get("seed") or "")
+    is_primary_cell = primary_cells is not None and (dataset, condition, seed) in primary_cells
+
     if run_mode == "smoke":
+        evidence_role = "smoke"
         paper_eligibility = "not_eligible_smoke"
         reuse_decision = "not_paper_smoke"
     elif run_mode == "internal":
+        evidence_role = "internal_development"
         paper_eligibility = "not_eligible_internal"
         reuse_decision = "internal_not_paper"
+    elif primary_cells is not None and is_primary_cell:
+        if run_status == "complete":
+            evidence_role = "confirmatory_candidate"
+            paper_eligibility = "primary_new_evidence_pending_audit"
+            reuse_decision = "candidate_pending_audit"
+        else:
+            evidence_role = "confirmatory_incomplete"
+            paper_eligibility = "not_eligible_incomplete"
+            reuse_decision = "invalid_failed_or_incomplete"
     else:
-        paper_eligibility = "primary_new_evidence_pending_audit"
-        reuse_decision = "candidate_pending_audit" if run_status == "complete" else "invalid_failed_or_incomplete"
+        evidence_role = (
+            "development_reference"
+            if condition == "full" and seed == "42"
+            else "development_diagnostic"
+            if seed == "42"
+            else "out_of_scope_paper_run"
+        )
+        paper_eligibility = "development_only_not_primary"
+        reuse_decision = "development_context_only" if run_status == "complete" else "invalid_failed_or_incomplete"
 
     use_component_lr = manifest.get("use_component_lr")
     if use_component_lr is None:
@@ -190,23 +247,34 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
         "source_kind": "new_revision_run",
         "provenance_class": "new_multiseed",
         "verification_level": "run_artifacts_present" if run_status == "complete" else "run_artifacts_incomplete",
+        "evidence_role": evidence_role,
         "paper_eligibility": paper_eligibility,
         "source_location": str(run_manifest_path),
         "run_mode": run_mode,
         "run_status": run_status,
-        "dataset": str(summary.get("dataset") or manifest.get("dataset") or result.get("dataset") or ""),
-        "condition": str(
-            summary.get("revision_condition")
-            or manifest.get("condition")
-            or result.get("condition")
-            or ""
-        ),
+        "dataset": dataset,
+        "condition": condition,
         "historical_family_id": str(summary.get("historical_family_id") or manifest.get("historical_family_id") or ""),
         "historical_recipe_sha256": str(summary.get("historical_recipe_sha256") or manifest.get("historical_recipe_sha256") or ""),
         "fresh_selective_recipe_sha256": str(
             summary.get("fresh_selective_recipe_sha256")
             or manifest.get("fresh_selective_recipe_sha256")
             or result.get("fresh_selective_recipe_sha256")
+            or ""
+        ),
+        "paper_method_recipe_id": str(
+            manifest.get("paper_method_recipe_id")
+            or result.get("paper_method_recipe_id")
+            or ""
+        ),
+        "paper_method_recipe_sha256": str(
+            manifest.get("paper_method_recipe_sha256")
+            or result.get("paper_method_recipe_sha256")
+            or ""
+        ),
+        "paper_method_recipe_path": str(
+            manifest.get("paper_method_recipe_path")
+            or result.get("paper_method_recipe_path")
             or ""
         ),
         "paper_protocol_id": str(
@@ -228,7 +296,7 @@ def _row_for_run(run_manifest_path: Path, hash_checkpoints: bool) -> Dict[str, s
             or ""
         ),
         "use_component_lr": str(use_component_lr),
-        "seed": str(summary.get("seed") or manifest.get("seed") or ""),
+        "seed": seed,
         "split": protocol,
         "preprocessing": f"{split_source};dataset_dir={manifest.get('dataset_dir', '')}",
         "data_contract_sha256": str(
@@ -275,6 +343,7 @@ def _historical_rows(index_path: Optional[Path]) -> List[Dict[str, str]]:
         row["source_location"] = row["source_location"] or "historical_candidates.csv"
         row["run_mode"] = row["run_mode"] or "legacy_report"
         row["run_status"] = row["run_status"] or "reported_not_reproduced"
+        row["evidence_role"] = row["evidence_role"] or "legacy_reported_context"
         row["tmlr_overlap_status"] = row["tmlr_overlap_status"] or "unreviewed_pending_row_audit"
         row["reuse_decision"] = row["reuse_decision"] or "candidate_pending_audit"
         rows.append(row)
@@ -286,9 +355,14 @@ def build_registry(
     registry_path: Path,
     hash_checkpoints: bool = False,
     historical_index: Optional[Path] = None,
+    paper_manifest: Optional[Path] = None,
 ) -> int:
     manifests = sorted(output_root.rglob("run_manifest.json")) if output_root.is_dir() else []
-    rows = [_row_for_run(path, hash_checkpoints=hash_checkpoints) for path in manifests]
+    primary_cells = _primary_cells(paper_manifest)
+    rows = [
+        _row_for_run(path, hash_checkpoints=hash_checkpoints, primary_cells=primary_cells)
+        for path in manifests
+    ]
     rows.extend(_historical_rows(historical_index))
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     with registry_path.open("w", newline="", encoding="utf-8") as handle:
@@ -313,12 +387,19 @@ def main() -> None:
         action="store_true",
         help="Compute missing checkpoint SHA-256 hashes; this can be expensive for large runs.",
     )
+    parser.add_argument(
+        "--paper-manifest",
+        type=Path,
+        default=DEFAULT_PAPER_MANIFEST,
+        help="Active paper manifest used to distinguish confirmatory rows from development artifacts.",
+    )
     args = parser.parse_args()
     count = build_registry(
         args.output_root,
         args.registry,
         hash_checkpoints=args.hash_checkpoints,
         historical_index=args.historical_index,
+        paper_manifest=args.paper_manifest,
     )
     print(f"evidence registry: wrote {count} rows to {args.registry}")
 

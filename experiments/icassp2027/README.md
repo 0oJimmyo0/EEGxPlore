@@ -4,23 +4,31 @@ This directory is the active planning and provenance area for a focused revision
 
 ## Active identity
 
-The paper studies robust selective adaptation of CBraMod with AttnRes and
-typed specialists. It is an empirical revision of the rejected paper, not a
-new backbone or a second foundation-model study.
+The paper studies robust CBraMod adaptation with AttnRes and typed
+specialists. The confirmed method intentionally fine-tunes the full backbone;
+it is an empirical revision of the rejected paper, not a new backbone or a
+second foundation-model study.
 
 The active scope is deliberately limited to:
 
 - CBraMod only;
 - SEED-V, FACED, and ISRUC;
-- the existing upper-layer selective adaptation, AttnRes, and specialist components;
-- one matched benchmark protocol and a small, predeclared method ladder.
+- the existing AttnRes and typed-specialist components;
+- one matched benchmark protocol;
+- a predeclared Full versus AttnRes + Typed Specialists comparison on FACED
+  and ISRUC over seeds `3407`, `2024`, and `2027`.
 
 PhysioNet-MI, TUEV, and the subject-disjoint SEED-V protocol are archived
-evidence only. They are not part of the active ICASSP compute plan. The new
-paper-facing rows are SEED-V Upper-1 and matched Dense/Selective rows on FACED
-and ISRUC, using seeds `42`, `3407`, and `2024`.
+evidence only. They are not part of the active ICASSP compute plan. The
+rejected-paper SEED-V values and all seed-42 comparisons are development or
+legacy context only; they are not pooled into the 12-cell confirmatory table
+in `revision/paper_table_manifest_v2.csv`.
 
-There is no new architecture in the active plan. Learned depth-conditioned routing, compact-context routing, PSD/context features, new expert decompositions, LaBraM, and broad hyperparameter sweeps are excluded from the primary result.
+There is no new architecture in the active plan. Learned depth-conditioned
+routing, compact-context routing, PSD/context features, new expert
+decompositions, LaBraM, and broad hyperparameter sweeps are excluded from the
+primary result. The depth-routing comparison is retained only as a seed-42
+development control.
 
 The existing `selective_fresh` condition is a separately locked independent
 recipe and remains unchanged. New paper-derived selective runs use the
@@ -52,14 +60,20 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/revision/submit_revision.slurm`
 - `experiments/icassp2027/revision/verify_paper_protocol.py`
 - `experiments/icassp2027/revision/paper_protocol_*.json`
-- `experiments/icassp2027/revision/paper_table_manifest.csv`
-- `experiments/icassp2027/revision/audit_paper_scope.py`
+- `experiments/icassp2027/revision/paper_table_manifest_v2.csv`
+- `experiments/icassp2027/revision/audit_paper_scope_v2.py`
+- `experiments/icassp2027/revision/development_diagnostics_manifest.csv`
+- `experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json`
+- `experiments/icassp2027/revision/verify_paper_method.py`
+- `experiments/icassp2027/revision/paper_method_schema.py`
 - `experiments/icassp2027/revision/audit_revision_config.py`
 - `experiments/icassp2027/revision/verify_data_contract.py`
 - `experiments/icassp2027/revision/build_evidence_registry.py`
 - `experiments/icassp2027/revision/test_*.py`
 
-The independently locked `fresh_selective_recipe.json` and its verifier remain
+The old `paper_table_manifest.csv` and `audit_paper_scope.py` are retained as
+historical planning artifacts only; v2 is the active paper scope. The
+independently locked `fresh_selective_recipe.json` and its verifier remain
 at their existing paths because the implementation and contract tests depend
 on them, but they are archived independent-recipe artifacts and are not
 paper-facing rows. The manuscript-reported historical index remains active in

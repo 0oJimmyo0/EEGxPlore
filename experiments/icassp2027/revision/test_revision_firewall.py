@@ -22,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _args(condition: str):
-    return _parser().parse_args([
+    argv = [
         '--datasets_dir', '/tmp/icassp_revision_dataset',
         '--num_of_classes', '5',
         '--model_dir', str(REPO_ROOT / 'output/icassp2027_revision/contract_test/seed_42'),
@@ -30,7 +30,16 @@ def _args(condition: str):
         '--experiment_profile', 'icassp2027_revision',
         '--revision_condition', condition,
         '--revision_protocol', 'cbramod_benchmark',
-    ])
+    ]
+    if condition == 'specialist_augmented_full':
+        argv.extend([
+            '--downstream_dataset', 'FACED',
+            '--num_of_classes', '9',
+            '--paper_method_recipe', str(
+                Path(__file__).with_name('paper_method_specialist_augmented_full_v1.json')
+            ),
+        ])
+    return _parser().parse_args(argv)
 
 
 def main() -> None:
@@ -62,6 +71,14 @@ def main() -> None:
             'attnres_variant': 'pre_attn',
             'moe': True,
             'moe_router_base_feature_mode': 'full',
+        },
+        'specialist_augmented_full': {
+            'trainability_mode': 'full',
+            'attnres_variant': 'pre_attn',
+            'moe': True,
+            'moe_router_base_feature_mode': 'full',
+            'moe_use_attnres_depth_router_features': False,
+            'moe_attnres_depth_context_mode': 'compact_shared',
         },
     }
     for condition, fields in expected.items():

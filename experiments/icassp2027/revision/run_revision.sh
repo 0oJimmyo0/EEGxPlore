@@ -38,6 +38,7 @@ REQUESTED_NUM_WORKERS="${NUM_WORKERS:-}"
 REQUIRE_CLEAN="${REQUIRE_CLEAN:-1}"
 FRESH_SELECTIVE_RECIPE_PATH="${FRESH_SELECTIVE_RECIPE_PATH:-$SCRIPT_DIR/fresh_selective_recipe.json}"
 HISTORICAL_CANDIDATE_RECIPE_PATH="${HISTORICAL_CANDIDATE_RECIPE_PATH:-${HISTORICAL_CANDIDATE_RECIPE:-}}"
+PAPER_METHOD_RECIPE_PATH="${PAPER_METHOD_RECIPE_PATH:-$SCRIPT_DIR/paper_method_specialist_augmented_full_v1.json}"
 HISTORICAL_CANDIDATE_STAGE="${HISTORICAL_CANDIDATE_STAGE:-route}"
 HISTORICAL_CANDIDATE_SMOKE="${HISTORICAL_CANDIDATE_SMOKE:-0}"
 HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID="${HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID:-}"
@@ -56,10 +57,23 @@ case "$RUN_MODE" in
     ;;
 esac
 
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  echo "Python executable not found: $PYTHON_BIN" >&2
+  exit 2
+fi
+
 if [[ "$CONDITION" == "historical_selective" ]]; then
   echo "historical_selective is permanently locked: historical checkpoint and complete recipe are unavailable" >&2
   echo "use selective_paper for the paper-derived run or selective_fresh for the independent recipe" >&2
   exit 2
+fi
+if [[ "$CONDITION" == "specialist_augmented_full" ]]; then
+  if [[ ! -f "$PAPER_METHOD_RECIPE_PATH" ]]; then
+    echo "paper method recipe is unavailable: $PAPER_METHOD_RECIPE_PATH" >&2
+    exit 2
+  fi
+  PAPER_METHOD_SHELL_EXPORTS="$($PYTHON_BIN "$SCRIPT_DIR/verify_paper_method.py" --recipe "$PAPER_METHOD_RECIPE_PATH" --emit-shell)"
+  eval "$PAPER_METHOD_SHELL_EXPORTS"
 fi
 if [[ "$CONDITION" == "historical_candidate" ]]; then
   if [[ "$RUN_MODE" != "internal" ]]; then
@@ -122,32 +136,39 @@ fi
 
 if [[ "$RUN_MODE" == "paper" || "$RUN_MODE" == "smoke" ]]; then
   case "$DATASET:$CONDITION" in
-    SEED-V:upper1|FACED:full|FACED:selective_paper|ISRUC:full|ISRUC:selective_paper) ;;
+    SEED-V:upper1|FACED:full|FACED:selective_paper|FACED:specialist_augmented_full|ISRUC:full|ISRUC:selective_paper|ISRUC:specialist_augmented_full) ;;
     *)
       echo "Paper-facing run is not in the frozen new-run matrix: $DATASET/$CONDITION" >&2
-      echo "Allowed: SEED-V/upper1, FACED/{full,selective_paper}, ISRUC/{full,selective_paper}" >&2
+      echo "Allowed: SEED-V/upper1, FACED/{full,selective_paper,specialist_augmented_full}, ISRUC/{full,selective_paper,specialist_augmented_full}" >&2
       echo "Use an archived launcher or RUN_MODE=internal for non-paper diagnostics." >&2
       exit 2
       ;;
   esac
-  case "$SEED" in
-    42|3407|2024) ;;
-    *)
-      echo "Paper-facing seed must be one of 42, 3407, 2024 (got: $SEED)" >&2
-      exit 2
-      ;;
-  esac
-fi
-
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Python executable not found: $PYTHON_BIN" >&2
-  exit 2
+  if [[ "$CONDITION" == "specialist_augmented_full" || "$CONDITION" == "full" ]]; then
+    case "$SEED" in
+      3407|2024|2027) ;;
+      *)
+        echo "Final full/specialist_augmented_full seed must be one of 3407, 2024, 2027 (got: $SEED)" >&2
+        exit 2
+        ;;
+    esac
+  else
+    case "$SEED" in
+      42|3407|2024) ;;
+      *)
+        echo "Paper-facing seed must be one of 42, 3407, 2024 (got: $SEED)" >&2
+        exit 2
+        ;;
+    esac
+  fi
 fi
 
 PAPER_PROTOCOL_PATH=""
 PAPER_PROTOCOL_ID=""
 PAPER_PROTOCOL_SHA256=""
 PAPER_PROTOCOL_USE_COMPONENT_LR=""
+PAPER_METHOD_RECIPE_ID="${PAPER_METHOD_RECIPE_ID:-}"
+PAPER_METHOD_RECIPE_SHA256="${PAPER_METHOD_RECIPE_SHA256:-}"
 USE_PAPER_PROTOCOL=1
 if [[ "$RUN_MODE" == "internal" && "$CONDITION" == "selective_fresh" ]]; then
   USE_PAPER_PROTOCOL=0
@@ -337,6 +358,10 @@ RUN_ARGS=(
   "${SPLIT_ARGS[@]}"
 )
 
+if [[ "$CONDITION" == "specialist_augmented_full" ]]; then
+  RUN_ARGS+=(--paper_method_recipe "$PAPER_METHOD_RECIPE_PATH")
+fi
+
 if [[ "$CONDITION" == "historical_candidate" ]]; then
   RUN_ARGS+=(
     --warmup_epochs "$HISTORICAL_CANDIDATE_WARMUP_EPOCHS"
@@ -430,7 +455,7 @@ GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
 RUN_MANIFEST="$MODEL_DIR/run_manifest.json"
 
-export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 PAPER_PROTOCOL_USE_COMPONENT_LR COMPONENT_LR_ENABLED FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 HISTORICAL_CANDIDATE_RECIPE_PATH HISTORICAL_CANDIDATE_RECIPE_SHA256 HISTORICAL_CANDIDATE_STAGE HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
+export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 PAPER_PROTOCOL_USE_COMPONENT_LR PAPER_METHOD_RECIPE_PATH PAPER_METHOD_RECIPE_ID PAPER_METHOD_RECIPE_SHA256 COMPONENT_LR_ENABLED FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 HISTORICAL_CANDIDATE_RECIPE_PATH HISTORICAL_CANDIDATE_RECIPE_SHA256 HISTORICAL_CANDIDATE_STAGE HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
 "$PYTHON_BIN" - "$RUN_MANIFEST" "$GIT_COMMIT" "$GIT_DIRTY" "$FOUNDATION_SHA256" "$MANIFEST_SHA256" "${RUN_ARGS[@]}" <<'PY'
 import json
 import os
@@ -469,6 +494,18 @@ payload = {
     'paper_protocol_path': os.environ.get('PAPER_PROTOCOL_PATH', ''),
     'paper_protocol_id': os.environ.get('PAPER_PROTOCOL_ID', ''),
     'paper_protocol_sha256': os.environ.get('PAPER_PROTOCOL_SHA256', ''),
+    'paper_method_recipe_path': (
+        os.environ.get('PAPER_METHOD_RECIPE_PATH', '')
+        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
+    ),
+    'paper_method_recipe_id': (
+        os.environ.get('PAPER_METHOD_RECIPE_ID', '')
+        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
+    ),
+    'paper_method_recipe_sha256': (
+        os.environ.get('PAPER_METHOD_RECIPE_SHA256', '')
+        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
+    ),
     'use_component_lr': os.environ.get('COMPONENT_LR_ENABLED', '0') == '1',
     'fresh_selective_recipe_path': os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '') if os.environ['CONDITION'] == 'selective_fresh' else '',
     'fresh_selective_recipe_sha256': os.environ.get('FRESH_SELECTIVE_RECIPE_SHA256', '') if os.environ['CONDITION'] == 'selective_fresh' else '',
@@ -526,6 +563,18 @@ payload = {
     'paper_protocol_path': os.environ.get('PAPER_PROTOCOL_PATH', ''),
     'paper_protocol_id': os.environ.get('PAPER_PROTOCOL_ID', ''),
     'paper_protocol_sha256': os.environ.get('PAPER_PROTOCOL_SHA256', ''),
+    'paper_method_recipe_path': (
+        os.environ.get('PAPER_METHOD_RECIPE_PATH', '')
+        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
+    ),
+    'paper_method_recipe_id': (
+        os.environ.get('PAPER_METHOD_RECIPE_ID', '')
+        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
+    ),
+    'paper_method_recipe_sha256': (
+        os.environ.get('PAPER_METHOD_RECIPE_SHA256', '')
+        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
+    ),
     'use_component_lr': os.environ.get('COMPONENT_LR_ENABLED', '0') == '1',
     'fresh_selective_recipe_path': (
         os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '')

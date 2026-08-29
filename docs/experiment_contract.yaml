@@ -22,10 +22,11 @@ primary_protocol: rejected_paper_cbramod_benchmark
 archived_protocols:
   - seedv_subject_disjoint
 output_root: output/icassp2027_revision
-seeds:
-  - 42
+development_seed: 42
+confirmatory_seeds:
   - 3407
   - 2024
+  - 2027
 selection:
   development_metric: validation_cohen_kappa
   primary_test_metrics:
@@ -37,21 +38,21 @@ selection:
   test_access_during_development: false
 main_conditions:
   - full
-  - selective_paper
+  - specialist_augmented_full
 seedv_ablation_conditions:
   - full
   - attnres_only
   - selective_paper
   - upper1
-required_new_rows:
-  - SEED-V/upper1
+required_confirmatory_rows:
   - FACED/full
-  - FACED/selective_paper
+  - FACED/specialist_augmented_full
   - ISRUC/full
-  - ISRUC/selective_paper
+  - ISRUC/specialist_augmented_full
 optional_conditions:
   - attnres_only
   - depth_routing_diagnostic
+  - selective_paper
 forbidden_methods:
   - depthagg_only
   - typed_conditional_primary
@@ -63,3 +64,5 @@ evidence:
   tmlr_prose: forbidden
   tmlr_checkpoints: forbidden
   unmatched_historical_runs: legacy_context_only_or_rerun
+paper_manifest: experiments/icassp2027/revision/paper_table_manifest_v2.csv
+paper_method_recipe: experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json

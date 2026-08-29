@@ -7,7 +7,12 @@ import json
 import tempfile
 from pathlib import Path
 
-from build_evidence_registry import FIELDNAMES, build_registry
+from build_evidence_registry import (
+    DEFAULT_PAPER_MANIFEST,
+    FIELDNAMES,
+    _row_for_run,
+    build_registry,
+)
 
 
 def main() -> None:
@@ -26,6 +31,9 @@ def main() -> None:
                     "dataset_dir": "/data/seedv",
                     "data_contract_sha256": "contract123",
                     "fresh_selective_recipe_sha256": "recipe123",
+                    "paper_method_recipe_id": "method123",
+                    "paper_method_recipe_sha256": "methodsha123",
+                    "paper_method_recipe_path": "/repo/paper_method.json",
                     "use_component_lr": True,
                     "command": ["--cuda", "1", "--epochs", "40"],
                 }
@@ -64,6 +72,15 @@ def main() -> None:
                 "peak_cuda_mb": "2048",
             })
 
+        forced_primary = _row_for_run(
+            run_dir / "run_manifest.json",
+            hash_checkpoints=False,
+            primary_cells={("SEED-V", "combined", "42")},
+        )
+        assert forced_primary["evidence_role"] == "confirmatory_candidate"
+        assert forced_primary["paper_eligibility"] == "primary_new_evidence_pending_audit"
+        assert forced_primary["reuse_decision"] == "candidate_pending_audit"
+
         registry = Path(tmp) / "evidence_registry.csv"
         historical_index = Path(tmp) / "historical_candidates.csv"
         with historical_index.open("w", newline="", encoding="utf-8") as handle:
@@ -79,19 +96,29 @@ def main() -> None:
                 "seed": "42",
                 "run_status": "candidate",
             })
-        assert build_registry(root, registry, historical_index=historical_index) == 2
+        assert build_registry(
+            root,
+            registry,
+            historical_index=historical_index,
+            paper_manifest=DEFAULT_PAPER_MANIFEST,
+        ) == 2
         with registry.open(newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
         assert all(set(row) == set(FIELDNAMES) for row in rows)
         assert rows[0]["condition"] == "combined"
         assert rows[0]["provenance_class"] == "new_multiseed"
+        assert rows[0]["evidence_role"] == "development_diagnostic"
+        assert rows[0]["paper_eligibility"] == "development_only_not_primary"
+        assert rows[0]["reuse_decision"] == "development_context_only"
         assert rows[0]["run_mode"] == "paper"
         assert rows[0]["tmlr_overlap_status"] == "unreviewed_pending_row_audit"
-        assert rows[0]["reuse_decision"] == "candidate_pending_audit"
         assert rows[0]["gpu"] == "1"
         assert rows[0]["split"] == "cbramod_benchmark"
         assert rows[0]["data_contract_sha256"] == "contract123"
         assert rows[0]["fresh_selective_recipe_sha256"] == "recipe123"
+        assert rows[0]["paper_method_recipe_id"] == "method123"
+        assert rows[0]["paper_method_recipe_sha256"] == "methodsha123"
+        assert rows[0]["paper_method_recipe_path"] == "/repo/paper_method.json"
         assert rows[0]["use_component_lr"] == "True"
         assert rows[0]["test_weighted_f1"] == "0.41"
         assert rows[1]["source_kind"] == "rejected_paper_report"
