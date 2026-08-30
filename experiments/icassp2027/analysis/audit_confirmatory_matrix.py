@@ -78,7 +78,12 @@ def _semantic_config_sha256(summary_payload: Dict[str, Any]) -> str:
     normalized = {
         str(key): value
         for key, value in config.items()
-        if key not in {"seed", "model_dir", "paper_method_recipe"}
+        if key not in {
+            "seed",
+            "model_dir",
+            "paper_method_recipe",
+            "paper_method_semantics_sha256",
+        }
     }
     payload = json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
