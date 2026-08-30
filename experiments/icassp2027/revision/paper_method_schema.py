@@ -18,7 +18,7 @@ from experiments.icassp2027.revision.historical_candidate_schema import REQUIRED
 
 
 METHOD_CONDITION = "specialist_augmented_full"
-METHOD_DATASETS = {"FACED", "ISRUC"}
+METHOD_DATASETS = {"FACED", "ISRUC", "SEED-V"}
 
 
 def sha256_file(path: Path) -> str:

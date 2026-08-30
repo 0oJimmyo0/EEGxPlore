@@ -5,7 +5,7 @@
   "method_id": "icaspp_specialist_augmented_full_v1",
   "paper_label": "AttnRes + Typed Specialists",
   "condition": "specialist_augmented_full",
-  "datasets": ["FACED", "ISRUC"],
+  "datasets": ["FACED", "ISRUC", "SEED-V"],
   "source_location": "development_opt_control_seed_42",
   "notes": "Frozen after the seed-42 diagnostic comparison. Full CBraMod trainability is intentional; explicit depth-aware routing is disabled.",
   "method": {

@@ -39,7 +39,7 @@ def _args(dataset: str = 'FACED'):
 def main() -> None:
     recipe = load_method_recipe(RECIPE)
     assert recipe['method_id'] == 'icaspp_specialist_augmented_full_v1'
-    for dataset in ('FACED', 'ISRUC'):
+    for dataset in ('FACED', 'ISRUC', 'SEED-V'):
         args = _args(dataset)
         validate_args(args)
         info = verify_args_against_method(args, recipe)
@@ -59,14 +59,6 @@ def main() -> None:
         assert 'requires' in str(exc) and 'paper_method_recipe' in str(exc)
     else:
         raise AssertionError('missing paper method recipe was accepted')
-
-    seedv = _args('SEED-V')
-    try:
-        validate_args(seedv)
-    except ValueError as exc:
-        assert 'does not cover SEED-V' in str(exc)
-    else:
-        raise AssertionError('SEED-V paper method run was accepted')
 
     print('paper method contract: PASS')
 
