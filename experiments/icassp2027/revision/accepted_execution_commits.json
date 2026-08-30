@@ -61,6 +61,38 @@
         "finetune_trainer.py"
       ],
       "diff_sha256": "4e1155467968364cdcd2f3d907ec747709b7a2330e9989d3a3e93ff4b6c6721a"
+    },
+    "5febc1a8a1626f1d07dae8a3d9e8cba91495a0cc": {
+      "classification": "noncausal_execution_provenance_hardening",
+      "allowed_diff_paths": [
+        "experiments/icassp2027/revision/paper_method_schema.py",
+        "experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json",
+        "experiments/icassp2027/revision/paper_protocol_physionet_mi_v1.json",
+        "experiments/icassp2027/revision/run_revision.sh",
+        "experiments/icassp2027/revision/submit_revision.slurm",
+        "experiments/icassp2027/revision/verify_data_contract.py",
+        "experiments/icassp2027/revision/verify_paper_protocol.py",
+        "experiments/icassp2027/revision/write_result_manifest.py",
+        "finetune_main.py",
+        "finetune_trainer.py"
+      ],
+      "diff_sha256": "72e66bbfb9a880060c2e58985aa50f7b8445ed150fa977c95e9b2c777f9ab415"
+    },
+    "19968b7d68d4026569534138c75f901c80587af1": {
+      "classification": "noncausal_execution_manifest_hardening",
+      "allowed_diff_paths": [
+        "experiments/icassp2027/revision/paper_method_schema.py",
+        "experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json",
+        "experiments/icassp2027/revision/paper_protocol_physionet_mi_v1.json",
+        "experiments/icassp2027/revision/run_revision.sh",
+        "experiments/icassp2027/revision/submit_revision.slurm",
+        "experiments/icassp2027/revision/verify_data_contract.py",
+        "experiments/icassp2027/revision/verify_paper_protocol.py",
+        "experiments/icassp2027/revision/write_result_manifest.py",
+        "finetune_main.py",
+        "finetune_trainer.py"
+      ],
+      "diff_sha256": "69bc501f82fc3a410c1d35f52ffe22c5c4749274926aaa15f3340b3908139569"
     }
   }
 }

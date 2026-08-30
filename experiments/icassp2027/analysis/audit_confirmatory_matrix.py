@@ -133,6 +133,7 @@ def _canonical_row(
     run_mode = str(_first(run_manifest.get("run_mode"), result_manifest.get("run_mode")))
     paper_eligible = as_bool(_first(run_manifest.get("paper_eligible"), result_manifest.get("paper_eligible")))
     exit_code = result_manifest.get("exit_code")
+    code_commit = str(_first(summary.get("git_commit"), run_manifest.get("repository_commit"), result_manifest.get("repository_commit")))
 
     if actual_dataset != dataset:
         errors.append(f"dataset={actual_dataset!r}, expected {dataset!r}")
@@ -146,8 +147,15 @@ def _canonical_row(
         errors.append("paper_eligible is not true")
     if exit_code is None or int(exit_code) != 0:
         errors.append(f"exit_code={exit_code!r}, expected 0")
+    if result_manifest and not as_bool(result_manifest.get("provenance_consistent", True)):
+        errors.append("result manifest reports inconsistent execution provenance")
+    result_expected_commit = str(result_manifest.get("expected_commit", "") or "")
+    if result_expected_commit and code_commit and result_expected_commit != code_commit:
+        errors.append("result manifest expected_commit does not match repository_commit")
+    result_end_commit = str(result_manifest.get("execution_commit_end", "") or "")
+    if result_end_commit and code_commit and result_end_commit != code_commit:
+        errors.append("execution checkout changed commit during run")
 
-    code_commit = str(_first(summary.get("git_commit"), run_manifest.get("repository_commit"), result_manifest.get("repository_commit")))
     execution_info = execution_commit_info(code_commit)
     if execution_info is None:
         errors.append(f"execution_commit={code_commit!r} is not in the accepted execution commit contract")

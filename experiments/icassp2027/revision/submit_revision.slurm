@@ -33,6 +33,12 @@ fi
 SEED="${3:-${SEED:-42}}"
 PROTOCOL="${4:-${REVISION_PROTOCOL:-cbramod_benchmark}}"
 REQUESTED_EPOCHS="${5:-${EPOCHS:-}}"
+EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
+
+if [[ -z "$EXPECTED_COMMIT" && "${RUN_MODE:-paper}" != "internal" ]]; then
+  echo "EXPECTED_COMMIT must be supplied for paper/smoke jobs; submit with --export=ALL,EXPECTED_COMMIT=<immutable-snapshot-sha>" >&2
+  exit 2
+fi
 
 USE_ACCRE_STACK="${USE_ACCRE_STACK:-0}"
 if [[ "$USE_ACCRE_STACK" == "1" ]]; then
@@ -127,6 +133,6 @@ PY
 fi
 
 if [[ -n "$REQUESTED_EPOCHS" ]]; then
-  exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL" "$REQUESTED_EPOCHS"
+  exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL" "$REQUESTED_EPOCHS" "${MODEL_ROOT:-}" "$EXPECTED_COMMIT"
 fi
-exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL"
+exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL" "" "${MODEL_ROOT:-}" "$EXPECTED_COMMIT"

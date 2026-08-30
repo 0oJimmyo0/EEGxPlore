@@ -167,6 +167,12 @@ def validate_manifest_integrity(path: str, require_sidecar: bool = False) -> str
 
 def _git_provenance() -> Dict[str, Any]:
     repo_root = os.path.dirname(os.path.abspath(__file__))
+    pinned_commit = os.environ.get('ICASSP_EXECUTION_COMMIT', '').strip()
+    if pinned_commit:
+        return {
+            'git_commit': pinned_commit,
+            'git_dirty': os.environ.get('ICASSP_EXECUTION_DIRTY', '0') == '1',
+        }
     try:
         commit = subprocess.run(
             ['git', 'rev-parse', 'HEAD'], cwd=repo_root, check=True,
