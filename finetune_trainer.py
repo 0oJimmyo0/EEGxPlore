@@ -1397,6 +1397,10 @@ class Trainer(object):
                 manifest_field = 'seedv_split_manifest'
                 manifest_path = str(getattr(self.params, 'seedv_split_manifest', '') or '')
                 manifest_source = 'seedv_subject_disjoint_manifest'
+            elif str(getattr(self.params, 'downstream_dataset', '')) == 'PhysioNet-MI':
+                manifest_field = 'icassp_split_manifest'
+                manifest_path = str(getattr(self.params, 'icassp_split_manifest', '') or '')
+                manifest_source = 'physionet_subject_disjoint_manifest'
             else:
                 # The primary revision protocol intentionally follows the
                 # CBraMod LMDB __keys__ cohort and therefore has no frozen
@@ -1416,7 +1420,10 @@ class Trainer(object):
                     experiment_profile == 'icassp2027'
                     or (
                         experiment_profile == 'icassp2027_revision'
-                        and revision_protocol == 'seedv_subject_disjoint'
+                        and (
+                            revision_protocol == 'seedv_subject_disjoint'
+                            or str(getattr(self.params, 'downstream_dataset', '')) == 'PhysioNet-MI'
+                        )
                     )
                 ),
             )

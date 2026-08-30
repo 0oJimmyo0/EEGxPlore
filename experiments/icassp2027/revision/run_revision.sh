@@ -123,6 +123,12 @@ case "$DATASET" in
     NUM_CLASSES=5
     DATASET_DIR="${DATASET_DIR:-/data/neurogroup/mingyangjiang/data/ISRUC}"
     ;;
+  PhysioNet-MI)
+    DATASET_TAG="physionet_mi"
+    NUM_CLASSES=4
+    DATASET_DIR="${DATASET_DIR:-/data/neurogroup/mingyangjiang/data/PHYSIO_MI}"
+    PHYSIO_SPLIT_MANIFEST="${PHYSIO_SPLIT_MANIFEST:-$REPO_DIR/experiments/icassp2027/manifests/physionet_mi/split_manifest.json}"
+    ;;
   *)
     echo "Unsupported dataset: $DATASET" >&2
     exit 2
@@ -136,10 +142,10 @@ fi
 
 if [[ "$RUN_MODE" == "paper" || "$RUN_MODE" == "smoke" ]]; then
   case "$DATASET:$CONDITION" in
-    SEED-V:upper1|SEED-V:full|SEED-V:specialist_augmented_full|FACED:full|FACED:selective_paper|FACED:specialist_augmented_full|ISRUC:full|ISRUC:selective_paper|ISRUC:specialist_augmented_full) ;;
+    SEED-V:upper1|SEED-V:full|SEED-V:specialist_augmented_full|FACED:full|FACED:selective_paper|FACED:specialist_augmented_full|ISRUC:full|ISRUC:selective_paper|ISRUC:specialist_augmented_full|PhysioNet-MI:full|PhysioNet-MI:specialist_augmented_full) ;;
     *)
       echo "Paper-facing run is not in the frozen new-run matrix: $DATASET/$CONDITION" >&2
-      echo "Allowed: SEED-V/{upper1,full,specialist_augmented_full}, FACED/{full,selective_paper,specialist_augmented_full}, ISRUC/{full,selective_paper,specialist_augmented_full}" >&2
+      echo "Allowed: SEED-V/{upper1,full,specialist_augmented_full}, FACED/{full,selective_paper,specialist_augmented_full}, ISRUC/{full,selective_paper,specialist_augmented_full}, PhysioNet-MI/{full,specialist_augmented_full}" >&2
       echo "Use an archived launcher or RUN_MODE=internal for non-paper diagnostics." >&2
       exit 2
       ;;
@@ -181,6 +187,7 @@ if [[ "$USE_PAPER_PROTOCOL" == "1" ]]; then
     seedv) PAPER_PROTOCOL_PATH="$SCRIPT_DIR/paper_protocol_seedv_v1.json" ;;
     faced) PAPER_PROTOCOL_PATH="$SCRIPT_DIR/paper_protocol_faced_v1.json" ;;
     isruc) PAPER_PROTOCOL_PATH="$SCRIPT_DIR/paper_protocol_isruc_v1.json" ;;
+    physionet_mi) PAPER_PROTOCOL_PATH="$SCRIPT_DIR/paper_protocol_physionet_mi_v1.json" ;;
   esac
   if [[ ! -f "$PAPER_PROTOCOL_PATH" ]]; then
     echo "Paper protocol is unavailable: $PAPER_PROTOCOL_PATH" >&2
@@ -311,6 +318,14 @@ fi
 
 SPLIT_ARGS=()
 MANIFEST_PATH=""
+if [[ "$DATASET" == "PhysioNet-MI" ]]; then
+  if [[ ! -f "$PHYSIO_SPLIT_MANIFEST" ]]; then
+    echo "PhysioNet-MI split manifest is unavailable: $PHYSIO_SPLIT_MANIFEST" >&2
+    exit 2
+  fi
+  MANIFEST_PATH="$PHYSIO_SPLIT_MANIFEST"
+  SPLIT_ARGS+=(--icassp_split_manifest "$PHYSIO_SPLIT_MANIFEST")
+fi
 
 MODEL_ROOT="$(realpath -m "$MODEL_ROOT")"
 if [[ "$CONDITION" == "historical_candidate" ]]; then
@@ -321,10 +336,15 @@ fi
 mkdir -p "$MODEL_DIR"
 
 DATA_CONTRACT_PATH="$MODEL_DIR/data_contract.json"
-"$PYTHON_BIN" "$SCRIPT_DIR/verify_data_contract.py" \
-  --dataset "$DATASET" \
-  --data-dir "$DATASET_DIR" \
+VERIFY_CONTRACT_ARGS=(
+  --dataset "$DATASET"
+  --data-dir "$DATASET_DIR"
   --output "$DATA_CONTRACT_PATH"
+)
+if [[ "$DATASET" == "PhysioNet-MI" ]]; then
+  VERIFY_CONTRACT_ARGS+=(--split-manifest "$PHYSIO_SPLIT_MANIFEST")
+fi
+"$PYTHON_BIN" "$SCRIPT_DIR/verify_data_contract.py" "${VERIFY_CONTRACT_ARGS[@]}"
 
 RUN_ARGS=(
   --seed "$SEED"
@@ -345,6 +365,8 @@ RUN_ARGS=(
   --input_scale_divisor 100.0
   --num_workers "$NUM_WORKERS"
   --label_smoothing "$LABEL_SMOOTHING"
+  --ema_decay "$EMA_DECAY"
+  --ema_warmup_steps "$EMA_WARMUP_STEPS"
   --use_pretrained_weights
   --foundation_dir "$FOUNDATION_DIR"
   --experiment_profile icassp2027_revision
@@ -412,6 +434,8 @@ if [[ "$USE_EMA" == "1" || "$USE_EMA" == "true" ]]; then
 elif [[ "$USE_EMA" != "0" && "$USE_EMA" != "false" ]]; then
   echo "USE_EMA must be 0/1 or false/true, got: $USE_EMA" >&2
   exit 2
+else
+  RUN_ARGS+=(--no-ema_eval_only)
 fi
 
 AUDIT_ARGS=("${RUN_ARGS[@]}" --expected-commit "$EXPECTED_COMMIT")
@@ -476,11 +500,15 @@ payload = {
     'split_manifest_field': (
         'seedv_split_manifest'
         if os.environ['PROTOCOL'] == 'seedv_subject_disjoint'
+        else 'icassp_split_manifest'
+        if os.environ['DATASET'] == 'PhysioNet-MI'
         else 'lmdb_keys'
     ),
     'split_manifest_source': (
         'seedv_subject_disjoint_manifest'
         if os.environ['PROTOCOL'] == 'seedv_subject_disjoint'
+        else 'physionet_subject_disjoint_manifest'
+        if os.environ['DATASET'] == 'PhysioNet-MI'
         else 'lmdb___keys__'
     ),
     'model_dir': os.environ['MODEL_DIR'],

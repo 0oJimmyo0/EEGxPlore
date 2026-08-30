@@ -107,7 +107,7 @@ def main() -> None:
     else:
         raise AssertionError('archived subject-disjoint protocol was accepted')
 
-    archived_dataset = _parser().parse_args([
+    physio_missing_manifest = _parser().parse_args([
         '--datasets_dir', '/tmp/icassp_revision_dataset',
         '--num_of_classes', '4',
         '--model_dir', str(REPO_ROOT / 'output/icassp2027_revision/contract_test/seed_42'),
@@ -117,11 +117,25 @@ def main() -> None:
         '--revision_protocol', 'cbramod_benchmark',
     ])
     try:
-        validate_args(archived_dataset)
+        validate_args(physio_missing_manifest)
     except ValueError as exc:
-        assert 'active dataset' in str(exc)
+        assert 'split manifest' in str(exc)
     else:
-        raise AssertionError('archived PhysioNet-MI dataset was accepted')
+        raise AssertionError('PhysioNet-MI without its split manifest was accepted')
+
+    physio = _parser().parse_args([
+        '--datasets_dir', '/tmp/icassp_revision_dataset',
+        '--num_of_classes', '4',
+        '--model_dir', str(REPO_ROOT / 'output/icassp2027_revision/contract_test/seed_42'),
+        '--downstream_dataset', 'PhysioNet-MI',
+        '--experiment_profile', 'icassp2027_revision',
+        '--revision_condition', 'full',
+        '--revision_protocol', 'cbramod_benchmark',
+        '--icassp_split_manifest', str(
+            REPO_ROOT / 'experiments/icassp2027/manifests/physionet_mi/split_manifest.json'
+        ),
+    ])
+    validate_args(physio)
 
     smoke = _args('upper1')
     smoke.revision_run_mode = 'smoke'

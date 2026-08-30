@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "output" / "icassp2027_revision"
 DEFAULT_PAPER_MANIFEST = (
-    REPO_ROOT / "experiments" / "icassp2027" / "revision" / "paper_table_manifest_v3.csv"
+    REPO_ROOT / "experiments" / "icassp2027" / "revision" / "paper_table_manifest_v4.csv"
 )
 
 TRAINING_COMMIT = "fd425cdfd0ff08d57ac30ee9b8737b895e9d46ad"
@@ -27,12 +27,13 @@ EXECUTION_COMMIT_CONTRACT = (
 )
 FOUNDATION_SHA256 = "0792cb808c14e6b7a2bb2ce1dff379bc47bc54c49a779825bdfeb33bf8157178"
 METHOD_ID = "icaspp_specialist_augmented_full_v1"
-METHOD_SHA256 = "ea9dd972423552a9f9a10d5f4de3b4e39a7dc9bf47a9a1372d232296a7445bd2"
+METHOD_SHA256 = "08ded624f8d12da6c98e42436b8e4dcc87f20d5188b5541f851ca8e429384ace"
 
 DATASET_CONTRACT_SHA256 = {
     "SEED-V": "db8fb3219e2acf74e1427e50a84a96d1c31fada78deac86bbde82f2a9c2a02ea",
     "FACED": "3269f80c4f89e346362e363e3ef328331f853ea8f6917d960b6ee6ff99e564d5",
     "ISRUC": "6db187940c432334346aa3a7a4aac7bfa5bdc493f637678188d2380048e6ea4a",
+    "PhysioNet-MI": "c28f125d6ebd54ca306a697eb3b7a3d1fdbef04d0a7b4da7c50a3a2c7c67cac6",
 }
 DATASET_PROTOCOL = {
     "SEED-V": {
@@ -47,8 +48,12 @@ DATASET_PROTOCOL = {
         "id": "icaspp_paper_derived_isruc_v1",
         "sha256": "995270018fbf0162e3a88b395fb5006c2ade9f441a6217694e18d5aa637cedd8",
     },
+    "PhysioNet-MI": {
+        "id": "icaspp_paper_derived_physionet_mi_v1",
+        "sha256": "2eb1bfde072e8e83af5510b4bf4e148b3f422a7c9fba72913cb54a1fd4ed7c3c",
+    },
 }
-DATASETS = ("FACED", "ISRUC", "SEED-V")
+DATASETS = ("FACED", "ISRUC", "SEED-V", "PhysioNet-MI")
 CONDITIONS = ("full", "specialist_augmented_full")
 SEEDS = ("3407", "2024", "2027")
 
@@ -95,7 +100,12 @@ def as_float(value: Any) -> float | None:
 
 
 def run_directory(output_root: Path, dataset: str, condition: str, seed: str) -> Path:
-    dataset_tag = {"SEED-V": "seedv", "FACED": "faced", "ISRUC": "isruc"}[dataset]
+    dataset_tag = {
+        "SEED-V": "seedv",
+        "FACED": "faced",
+        "ISRUC": "isruc",
+        "PhysioNet-MI": "physionet_mi",
+    }[dataset]
     return output_root / dataset_tag / condition / f"seed_{seed}"
 
 

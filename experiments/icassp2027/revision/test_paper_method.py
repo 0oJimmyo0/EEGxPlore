@@ -23,9 +23,10 @@ def _args(dataset: str = 'FACED'):
     add_shared_args(parser)
     add_faced_args(parser)
     add_seedv_args(parser)
-    return parser.parse_args([
+    classes = {'FACED': '9', 'ISRUC': '5', 'SEED-V': '5', 'PhysioNet-MI': '4'}[dataset]
+    argv = [
         '--datasets_dir', '/tmp/icassp_paper_method_dataset',
-        '--num_of_classes', '9' if dataset == 'FACED' else '5',
+        '--num_of_classes', classes,
         '--model_dir', str(REPO_ROOT / 'output/icassp2027_revision/method_contract/seed_3407'),
         '--downstream_dataset', dataset,
         '--experiment_profile', 'icassp2027_revision',
@@ -33,13 +34,20 @@ def _args(dataset: str = 'FACED'):
         '--revision_protocol', 'cbramod_benchmark',
         '--revision_run_mode', 'paper',
         '--paper_method_recipe', str(RECIPE),
-    ])
+    ]
+    if dataset == 'PhysioNet-MI':
+        argv.extend([
+            '--icassp_split_manifest', str(
+                REPO_ROOT / 'experiments/icassp2027/manifests/physionet_mi/split_manifest.json'
+            ),
+        ])
+    return parser.parse_args(argv)
 
 
 def main() -> None:
     recipe = load_method_recipe(RECIPE)
     assert recipe['method_id'] == 'icaspp_specialist_augmented_full_v1'
-    for dataset in ('FACED', 'ISRUC', 'SEED-V'):
+    for dataset in ('FACED', 'ISRUC', 'SEED-V', 'PhysioNet-MI'):
         args = _args(dataset)
         validate_args(args)
         info = verify_args_against_method(args, recipe)

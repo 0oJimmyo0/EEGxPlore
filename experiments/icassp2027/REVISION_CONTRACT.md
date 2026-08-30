@@ -16,8 +16,8 @@ interaction-alignment and axis-comparison experiments are outside this paper.
 ## Scope
 
 - Backbone: CBraMod only.
-- Active datasets: SEED-V, FACED, and ISRUC.
-- Archived datasets: PhysioNet-MI and TUEV; no new paper-facing runs.
+- Active datasets: SEED-V, FACED, ISRUC, and PhysioNet-MI.
+- Archived dataset: TUEV; no new paper-facing runs.
 - Active protocol: `cbramod_benchmark` only.
 - Archived protocol: `seedv_subject_disjoint`; it is not a readiness gate.
 - Development seed: `42`.
@@ -44,13 +44,15 @@ registry. Do not pool legacy and new values into a single statistical summary.
 
 ## Main evidence plan
 
-The main confirmatory cross-dataset comparison is Dense versus
+The main confirmatory cross-dataset comparison is Full fine-tuning versus
 AttnRes + Typed Specialists:
 
 | Dataset | Dense | Selective |
 |---|---|---|
 | FACED | new, three unseen seeds | new, three unseen seeds |
 | ISRUC | new, three unseen seeds | new, three unseen seeds |
+| SEED-V | new, three unseen seeds | new, three unseen seeds |
+| PhysioNet-MI | new, three unseen seeds | new, three unseen seeds |
 
 The rejected-paper SEED-V Dense, AttnRes-only, and Selective rows remain a
 separately labeled legacy component/context table. They are not pooled with
@@ -81,12 +83,13 @@ runs use locked dataset protocol files. The manuscript-supported settings are:
 | SEED-V | 25 | 64 | `3e-5` | `3e-2` |
 | FACED | 40 | 32 | `2e-4` | `2e-2` |
 | ISRUC | 30 | 16 | `3e-5` | `2e-2` |
+| PhysioNet-MI | 30 | 64 | `3e-5` | `2e-2` |
 
 These are paper-derived ICASSP execution protocols, not claims that every
 historical implementation field has been recovered. Each protocol records
 which fields came from the manuscript and which are explicit current-run
 defaults. Component-wise learning-rate scaling is explicitly disabled in all
-three paper-facing protocols; it remains enabled only in the archived
+four paper-facing protocols; it remains enabled only in the archived
 independent `fresh_selective` recipe.
 
 ## Provenance and reporting rules
@@ -103,7 +106,7 @@ independent `fresh_selective` recipe.
 
 ## Explicit exclusions
 
-LaBraM, TUEV, PhysioNet-MI as a primary dataset, Mumtaz2016, a second
+LaBraM, TUEV, Mumtaz2016, a second
 backbone, subject-disjoint SEED-V as a readiness requirement, TMLR-native-axis
 experiments, new operators, new routing designs, and broad hyperparameter
 sweeps are outside the active revision. The explicit depth-aware routing
@@ -112,8 +115,8 @@ candidate is retained only as a small development control.
 ## Readiness gate
 
 The paper is ready for assembly when the declared legacy rows are visibly
-labeled, the 12 rows in `paper_table_manifest_v2.csv` are complete over the
-three unseen seeds, and one accuracy/overhead summary is available. If the
+labeled, the 24 rows in `paper_table_manifest_v4.csv` are complete over the
+four datasets and three unseen seeds, and one accuracy/overhead summary is available. If the
 specialist method is not consistently better than full fine-tuning, narrow the
 claim to a controlled simplification study rather than adding architecture
 variants.

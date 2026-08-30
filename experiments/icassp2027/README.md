@@ -12,17 +12,17 @@ second foundation-model study.
 The active scope is deliberately limited to:
 
 - CBraMod only;
-- SEED-V, FACED, and ISRUC;
+- SEED-V, FACED, ISRUC, and PhysioNet-MI;
 - the existing AttnRes and typed-specialist components;
 - one matched benchmark protocol;
 - a predeclared Full versus AttnRes + Typed Specialists comparison on FACED
   and ISRUC over seeds `3407`, `2024`, and `2027`.
 
-PhysioNet-MI, TUEV, and the subject-disjoint SEED-V protocol are archived
-evidence only. They are not part of the active ICASSP compute plan. The
+TUEV and the subject-disjoint SEED-V protocol are archived evidence only.
+They are not part of the active ICASSP compute plan. The
 rejected-paper SEED-V values and all seed-42 comparisons are development or
-legacy context only; they are not pooled into the 12-cell confirmatory table
-in `revision/paper_table_manifest_v2.csv`.
+legacy context only; they are not pooled into the 24-cell confirmatory table
+in `revision/paper_table_manifest_v4.csv`.
 
 There is no new architecture in the active plan. Learned depth-conditioned
 routing, compact-context routing, PSD/context features, new expert
@@ -60,8 +60,8 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/revision/submit_revision.slurm`
 - `experiments/icassp2027/revision/verify_paper_protocol.py`
 - `experiments/icassp2027/revision/paper_protocol_*.json`
-- `experiments/icassp2027/revision/paper_table_manifest_v2.csv`
-- `experiments/icassp2027/revision/audit_paper_scope_v2.py`
+- `experiments/icassp2027/revision/paper_table_manifest_v4.csv`
+- `experiments/icassp2027/revision/audit_paper_scope_v4.py`
 - `experiments/icassp2027/revision/development_diagnostics_manifest.csv`
 - `experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json`
 - `experiments/icassp2027/revision/verify_paper_method.py`
@@ -71,8 +71,8 @@ Retained utilities are limited to data/provenance checks and existing CBraMod tr
 - `experiments/icassp2027/revision/build_evidence_registry.py`
 - `experiments/icassp2027/revision/test_*.py`
 
-The old `paper_table_manifest.csv` and `audit_paper_scope.py` are retained as
-historical planning artifacts only; v2 is the active paper scope. The
+The old `paper_table_manifest*.csv` and `audit_paper_scope*.py` are retained as
+historical planning artifacts only; v4 is the active paper scope. The
 independently locked `fresh_selective_recipe.json` and its verifier remain
 at their existing paths because the implementation and contract tests depend
 on them, but they are archived independent-recipe artifacts and are not

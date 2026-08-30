@@ -31,6 +31,21 @@
         "finetune_main.py"
       ],
       "diff_sha256": "03b1b8f1add0a04a4c246e07569223cfa5532859c8987c81d392bc982ba941c8"
+    },
+    "d56d3a1e6d7ef7d6498af78e2dad8150b226a26e": {
+      "classification": "noncausal_physionet_mi_scope_extension",
+      "allowed_diff_paths": [
+        "experiments/icassp2027/revision/paper_method_schema.py",
+        "experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json",
+        "experiments/icassp2027/revision/paper_protocol_physionet_mi_v1.json",
+        "experiments/icassp2027/revision/run_revision.sh",
+        "experiments/icassp2027/revision/submit_revision.slurm",
+        "experiments/icassp2027/revision/verify_data_contract.py",
+        "experiments/icassp2027/revision/verify_paper_protocol.py",
+        "finetune_main.py",
+        "finetune_trainer.py"
+      ],
+      "diff_sha256": "96e18c4cfcb55ada183dc61236ed8b816903f8e47095311a9de53eae506c95d7"
     }
   }
 }

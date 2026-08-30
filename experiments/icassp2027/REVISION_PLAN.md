@@ -37,8 +37,8 @@ are never relabeled as final paper evidence.
 ## 3. Use locked paper-derived protocols
 
 The existing `fresh_selective_recipe.json` is preserved unchanged as an
-independent archived recipe. New paper-facing selective runs use
-`selective_paper` plus the dataset protocol file for SEED-V, FACED, or ISRUC.
+independent archived recipe. New paper-facing runs use the locked dataset
+protocol files and the `full` or `specialist_augmented_full` conditions.
 The protocol verifier records a hash and validates the supported execution
 fields. It does not claim that unrecovered historical fields are known.
 
@@ -49,11 +49,13 @@ datasets, primary benchmark protocol, declared seeds, and the frozen new-run
 matrix:
 
 - FACED / `full` and `specialist_augmented_full`;
-- ISRUC / `full` and `specialist_augmented_full`.
+- ISRUC / `full` and `specialist_augmented_full`;
+- SEED-V / `full` and `specialist_augmented_full`;
+- PhysioNet-MI / `full` and `specialist_augmented_full`.
 
 The final manifest uses seeds `3407`, `2024`, and `2027`. Seed `42` is
 development-only for the final method. Historical SEED-V rows remain in the
-legacy manifest and are not pooled with the final 12 rows.
+legacy manifest and are not pooled with the final 24 rows.
 
 `RUN_MODE=smoke` uses one epoch, the same architecture/data path, and the
 separate `output/icassp2027_smoke/` root. Smoke artifacts are explicitly
@@ -61,15 +63,15 @@ ineligible for paper aggregation. Historical conditions remain blocked.
 
 ## 5. GPU budget
 
-Final confirmatory block: 12 jobs — FACED and ISRUC, Full and
-AttnRes + Typed Specialists, over seeds `3407`, `2024`, and `2027`.
+Final confirmatory block: 24 jobs — SEED-V, FACED, ISRUC, and PhysioNet-MI,
+Full and AttnRes + Typed Specialists, over seeds `3407`, `2024`, and `2027`.
 
 Run one one-epoch smoke for the new alias first. Do not launch depth-routing
 multiseeds, broad sweeps, replacement seeds, or additional architectures.
 
 ## 6. Reporting
 
-The main table reports FACED/ISRUC Full versus AttnRes + Typed Specialists as
+The main table reports the four-dataset Full versus AttnRes + Typed Specialists as
 mean ± standard deviation over the three unseen seeds. The seed-42 opt-only
 and depth-routing comparisons are development/component evidence. The SEED-V
 component table labels legacy rows separately. Per-seed metrics, recipe
@@ -79,6 +81,6 @@ the artifact or supplement.
 ## 7. Stop conditions
 
 Stop after the planned new blocks are complete and the efficiency summary is
-available. Do not add TUEV, PhysioNet-MI, LaBraM, a second backbone, subject-
+available. Do not add TUEV, LaBraM, a second backbone, subject-
 disjoint primary experiments, new routing designs, or broad sweeps merely to
 rescue a weak result.

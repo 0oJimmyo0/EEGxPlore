@@ -17,6 +17,7 @@ def main() -> None:
         "SEED-V": ("paper_protocol_seedv_v1.json", 25, 64, 3e-5, 3e-2, 0),
         "FACED": ("paper_protocol_faced_v1.json", 40, 32, 2e-4, 2e-2, 4),
         "ISRUC": ("paper_protocol_isruc_v1.json", 30, 16, 3e-5, 2e-2, 4),
+        "PhysioNet-MI": ("paper_protocol_physionet_mi_v1.json", 30, 64, 3e-5, 2e-2, 0),
     }
     for dataset, (filename, epochs, batch, lr, weight_decay, num_workers) in expected.items():
         path = ROOT / filename
