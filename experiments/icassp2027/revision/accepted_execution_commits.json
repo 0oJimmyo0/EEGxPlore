@@ -14,6 +14,14 @@
         "experiments/icassp2027/revision/submit_revision.slurm"
       ],
       "diff_sha256": "4b763863c3e079fe4558c157bff51601f35583c8819ade260974b04a32dccdf7"
+    },
+    "c033409a0defc9e41f22f831719d9aa3c78e18a6": {
+      "classification": "noncausal_seedv_scope_extension",
+      "allowed_diff_paths": [
+        "experiments/icassp2027/revision/run_revision.sh",
+        "experiments/icassp2027/revision/submit_revision.slurm"
+      ],
+      "diff_sha256": "8f44f828ee8631d25dd202dd95ad109ea056b8d296fa2839c20786c8d87b1661"
     }
   }
 }

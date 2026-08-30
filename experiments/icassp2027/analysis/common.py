@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "output" / "icassp2027_revision"
 DEFAULT_PAPER_MANIFEST = (
-    REPO_ROOT / "experiments" / "icassp2027" / "revision" / "paper_table_manifest_v2.csv"
+    REPO_ROOT / "experiments" / "icassp2027" / "revision" / "paper_table_manifest_v3.csv"
 )
 
 TRAINING_COMMIT = "fd425cdfd0ff08d57ac30ee9b8737b895e9d46ad"
@@ -30,10 +30,15 @@ METHOD_ID = "icaspp_specialist_augmented_full_v1"
 METHOD_SHA256 = "32dbc9266225fefce3eaa4fb8f4faf2cc727ca0611712e9b7520157c13eba10a"
 
 DATASET_CONTRACT_SHA256 = {
+    "SEED-V": "db8fb3219e2acf74e1427e50a84a96d1c31fada78deac86bbde82f2a9c2a02ea",
     "FACED": "3269f80c4f89e346362e363e3ef328331f853ea8f6917d960b6ee6ff99e564d5",
     "ISRUC": "6db187940c432334346aa3a7a4aac7bfa5bdc493f637678188d2380048e6ea4a",
 }
 DATASET_PROTOCOL = {
+    "SEED-V": {
+        "id": "icaspp_paper_derived_seedv_v1",
+        "sha256": "ace6b6283ba014cf37a943b93e58d0ef1e018a93216e3f6b83fb86a4296c3296",
+    },
     "FACED": {
         "id": "icaspp_paper_derived_faced_v1",
         "sha256": "dce264b69304759613a1fddd9028fc2d380e23a488372746d58d0886be9d0836",
@@ -43,7 +48,7 @@ DATASET_PROTOCOL = {
         "sha256": "995270018fbf0162e3a88b395fb5006c2ade9f441a6217694e18d5aa637cedd8",
     },
 }
-DATASETS = ("FACED", "ISRUC")
+DATASETS = ("FACED", "ISRUC", "SEED-V")
 CONDITIONS = ("full", "specialist_augmented_full")
 SEEDS = ("3407", "2024", "2027")
 
@@ -90,7 +95,8 @@ def as_float(value: Any) -> float | None:
 
 
 def run_directory(output_root: Path, dataset: str, condition: str, seed: str) -> Path:
-    return output_root / dataset.lower() / condition / f"seed_{seed}"
+    dataset_tag = {"SEED-V": "seedv", "FACED": "faced", "ISRUC": "isruc"}[dataset]
+    return output_root / dataset_tag / condition / f"seed_{seed}"
 
 
 def load_manifest_cells(path: Path) -> List[Dict[str, str]]:
@@ -109,7 +115,6 @@ def expected_primary_cells(path: Path = DEFAULT_PAPER_MANIFEST) -> List[Tuple[st
         )
         for row in rows
         if row.get("paper_eligibility") == "primary_new_evidence"
-        and row.get("required_new_run") == "yes"
     ]
     return sorted(cells)
 

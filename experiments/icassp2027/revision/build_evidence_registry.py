@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "output" / "icassp2027_revision"
 DEFAULT_REGISTRY = DEFAULT_OUTPUT_ROOT / "evidence_registry.csv"
-DEFAULT_PAPER_MANIFEST = REPO_ROOT / "experiments" / "icassp2027" / "revision" / "paper_table_manifest_v2.csv"
+DEFAULT_PAPER_MANIFEST = REPO_ROOT / "experiments" / "icassp2027" / "revision" / "paper_table_manifest_v3.csv"
 EXECUTION_COMMIT_CONTRACT = REPO_ROOT / "experiments" / "icassp2027" / "revision" / "accepted_execution_commits.json"
 TRAINING_SEMANTICS_ID = "icassp2027_specialist_full_v1"
 
@@ -186,7 +186,6 @@ def _primary_cells(manifest_path: Optional[Path]) -> Optional[Set[Tuple[str, str
             )
             for row in rows
             if row.get("paper_eligibility") == "primary_new_evidence"
-            and row.get("required_new_run") == "yes"
         }
 
 

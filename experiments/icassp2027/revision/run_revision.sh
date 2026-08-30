@@ -136,10 +136,10 @@ fi
 
 if [[ "$RUN_MODE" == "paper" || "$RUN_MODE" == "smoke" ]]; then
   case "$DATASET:$CONDITION" in
-    SEED-V:upper1|FACED:full|FACED:selective_paper|FACED:specialist_augmented_full|ISRUC:full|ISRUC:selective_paper|ISRUC:specialist_augmented_full) ;;
+    SEED-V:upper1|SEED-V:full|SEED-V:specialist_augmented_full|FACED:full|FACED:selective_paper|FACED:specialist_augmented_full|ISRUC:full|ISRUC:selective_paper|ISRUC:specialist_augmented_full) ;;
     *)
       echo "Paper-facing run is not in the frozen new-run matrix: $DATASET/$CONDITION" >&2
-      echo "Allowed: SEED-V/upper1, FACED/{full,selective_paper,specialist_augmented_full}, ISRUC/{full,selective_paper,specialist_augmented_full}" >&2
+      echo "Allowed: SEED-V/{upper1,full,specialist_augmented_full}, FACED/{full,selective_paper,specialist_augmented_full}, ISRUC/{full,selective_paper,specialist_augmented_full}" >&2
       echo "Use an archived launcher or RUN_MODE=internal for non-paper diagnostics." >&2
       exit 2
       ;;

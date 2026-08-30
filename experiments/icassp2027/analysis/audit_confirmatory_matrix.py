@@ -1,4 +1,4 @@
-"""Strictly audit the frozen 12-cell ICASSP confirmatory matrix.
+"""Strictly audit the frozen 18-cell ICASSP confirmatory matrix.
 
 This audit is intentionally independent of the training path.  It reads only
 run manifests, result manifests, summaries, and locked hash contracts.  It
@@ -330,7 +330,7 @@ def main() -> int:
         type=Path,
         default=DEFAULT_OUTPUT_ROOT / "confirmatory_audit.json",
     )
-    parser.add_argument("--strict", action="store_true", help="return failure status unless all 12 cells pass")
+    parser.add_argument("--strict", action="store_true", help="return failure status unless all 18 cells pass")
     args = parser.parse_args()
     audit = audit_matrix(args.output_root, args.paper_manifest)
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -118,8 +118,9 @@ def aggregate(audit: Dict[str, Any]) -> Dict[str, Any]:
     if not audit.get("passed"):
         raise ValueError("confirmatory audit did not pass; refusing to aggregate incomplete or mismatched rows")
     rows = list(audit.get("rows", []))
-    if len(rows) != 12 or any(row.get("status") != "pass" for row in rows):
-        raise ValueError("expected exactly 12 passing confirmatory rows")
+    expected_count = int(audit.get("expected_cell_count", 0) or 0)
+    if len(rows) != expected_count or any(row.get("status") != "pass" for row in rows):
+        raise ValueError(f"expected exactly {expected_count} passing confirmatory rows")
     pairs = _pair_rows(rows)
     return {
         "schema_version": 1,
