@@ -13,7 +13,7 @@ python experiments/icassp2027/analysis/aggregate_routing_validation.py
 ```
 
 The strict audit reads only the frozen FACED/ISRUC/SEED-V/PhysioNet-MI matrix from
-`paper_table_manifest_v3.csv`. It rejects incomplete rows, seed 42, smoke
+`paper_table_manifest_v4.csv`. It rejects incomplete rows, seed 42, smoke
 runs, historical candidates, and non-confirmatory conditions. The routing
 summary is explicitly scoped to the stored last validation-batch snapshot for
 each epoch; it is not a complete validation-set aggregation and must not be

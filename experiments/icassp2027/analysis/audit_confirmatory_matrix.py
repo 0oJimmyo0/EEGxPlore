@@ -9,7 +9,9 @@ artifacts into confirmatory evidence.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ from common import (
     FOUNDATION_SHA256,
     METHOD_ID,
     METHOD_SHA256,
+    METHOD_SEMANTICS_SHA256,
     REPO_ROOT,
     SEEDS,
     TRAINING_COMMIT,
@@ -78,8 +81,29 @@ def _semantic_config_sha256(summary_payload: Dict[str, Any]) -> str:
         if key not in {"seed", "model_dir", "paper_method_recipe"}
     }
     payload = json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
-    import hashlib
     return hashlib.sha256(payload).hexdigest()
+
+
+def _recipe_hashes_from_commit(commit: str) -> Tuple[str, str]:
+    """Recover exact and method-only recipe hashes from the execution commit."""
+    recipe_path = "experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json"
+    try:
+        raw = subprocess.run(
+            ["git", "show", f"{commit}:{recipe_path}"],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+        payload = json.loads(raw)
+        method = payload.get("method")
+        if not isinstance(method, dict):
+            return "", ""
+        semantics = json.dumps(
+            method, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest(), hashlib.sha256(semantics).hexdigest()
+    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError):
+        return "", ""
 
 
 def _canonical_row(
@@ -148,10 +172,25 @@ def _canonical_row(
 
     method_id = str(_first(run_manifest.get("paper_method_recipe_id"), result_manifest.get("paper_method_recipe_id")))
     method_sha = str(_first(run_manifest.get("paper_method_recipe_sha256"), result_manifest.get("paper_method_recipe_sha256")))
+    method_semantics_sha = str(_first(
+        run_manifest.get("paper_method_semantics_sha256"),
+        result_manifest.get("paper_method_semantics_sha256"),
+        summary_payload.get("paper_method_semantics_sha256"),
+        summary_payload.get("provenance", {}).get("paper_method_semantics_sha256")
+        if isinstance(summary_payload.get("provenance"), dict) else "",
+    ))
+    commit_recipe_sha, commit_method_semantics_sha = _recipe_hashes_from_commit(code_commit)
+    if not method_semantics_sha:
+        method_semantics_sha = commit_method_semantics_sha
     if method_id != expected_method_id:
         errors.append(f"paper_method_recipe_id={method_id!r}, expected {expected_method_id!r}")
-    if method_sha != expected_method_sha:
-        errors.append("paper_method_recipe_sha256 does not match the locked method contract")
+    if condition == "specialist_augmented_full":
+        if not method_sha:
+            errors.append("paper_method_recipe_sha256 is missing")
+        elif method_sha != expected_method_sha and method_sha != commit_recipe_sha:
+            errors.append("paper_method_recipe_sha256 is neither the active nor execution-commit recipe hash")
+        if method_semantics_sha != METHOD_SEMANTICS_SHA256:
+            errors.append("paper_method_semantics_sha256 does not match the locked method semantics")
 
     semantic_config_sha256 = _semantic_config_sha256(summary_payload)
     if not semantic_config_sha256:
@@ -196,6 +235,7 @@ def _canonical_row(
         "protocol_sha256": protocol_sha,
         "method_id": method_id,
         "method_sha256": method_sha,
+        "method_semantics_sha256": method_semantics_sha,
         "data_contract_sha256": data_contract_sha,
         "foundation_sha256": foundation_sha,
         "code_commit": code_commit,

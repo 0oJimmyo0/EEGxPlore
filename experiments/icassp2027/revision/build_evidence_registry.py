@@ -38,6 +38,7 @@ FIELDNAMES = [
     "fresh_selective_recipe_sha256",
     "paper_method_recipe_id",
     "paper_method_recipe_sha256",
+    "paper_method_semantics_sha256",
     "paper_method_recipe_path",
     "paper_protocol_id",
     "paper_protocol_sha256",
@@ -316,6 +317,13 @@ def _row_for_run(
         "paper_method_recipe_sha256": str(
             manifest.get("paper_method_recipe_sha256")
             or result.get("paper_method_recipe_sha256")
+            or summary.get("paper_method_recipe_sha256")
+            or ""
+        ),
+        "paper_method_semantics_sha256": str(
+            manifest.get("paper_method_semantics_sha256")
+            or result.get("paper_method_semantics_sha256")
+            or summary.get("paper_method_semantics_sha256")
             or ""
         ),
         "paper_method_recipe_path": str(

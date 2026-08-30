@@ -1390,6 +1390,15 @@ class Trainer(object):
         fresh_selective_recipe_sha256 = ''
         if fresh_selective_recipe_path and os.path.isfile(fresh_selective_recipe_path):
             fresh_selective_recipe_sha256 = _sha256_file(fresh_selective_recipe_path)
+        paper_method_recipe_path = str(
+            getattr(self.params, 'paper_method_recipe', '') or ''
+        )
+        paper_method_recipe_sha256 = ''
+        if paper_method_recipe_path and os.path.isfile(paper_method_recipe_path):
+            paper_method_recipe_sha256 = _sha256_file(paper_method_recipe_path)
+        paper_method_semantics_sha256 = str(
+            getattr(self.params, 'paper_method_semantics_sha256', '') or ''
+        )
         config_bytes = json.dumps(vars(self.params), sort_keys=True, default=str).encode('utf-8')
         config_sha256 = hashlib.sha256(config_bytes).hexdigest()
         if experiment_profile == 'icassp2027_revision':
@@ -1464,6 +1473,9 @@ class Trainer(object):
             'historical_recipe_sha256': historical_recipe_sha256,
             'fresh_selective_recipe_path': fresh_selective_recipe_path,
             'fresh_selective_recipe_sha256': fresh_selective_recipe_sha256,
+            'paper_method_recipe_path': paper_method_recipe_path,
+            'paper_method_recipe_sha256': paper_method_recipe_sha256,
+            'paper_method_semantics_sha256': paper_method_semantics_sha256,
             'split_manifest_field': manifest_field,
             'split_manifest_source': manifest_source,
             'best_epoch': int(best_epoch),
@@ -1484,6 +1496,9 @@ class Trainer(object):
                 'historical_recipe_sha256': historical_recipe_sha256,
                 'fresh_selective_recipe_path': fresh_selective_recipe_path,
                 'fresh_selective_recipe_sha256': fresh_selective_recipe_sha256,
+                'paper_method_recipe_path': paper_method_recipe_path,
+                'paper_method_recipe_sha256': paper_method_recipe_sha256,
+                'paper_method_semantics_sha256': paper_method_semantics_sha256,
                 'foundation_checkpoint_path': foundation_path,
                 'foundation_checkpoint_sha256': foundation_sha256,
                 'config_sha256': config_sha256,
@@ -1514,6 +1529,9 @@ class Trainer(object):
             'historical_recipe_sha256': historical_recipe_sha256,
             'fresh_selective_recipe_path': fresh_selective_recipe_path,
             'fresh_selective_recipe_sha256': fresh_selective_recipe_sha256,
+            'paper_method_recipe_path': paper_method_recipe_path,
+            'paper_method_recipe_sha256': paper_method_recipe_sha256,
+            'paper_method_semantics_sha256': paper_method_semantics_sha256,
             'split_manifest_field': manifest_field,
             'split_manifest_source': manifest_source,
             'model_dir': md,

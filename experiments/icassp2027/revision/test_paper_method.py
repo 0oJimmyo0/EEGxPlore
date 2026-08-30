@@ -11,7 +11,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from finetune_main import add_faced_args, add_seedv_args, add_shared_args, validate_args
-from paper_method_schema import load_method_recipe, verify_args_against_method
+from paper_method_schema import (
+    load_method_recipe,
+    method_semantics_sha256,
+    verify_args_against_method,
+)
 
 
 ROOT = Path(__file__).parent
@@ -52,6 +56,7 @@ def main() -> None:
         validate_args(args)
         info = verify_args_against_method(args, recipe)
         assert info['paper_method_id'] == recipe['method_id']
+        assert info['method_semantics_sha256'] == method_semantics_sha256(recipe)
         assert args.trainability_mode == 'full'
         assert args.attnres_variant == 'pre_attn'
         assert args.moe is True
