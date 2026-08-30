@@ -52,6 +52,11 @@ def main() -> int:
         "paper_method_recipe_sha256": _env("PAPER_METHOD_RECIPE_SHA256") if condition == "specialist_augmented_full" else "",
         "paper_method_semantics_sha256": _env("PAPER_METHOD_SEMANTICS_SHA256") if condition == "specialist_augmented_full" else "",
         "use_component_lr": _env("COMPONENT_LR_ENABLED", "0") == "1",
+        "fresh_selective_recipe_path": _env("FRESH_SELECTIVE_RECIPE_PATH") if condition == "selective_fresh" else "",
+        "fresh_selective_recipe_sha256": _env("FRESH_SELECTIVE_RECIPE_SHA256") if condition == "selective_fresh" else "",
+        "historical_candidate_recipe_path": _env("HISTORICAL_CANDIDATE_RECIPE_PATH") if condition == "historical_candidate" else "",
+        "historical_candidate_recipe_sha256": _env("HISTORICAL_CANDIDATE_RECIPE_SHA256") if condition == "historical_candidate" else "",
+        "historical_candidate_stage": _env("HISTORICAL_CANDIDATE_STAGE") if condition == "historical_candidate" else "",
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
