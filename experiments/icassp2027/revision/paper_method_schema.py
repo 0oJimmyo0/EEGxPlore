@@ -29,6 +29,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def method_semantics_sha256(recipe: Dict[str, Any]) -> str:
+    """Hash only the method object, independent of dataset scope metadata."""
+    payload = json.dumps(
+        recipe["method"], sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _equal(expected: Any, actual: Any) -> bool:
     if isinstance(expected, bool):
         return isinstance(actual, bool) and expected == actual
@@ -119,6 +127,7 @@ def apply_method_recipe(args: Any, recipe: Dict[str, Any], path: Path) -> None:
     for key, value in method.items():
         setattr(args, key, value)
     args.paper_method_recipe = str(path)
+    args.paper_method_semantics_sha256 = method_semantics_sha256(recipe)
 
 
 def verify_args_against_method(args: Any, recipe: Dict[str, Any]) -> Dict[str, Any]:
@@ -137,6 +146,7 @@ def verify_args_against_method(args: Any, recipe: Dict[str, Any]) -> Dict[str, A
         "paper_method_id": str(recipe["method_id"]),
         "paper_method_label": str(recipe["paper_label"]),
         "paper_method_status": str(recipe["status"]),
+        "method_semantics_sha256": method_semantics_sha256(recipe),
     }
 
 
@@ -144,6 +154,7 @@ def shell_exports(path: Path, recipe: Dict[str, Any]) -> str:
     values = {
         "PAPER_METHOD_RECIPE_ID": recipe["method_id"],
         "PAPER_METHOD_RECIPE_SHA256": sha256_file(path),
+        "PAPER_METHOD_SEMANTICS_SHA256": method_semantics_sha256(recipe),
         "PAPER_METHOD_RECIPE_PATH": str(path.resolve()),
     }
     return "\n".join(
