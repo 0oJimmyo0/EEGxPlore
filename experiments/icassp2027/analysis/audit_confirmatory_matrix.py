@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Tuple
 from common import (
     CONDITIONS,
     DATASET_CONTRACT_SHA256,
+    DATASET_CONTRACT_SHA256_ALIASES,
     DATASET_PROTOCOL,
     DATASETS,
     DEFAULT_OUTPUT_ROOT,
@@ -176,7 +177,8 @@ def _canonical_row(
         errors.append("paper_protocol_sha256 does not match the locked protocol")
 
     data_contract_sha = str(_first(run_manifest.get("data_contract_sha256"), result_manifest.get("data_contract_sha256")))
-    if data_contract_sha != expected_contract:
+    accepted_contracts = {expected_contract} | set(DATASET_CONTRACT_SHA256_ALIASES.get(dataset, set()))
+    if data_contract_sha not in accepted_contracts:
         errors.append("data_contract_sha256 does not match the locked rejected-paper data contract")
 
     foundation_sha = str(_first(run_manifest.get("foundation_checkpoint_sha256"), result_manifest.get("foundation_checkpoint_sha256")))

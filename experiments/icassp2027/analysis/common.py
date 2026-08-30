@@ -36,6 +36,15 @@ DATASET_CONTRACT_SHA256 = {
     "ISRUC": "6db187940c432334346aa3a7a4aac7bfa5bdc493f637678188d2380048e6ea4a",
     "PhysioNet-MI": "c28f125d6ebd54ca306a697eb3b7a3d1fdbef04d0a7b4da7c50a3a2c7c67cac6",
 }
+# The hardened SEED-V execution snapshot writes the same validated contract
+# with an explicit empty split-manifest field.  Preserve the original hash for
+# legacy Full rows and accept only this exact byte-level representation for the
+# newer specialist rows.
+DATASET_CONTRACT_SHA256_ALIASES = {
+    "SEED-V": {
+        "fc6bdc7b94703fcfbfe32987c31646c32a6282c78cc5247884de6e495b11bc20",
+    },
+}
 DATASET_PROTOCOL = {
     "SEED-V": {
         "id": "icaspp_paper_derived_seedv_v1",

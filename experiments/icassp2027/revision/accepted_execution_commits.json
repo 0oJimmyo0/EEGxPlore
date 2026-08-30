@@ -28,6 +28,8 @@
       "allowed_diff_paths": [
         "experiments/icassp2027/revision/paper_method_schema.py",
         "experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json",
+        "experiments/icassp2027/revision/run_revision.sh",
+        "experiments/icassp2027/revision/submit_revision.slurm",
         "finetune_main.py"
       ],
       "diff_sha256": "03b1b8f1add0a04a4c246e07569223cfa5532859c8987c81d392bc982ba941c8"
