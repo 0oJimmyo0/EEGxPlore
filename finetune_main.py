@@ -579,7 +579,7 @@ def add_seedv_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-REVISION_DATASETS = {'SEED-V', 'FACED', 'ISRUC'}
+REVISION_DATASETS = {'SEED-V', 'FACED', 'ISRUC', 'PhysioNet-MI'}
 REVISION_CONDITIONS = {
     'frozen',
     'upper1',
@@ -759,7 +759,7 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
 def _validate_icassp_revision(args: argparse.Namespace) -> None:
     if args.downstream_dataset not in REVISION_DATASETS:
         raise ValueError(
-            '[icassp2027_revision] active dataset must be SEED-V, FACED, or ISRUC.'
+            '[icassp2027_revision] active dataset must be SEED-V, FACED, ISRUC, or PhysioNet-MI.'
         )
     if args.revision_condition == 'historical_selective':
         raise ValueError(
@@ -768,9 +768,9 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
             'use selective_paper or selective_fresh for independently provenanced runs.'
         )
     if args.revision_condition == 'specialist_augmented_full':
-        if args.downstream_dataset not in {'FACED', 'ISRUC', 'SEED-V'}:
+        if args.downstream_dataset not in {'FACED', 'ISRUC', 'SEED-V', 'PhysioNet-MI'}:
             raise ValueError(
-                '[icassp2027_revision] specialist_augmented_full is locked to SEED-V, FACED, and ISRUC.'
+                '[icassp2027_revision] specialist_augmented_full is locked to SEED-V, FACED, ISRUC, and PhysioNet-MI.'
             )
         if not args.paper_method_recipe:
             raise ValueError(
@@ -813,10 +813,23 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
             f'{output_root}, got {model_dir}.'
         )
 
-    if args.icassp_split_manifest:
+    if args.icassp_split_manifest and args.downstream_dataset != 'PhysioNet-MI':
         raise ValueError(
-            '[icassp2027_revision] active benchmark does not use --icassp_split_manifest.'
+            '[icassp2027_revision] --icassp_split_manifest is only supported for PhysioNet-MI.'
         )
+    if args.downstream_dataset == 'PhysioNet-MI':
+        if not args.icassp_split_manifest:
+            raise ValueError(
+                '[icassp2027_revision] PhysioNet-MI requires the locked subject-disjoint split manifest.'
+            )
+        if not os.path.isfile(args.icassp_split_manifest):
+            raise ValueError(
+                f'[icassp2027_revision] PhysioNet-MI split manifest does not exist: {args.icassp_split_manifest}'
+            )
+        try:
+            validate_manifest_integrity(args.icassp_split_manifest, require_sidecar=True)
+        except (FileNotFoundError, RuntimeError) as exc:
+            raise ValueError(f'[icassp2027_revision] PhysioNet-MI manifest integrity check failed: {exc}') from exc
     if args.downstream_dataset == 'SEED-V' and args.seedv_split_manifest:
         raise ValueError(
             '[icassp2027_revision] active SEED-V uses the LMDB __keys__ cohort; '
@@ -987,6 +1000,8 @@ def validate_args(args: argparse.Namespace) -> None:
         print(f"[SEED-V] warning: expected num_of_classes=5, got {args.num_of_classes}")
     if args.downstream_dataset == 'ISRUC' and args.num_of_classes != 5:
         print(f"[ISRUC] warning: expected num_of_classes=5 for standard sleep staging, got {args.num_of_classes}")
+    if args.downstream_dataset == 'PhysioNet-MI' and args.num_of_classes != 4:
+        print(f"[PhysioNet-MI] warning: expected num_of_classes=4 for motor-imagery classification, got {args.num_of_classes}")
     if args.downstream_dataset == 'Mumtaz2016' and args.num_of_classes != 2:
         print(f"[Mumtaz2016] warning: expected num_of_classes=2 for MDD-vs-control, got {args.num_of_classes}")
     if args.downstream_dataset == 'TUEV' and args.num_of_classes != 6:

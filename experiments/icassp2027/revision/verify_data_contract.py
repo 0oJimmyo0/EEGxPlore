@@ -55,19 +55,30 @@ LMDB_CONTRACTS = {
         "shape": (64, 4, 200),
         "dtype": "float64",
         "classes": 4,
-        "split_counts": {"train": 6300, "val": 1734, "test": 1803},
+        "split_counts": {"train": 6843, "val": 1464, "test": 1530},
         "split_key_sha256": {
-            "train": "ecf4605c367dda6c7a990258083c5e29dc1af71c22b3226337f9cbcf81662297",
-            "val": "128998d3cdc8b77bdb71fd33b74a91058ab138c83f57bddecddf706647908cb5",
-            "test": "d0d3d688438b764227a9f8c22fde82cd6b9f4dea84e2a128bde3d6f6d2b82716",
+            "train": "db96697ae1a38ea7cf8f6f5d10cee603ba6240749432b4c74d8d8e571f2316fe",
+            "val": "d45a6bed1cf076dd87900cb6e6b5820d0acdd0d93c01f64963dbb5a142863365",
+            "test": "14a23eef4ff903850711647b71ffe09cdaf26cd9ae1d067554ce1e6cc09c128c",
         },
-        "split_source": "LMDB __keys__ (rejected-paper artifact split)",
+        "split_source": "repository-frozen subject-disjoint split manifest",
+        "split_manifest_sha256": "71344f5bf12edfafedee53da7247ad10f7f8f7b678abbe084c86b8f531133601",
     },
 }
 
 
 def _jsonable_shape(value):
     return [int(x) for x in value]
+
+
+def _sha256_file(path: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _key_sha256(keys) -> str:
@@ -81,33 +92,48 @@ def _key_sha256(keys) -> str:
     return digest.hexdigest()
 
 
-def _check_lmdb(dataset: str, data_dir: str) -> dict:
+def _check_lmdb(dataset: str, data_dir: str, split_manifest_path: str = "") -> dict:
     contract = LMDB_CONTRACTS[dataset]
     db = lmdb.open(data_dir, readonly=True, lock=False, readahead=False, meminit=False)
     try:
+        manifest_sha256 = ""
+        if split_manifest_path:
+            manifest_path = Path(split_manifest_path).resolve()
+            if not manifest_path.is_file():
+                raise FileNotFoundError(f"{dataset} split manifest does not exist: {manifest_path}")
+            manifest_sha256 = _sha256_file(str(manifest_path))
+            expected_manifest_sha256 = contract.get("split_manifest_sha256")
+            if expected_manifest_sha256 and manifest_sha256 != expected_manifest_sha256:
+                raise RuntimeError(
+                    f"{dataset} split manifest hash differs from the locked contract: "
+                    f"expected={expected_manifest_sha256} got={manifest_sha256}"
+                )
+            split_index = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(split_index, dict):
+                raise RuntimeError(f"{dataset} split manifest must contain a JSON object")
+        else:
+            with db.begin(write=False) as txn:
+                raw_index = txn.get(b"__keys__")
+                if raw_index is None:
+                    raise RuntimeError(f"{dataset} LMDB is missing __keys__: {data_dir}")
+                split_index = pickle.loads(raw_index)
+        split_counts = {split: len(split_index.get(split, [])) for split in ("train", "val", "test")}
+        if split_counts != contract["split_counts"]:
+            raise RuntimeError(
+                f"{dataset} split counts differ from the locked artifact: "
+                f"expected={contract['split_counts']} got={split_counts}"
+            )
+        split_key_sha256 = {
+            split: _key_sha256(split_index[split])
+            for split in ("train", "val", "test")
+        }
+        if split_key_sha256 != contract["split_key_sha256"]:
+            raise RuntimeError(
+                f"{dataset} split key hashes differ from the locked artifact: "
+                f"expected={contract['split_key_sha256']} got={split_key_sha256}"
+            )
+
         with db.begin(write=False) as txn:
-            raw_index = txn.get(b"__keys__")
-            if raw_index is None:
-                raise RuntimeError(f"{dataset} LMDB is missing __keys__: {data_dir}")
-            split_index = pickle.loads(raw_index)
-            split_counts = {
-                split: len(split_index.get(split, []))
-                for split in ("train", "val", "test")
-            }
-            if split_counts != contract["split_counts"]:
-                raise RuntimeError(
-                    f"{dataset} split counts differ from the rejected-paper artifact: "
-                    f"expected={contract['split_counts']} got={split_counts}"
-                )
-            split_key_sha256 = {
-                split: _key_sha256(split_index[split])
-                for split in ("train", "val", "test")
-            }
-            if split_key_sha256 != contract["split_key_sha256"]:
-                raise RuntimeError(
-                    f"{dataset} split key hashes differ from the rejected-paper artifact: "
-                    f"expected={contract['split_key_sha256']} got={split_key_sha256}"
-                )
 
             representative = {}
             for split in ("train", "val", "test"):
@@ -147,18 +173,19 @@ def _check_lmdb(dataset: str, data_dir: str) -> dict:
     return {
         "storage": "lmdb",
         "split_source": contract["split_source"],
+        "split_manifest_sha256": manifest_sha256,
         "split_counts": split_counts,
         "split_key_sha256": split_key_sha256,
         "representative_records": representative,
     }
 
 
-def _check_loader_scale(dataset: str, data_dir: str) -> dict:
+def _check_loader_scale(dataset: str, data_dir: str, split_manifest_path: str = "") -> dict:
     """Prove the active EEGxPlore loader returns exactly raw_sample / 100."""
     if dataset == "SEED-V":
         from datasets.seedv_dataset import CustomDataset
 
-        loader_dataset = CustomDataset(data_dir, mode="train")
+        loader_dataset = CustomDataset(data_dir, mode="train", split_manifest_path=split_manifest_path)
     elif dataset == "FACED":
         from datasets.faced_dataset import CustomDataset
 
@@ -262,16 +289,20 @@ def _check_isruc(data_dir: str) -> dict:
     }
 
 
-def verify(dataset: str, data_dir: str) -> dict:
+def verify(dataset: str, data_dir: str, split_manifest_path: str = "") -> dict:
     if not os.path.isdir(data_dir):
         raise FileNotFoundError(f"Dataset directory does not exist: {data_dir}")
     if dataset == "ISRUC":
         details = _check_isruc(data_dir)
     else:
-        details = _check_lmdb(dataset, data_dir)
-        details["scaling"] = _check_loader_scale(dataset, data_dir)
+        details = _check_lmdb(dataset, data_dir, split_manifest_path)
+        details["scaling"] = _check_loader_scale(dataset, data_dir, split_manifest_path)
     return {
-        "contract": "rejected_paper_cbramod_primary",
+        "contract": (
+            "icassp_physionet_mi_v1"
+            if dataset == "PhysioNet-MI"
+            else "rejected_paper_cbramod_primary"
+        ),
         "dataset": dataset,
         "data_dir": os.path.realpath(data_dir),
         "input_scale_divisor": 100.0,
@@ -284,10 +315,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=["SEED-V", "FACED", "ISRUC", "PhysioNet-MI"])
     parser.add_argument("--data-dir", required=True)
+    parser.add_argument("--split-manifest", default="")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    result = verify(args.dataset, args.data_dir)
+    result = verify(args.dataset, args.data_dir, args.split_manifest)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")

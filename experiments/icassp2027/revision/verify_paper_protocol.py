@@ -177,7 +177,11 @@ def validate_args_against_protocol(args: Any, info: Dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--protocol", type=Path, required=True)
-    parser.add_argument("--dataset", required=True, choices=["SEED-V", "FACED", "ISRUC"])
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        choices=["SEED-V", "FACED", "ISRUC", "PhysioNet-MI"],
+    )
     parser.add_argument("--emit-shell", action="store_true")
     args = parser.parse_args()
     info = verify_protocol(args.protocol, args.dataset)
