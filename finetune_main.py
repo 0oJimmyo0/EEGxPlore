@@ -768,9 +768,9 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
             'use selective_paper or selective_fresh for independently provenanced runs.'
         )
     if args.revision_condition == 'specialist_augmented_full':
-        if args.downstream_dataset not in {'FACED', 'ISRUC'}:
+        if args.downstream_dataset not in {'FACED', 'ISRUC', 'SEED-V'}:
             raise ValueError(
-                '[icassp2027_revision] specialist_augmented_full is locked to FACED and ISRUC.'
+                '[icassp2027_revision] specialist_augmented_full is locked to SEED-V, FACED, and ISRUC.'
             )
         if not args.paper_method_recipe:
             raise ValueError(
