@@ -19,7 +19,7 @@ PROTOCOL="${4:-${REVISION_PROTOCOL:-cbramod_benchmark}}"
 RUN_MODE="${RUN_MODE:-paper}"
 REQUESTED_EPOCHS="${5:-${EPOCHS:-}}"
 REQUESTED_MODEL_ROOT="${6:-${MODEL_ROOT:-}}"
-EXPECTED_COMMIT="${7:-${EXPECTED_COMMIT:-$(git -C "$REPO_DIR" rev-parse HEAD)}}"
+EXPECTED_COMMIT="${7:-${EXPECTED_COMMIT:-}}"
 CUDA_ID="${CUDA_ID:-0}"
 FOUNDATION_DIR="${FOUNDATION_DIR:-/data/neurogroup/mingyangjiang/data/weights/pretrained_weights.pth}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
@@ -43,6 +43,23 @@ HISTORICAL_CANDIDATE_STAGE="${HISTORICAL_CANDIDATE_STAGE:-route}"
 HISTORICAL_CANDIDATE_SMOKE="${HISTORICAL_CANDIDATE_SMOKE:-0}"
 HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID="${HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID:-}"
 DRY_RUN="${DRY_RUN:-0}"
+
+if [[ -z "$EXPECTED_COMMIT" ]]; then
+  if [[ "$RUN_MODE" == "paper" || "$RUN_MODE" == "smoke" ]]; then
+    echo "EXPECTED_COMMIT is required for paper/smoke runs" >&2
+    exit 2
+  fi
+  EXPECTED_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
+fi
+if ! git -C "$REPO_DIR" cat-file -e "${EXPECTED_COMMIT}^{commit}" 2>/dev/null; then
+  echo "expected commit is not available in REPO_DIR: $EXPECTED_COMMIT" >&2
+  exit 2
+fi
+CURRENT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
+if [[ "$CURRENT_COMMIT" != "$EXPECTED_COMMIT" ]]; then
+  echo "expected commit $EXPECTED_COMMIT, found $CURRENT_COMMIT" >&2
+  exit 1
+fi
 
 if [[ "$DRY_RUN" != "0" && "$DRY_RUN" != "1" && "$DRY_RUN" != "false" && "$DRY_RUN" != "true" ]]; then
   echo "DRY_RUN must be 0/1 or false/true, got: $DRY_RUN" >&2
@@ -477,7 +494,12 @@ fi
 DATA_CONTRACT_SHA256="$(sha256sum "$DATA_CONTRACT_PATH" | awk '{print $1}')"
 GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
+GIT_DIRTY_FLAG=0
+if [[ -n "$GIT_DIRTY" ]]; then
+  GIT_DIRTY_FLAG=1
+fi
 RUN_MANIFEST="$MODEL_DIR/run_manifest.json"
+export EXPECTED_COMMIT ICASSP_EXECUTION_COMMIT="$GIT_COMMIT" ICASSP_EXECUTION_DIRTY="$GIT_DIRTY_FLAG"
 
 export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 PAPER_PROTOCOL_USE_COMPONENT_LR PAPER_METHOD_RECIPE_PATH PAPER_METHOD_RECIPE_ID PAPER_METHOD_RECIPE_SHA256 PAPER_METHOD_SEMANTICS_SHA256 COMPONENT_LR_ENABLED FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 HISTORICAL_CANDIDATE_RECIPE_PATH HISTORICAL_CANDIDATE_RECIPE_SHA256 HISTORICAL_CANDIDATE_STAGE HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
 "$PYTHON_BIN" - "$RUN_MANIFEST" "$GIT_COMMIT" "$GIT_DIRTY" "$FOUNDATION_SHA256" "$MANIFEST_SHA256" "${RUN_ARGS[@]}" <<'PY'
@@ -490,6 +512,8 @@ path, commit, dirty, foundation_sha256, manifest_sha256, *command = sys.argv[1:]
 payload = {
     'created_utc': datetime.now(timezone.utc).isoformat(),
     'repository_commit': commit,
+    'expected_commit': os.environ.get('EXPECTED_COMMIT', ''),
+    'execution_commit_start': commit,
     'git_dirty': bool(dirty),
     'dataset': os.environ['DATASET'],
     'condition': os.environ['CONDITION'],
@@ -569,73 +593,20 @@ set +e
 TRAIN_EXIT=$?
 set -e
 
-"$PYTHON_BIN" - "$MODEL_DIR/result_manifest.json" "$TRAIN_EXIT" <<'PY'
-import json
-import os
-import sys
-from datetime import datetime, timezone
+END_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
+END_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
+export ICASSP_EXECUTION_COMMIT_END="$END_COMMIT"
+PROVENANCE_CONSISTENT=1
+if [[ "$END_COMMIT" != "$GIT_COMMIT" || -n "$END_DIRTY" ]]; then
+  PROVENANCE_CONSISTENT=0
+  echo "execution checkout changed during run: start=$GIT_COMMIT end=$END_COMMIT dirty=$([[ -n "$END_DIRTY" ]] && echo yes || echo no)" >&2
+fi
+export ICASSP_PROVENANCE_CONSISTENT="$PROVENANCE_CONSISTENT"
+FINAL_EXIT="$TRAIN_EXIT"
+if [[ "$PROVENANCE_CONSISTENT" != "1" && "$FINAL_EXIT" == "0" ]]; then
+  FINAL_EXIT=70
+fi
 
-path, exit_code = sys.argv[1:]
-summary = os.path.join(os.environ['MODEL_DIR'], 'experiment_summary.csv')
-payload = {
-    'completed_utc': datetime.now(timezone.utc).isoformat(),
-    'exit_code': int(exit_code),
-    'repository_commit': os.environ.get('GIT_COMMIT', ''),
-    'run_mode': os.environ.get('RUN_MODE', ''),
-    'paper_eligible': os.environ.get('RUN_MODE') == 'paper',
-    'dataset': os.environ.get('DATASET', ''),
-    'condition': os.environ.get('CONDITION', ''),
-    'protocol': os.environ.get('PROTOCOL', ''),
-    'seed': int(os.environ.get('SEED', '0')),
-    'model_dir': os.environ.get('MODEL_DIR', ''),
-    'experiment_summary': summary if os.path.isfile(summary) else '',
-    'summary_present': os.path.isfile(summary),
-    'data_contract_path': os.environ.get('DATA_CONTRACT_PATH', ''),
-    'data_contract_sha256': os.environ.get('DATA_CONTRACT_SHA256', ''),
-    'paper_protocol_path': os.environ.get('PAPER_PROTOCOL_PATH', ''),
-    'paper_protocol_id': os.environ.get('PAPER_PROTOCOL_ID', ''),
-    'paper_protocol_sha256': os.environ.get('PAPER_PROTOCOL_SHA256', ''),
-    'paper_method_recipe_path': (
-        os.environ.get('PAPER_METHOD_RECIPE_PATH', '')
-        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
-    ),
-    'paper_method_recipe_id': (
-        os.environ.get('PAPER_METHOD_RECIPE_ID', '')
-        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
-    ),
-    'paper_method_recipe_sha256': (
-        os.environ.get('PAPER_METHOD_RECIPE_SHA256', '')
-        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
-    ),
-    'paper_method_semantics_sha256': (
-        os.environ.get('PAPER_METHOD_SEMANTICS_SHA256', '')
-        if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
-    ),
-    'use_component_lr': os.environ.get('COMPONENT_LR_ENABLED', '0') == '1',
-    'fresh_selective_recipe_path': (
-        os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '')
-        if os.environ.get('CONDITION') == 'selective_fresh' else ''
-    ),
-    'fresh_selective_recipe_sha256': (
-        os.environ.get('FRESH_SELECTIVE_RECIPE_SHA256', '')
-        if os.environ.get('CONDITION') == 'selective_fresh' else ''
-    ),
-    'historical_candidate_recipe_path': (
-        os.environ.get('HISTORICAL_CANDIDATE_RECIPE_PATH', '')
-        if os.environ.get('CONDITION') == 'historical_candidate' else ''
-    ),
-    'historical_candidate_recipe_sha256': (
-        os.environ.get('HISTORICAL_CANDIDATE_RECIPE_SHA256', '')
-        if os.environ.get('CONDITION') == 'historical_candidate' else ''
-    ),
-    'historical_candidate_stage': (
-        os.environ.get('HISTORICAL_CANDIDATE_STAGE', '')
-        if os.environ.get('CONDITION') == 'historical_candidate' else ''
-    ),
-}
-with open(path, 'w', encoding='utf-8') as handle:
-    json.dump(payload, handle, indent=2, sort_keys=True)
-    handle.write('\n')
-PY
+"$PYTHON_BIN" "$SCRIPT_DIR/write_result_manifest.py" "$MODEL_DIR/result_manifest.json" "$FINAL_EXIT" "$TRAIN_EXIT"
 
-exit "$TRAIN_EXIT"
+exit "$FINAL_EXIT"
