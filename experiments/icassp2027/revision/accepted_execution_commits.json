@@ -22,6 +22,15 @@
         "experiments/icassp2027/revision/submit_revision.slurm"
       ],
       "diff_sha256": "8f44f828ee8631d25dd202dd95ad109ea056b8d296fa2839c20786c8d87b1661"
+    },
+    "aee9e317dddd61d8f9b895055009e52c85dc91db": {
+      "classification": "noncausal_seedv_method_scope_extension",
+      "allowed_diff_paths": [
+        "experiments/icassp2027/revision/paper_method_schema.py",
+        "experiments/icassp2027/revision/paper_method_specialist_augmented_full_v1.json",
+        "finetune_main.py"
+      ],
+      "diff_sha256": "03b1b8f1add0a04a4c246e07569223cfa5532859c8987c81d392bc982ba941c8"
     }
   }
 }
