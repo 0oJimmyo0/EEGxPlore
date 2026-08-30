@@ -92,6 +92,40 @@ print(f'pyyaml={yaml.__version__}', flush=True)
 PY
 nvidia-smi || true
 
+# A Slurm-visible GPU can still contain an unrelated process (for example,
+# a service launched outside this allocation).  Catch that before model
+# initialization rather than spending a paper run on an avoidable OOM.  The
+# default threshold leaves ample room for the paper models, whose recorded
+# peak is below 9 GB on an A6000, while rejecting the observed ~41 GB VLLM
+# contamination.  Set GPU_PREFLIGHT_MAX_USED_MB=0 only for an intentional
+# diagnostic override.
+GPU_PREFLIGHT_MAX_USED_MB="${GPU_PREFLIGHT_MAX_USED_MB:-12000}"
+if [[ "$GPU_PREFLIGHT_MAX_USED_MB" != "0" ]]; then
+  "$PYTHON_BIN" - <<'PY'
+import os
+import sys
+
+import torch
+
+limit_mb = int(os.environ.get("GPU_PREFLIGHT_MAX_USED_MB", "12000"))
+if not torch.cuda.is_available():
+    raise SystemExit("GPU preflight failed: CUDA is unavailable")
+free, total = torch.cuda.mem_get_info(0)
+used_mb = (total - free) / (1024 ** 2)
+total_mb = total / (1024 ** 2)
+print(
+    f"gpu_preflight=cuda:0 used_mb={used_mb:.0f} total_mb={total_mb:.0f} "
+    f"limit_mb={limit_mb}",
+    flush=True,
+)
+if used_mb > limit_mb:
+    raise SystemExit(
+        f"GPU preflight failed: assigned GPU already uses {used_mb:.0f} MB "
+        f"> limit {limit_mb} MB"
+    )
+PY
+fi
+
 if [[ -n "$REQUESTED_EPOCHS" ]]; then
   exec bash "$SCRIPT_DIR/run_revision.sh" "$1" "$2" "$SEED" "$PROTOCOL" "$REQUESTED_EPOCHS"
 fi
