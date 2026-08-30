@@ -19,6 +19,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "output" / "icassp2027_revision"
 DEFAULT_REGISTRY = DEFAULT_OUTPUT_ROOT / "evidence_registry.csv"
 DEFAULT_PAPER_MANIFEST = REPO_ROOT / "experiments" / "icassp2027" / "revision" / "paper_table_manifest_v2.csv"
+EXECUTION_COMMIT_CONTRACT = REPO_ROOT / "experiments" / "icassp2027" / "revision" / "accepted_execution_commits.json"
+TRAINING_SEMANTICS_ID = "icassp2027_specialist_full_v1"
 
 FIELDNAMES = [
     "source_kind",
@@ -48,6 +50,12 @@ FIELDNAMES = [
     "epoch_budget",
     "selection_rule",
     "code_commit",
+    "execution_commit",
+    "execution_commit_classification",
+    "training_source_commit",
+    "training_semantics_id",
+    "semantic_config_sha256",
+    "pair_contract_sha256",
     "checkpoint_path",
     "checkpoint_sha256",
     "metric_files",
@@ -102,6 +110,44 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _execution_contract() -> Dict[str, Any]:
+    return _read_json(EXECUTION_COMMIT_CONTRACT)
+
+
+def _provenance_fields(code_commit: str) -> Dict[str, str]:
+    contract = _execution_contract()
+    entry = contract.get("accepted_execution_commits", {}).get(code_commit, {})
+    if not isinstance(entry, dict):
+        return {
+            "execution_commit": code_commit,
+            "execution_commit_classification": "unaccepted" if code_commit else "",
+            "training_source_commit": "",
+            "training_semantics_id": "",
+        }
+    return {
+        "execution_commit": code_commit,
+        "execution_commit_classification": str(entry.get("classification", "")),
+        "training_source_commit": str(contract.get("training_source_commit", "")),
+        "training_semantics_id": str(contract.get("training_semantics_id", TRAINING_SEMANTICS_ID)),
+    }
+
+
+def _semantic_config_sha256(run_dir: Path) -> str:
+    summaries = sorted(run_dir.glob("run_summary_*.json"))
+    if not summaries:
+        return ""
+    payload = _read_json(summaries[-1]).get("config")
+    if not isinstance(payload, dict):
+        return ""
+    normalized = {
+        str(key): value
+        for key, value in payload.items()
+        if key not in {"seed", "model_dir", "paper_method_recipe"}
+    }
+    encoded = json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _metric_files(run_dir: Path) -> str:
@@ -182,6 +228,7 @@ def _row_for_run(
         or result.get("repository_commit")
         or ""
     )
+    provenance = _provenance_fields(code_commit)
     gpu = _command_value(manifest.get("command"), "--cuda")
     epoch_budget = str(summary.get("epochs") or _command_value(manifest.get("command"), "--epochs") or "")
     selection_rule = str(summary.get("selection_metric") or "kappa")
@@ -307,6 +354,9 @@ def _row_for_run(
         "epoch_budget": epoch_budget,
         "selection_rule": selection_rule,
         "code_commit": code_commit,
+        **provenance,
+        "semantic_config_sha256": _semantic_config_sha256(run_dir),
+        "pair_contract_sha256": str(summary.get("pair_contract_sha256") or ""),
         "checkpoint_path": checkpoint_path,
         "checkpoint_sha256": checkpoint_sha256,
         "metric_files": _metric_files(run_dir),

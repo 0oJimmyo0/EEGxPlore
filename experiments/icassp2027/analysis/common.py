@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -16,6 +17,14 @@ DEFAULT_PAPER_MANIFEST = (
 )
 
 TRAINING_COMMIT = "fd425cdfd0ff08d57ac30ee9b8737b895e9d46ad"
+TRAINING_SEMANTICS_ID = "icassp2027_specialist_full_v1"
+EXECUTION_COMMIT_CONTRACT = (
+    REPO_ROOT
+    / "experiments"
+    / "icassp2027"
+    / "revision"
+    / "accepted_execution_commits.json"
+)
 FOUNDATION_SHA256 = "0792cb808c14e6b7a2bb2ce1dff379bc47bc54c49a779825bdfeb33bf8157178"
 METHOD_ID = "icaspp_specialist_augmented_full_v1"
 METHOD_SHA256 = "32dbc9266225fefce3eaa4fb8f4faf2cc727ca0611712e9b7520157c13eba10a"
@@ -107,3 +116,51 @@ def expected_primary_cells(path: Path = DEFAULT_PAPER_MANIFEST) -> List[Tuple[st
 
 def unique_sorted(values: Iterable[str]) -> List[str]:
     return sorted({str(value) for value in values})
+
+
+def load_execution_contract() -> Dict[str, Any]:
+    payload = read_json(EXECUTION_COMMIT_CONTRACT)
+    if payload.get("training_source_commit") != TRAINING_COMMIT:
+        raise ValueError("execution commit contract has an unexpected training source commit")
+    if payload.get("training_semantics_id") != TRAINING_SEMANTICS_ID:
+        raise ValueError("execution commit contract has an unexpected training semantics ID")
+    return payload
+
+
+def execution_commit_info(commit: str) -> Dict[str, Any] | None:
+    contract = load_execution_contract()
+    entries = contract.get("accepted_execution_commits", {})
+    entry = entries.get(str(commit))
+    if not isinstance(entry, dict):
+        return None
+    return {"execution_commit": str(commit), **entry}
+
+
+def verify_execution_commit_diff(commit: str, info: Dict[str, Any]) -> List[str]:
+    if commit == TRAINING_COMMIT:
+        return []
+    errors: List[str] = []
+    try:
+        names = subprocess.run(
+            ["git", "diff", "--name-only", TRAINING_COMMIT, commit],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.splitlines()
+        diff_bytes = subprocess.run(
+            ["git", "diff", "--no-ext-diff", "--binary", TRAINING_COMMIT, commit],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        return [f"cannot verify execution commit diff {TRAINING_COMMIT}..{commit}: {exc}"]
+    allowed = sorted(str(path) for path in info.get("allowed_diff_paths", []))
+    if sorted(names) != allowed:
+        errors.append(f"execution diff paths {sorted(names)!r} do not match allowlist {allowed!r}")
+    expected_sha = str(info.get("diff_sha256", ""))
+    actual_sha = hashlib.sha256(diff_bytes).hexdigest()
+    if expected_sha and actual_sha != expected_sha:
+        errors.append(f"execution diff sha256={actual_sha!r}, expected {expected_sha!r}")
+    return errors

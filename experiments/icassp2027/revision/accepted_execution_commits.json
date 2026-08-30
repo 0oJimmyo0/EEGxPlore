@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "training_source_commit": "fd425cdfd0ff08d57ac30ee9b8737b895e9d46ad",
+  "training_semantics_id": "icassp2027_specialist_full_v1",
+  "accepted_execution_commits": {
+    "fd425cdfd0ff08d57ac30ee9b8737b895e9d46ad": {
+      "classification": "canonical_training_source",
+      "allowed_diff_paths": [],
+      "diff_sha256": ""
+    },
+    "31b01817820b600d3e8ba45cbfa6ff528c243ca9": {
+      "classification": "noncausal_execution_guard_only",
+      "allowed_diff_paths": [
+        "experiments/icassp2027/revision/submit_revision.slurm"
+      ],
+      "diff_sha256": "4b763863c3e079fe4558c157bff51601f35583c8819ade260974b04a32dccdf7"
+    }
+  }
+}

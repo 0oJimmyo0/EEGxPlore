@@ -28,12 +28,15 @@ from common import (
     REPO_ROOT,
     SEEDS,
     TRAINING_COMMIT,
+    TRAINING_SEMANTICS_ID,
     as_bool,
     as_float,
     expected_primary_cells,
+    execution_commit_info,
     read_json,
     read_last_csv_row,
     run_directory,
+    verify_execution_commit_diff,
 )
 
 
@@ -60,6 +63,25 @@ def _first(*values: Any) -> Any:
     return ""
 
 
+def _latest_run_summary(run_dir: Path) -> Dict[str, Any]:
+    paths = sorted(run_dir.glob("run_summary_*.json"))
+    return read_json(paths[-1]) if paths else {}
+
+
+def _semantic_config_sha256(summary_payload: Dict[str, Any]) -> str:
+    config = summary_payload.get("config")
+    if not isinstance(config, dict):
+        return ""
+    normalized = {
+        str(key): value
+        for key, value in config.items()
+        if key not in {"seed", "model_dir", "paper_method_recipe"}
+    }
+    payload = json.dumps(normalized, sort_keys=True, default=str).encode("utf-8")
+    import hashlib
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _canonical_row(
     dataset: str,
     condition: str,
@@ -68,6 +90,7 @@ def _canonical_row(
     run_manifest: Dict[str, Any],
     result_manifest: Dict[str, Any],
     summary: Dict[str, str],
+    summary_payload: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], List[str]]:
     errors: List[str] = []
     protocol = DATASET_PROTOCOL.get(dataset, {})
@@ -96,8 +119,15 @@ def _canonical_row(
         errors.append(f"exit_code={exit_code!r}, expected 0")
 
     code_commit = str(_first(summary.get("git_commit"), run_manifest.get("repository_commit"), result_manifest.get("repository_commit")))
-    if code_commit != TRAINING_COMMIT:
-        errors.append(f"code_commit={code_commit!r}, expected frozen training commit")
+    execution_info = execution_commit_info(code_commit)
+    if execution_info is None:
+        errors.append(f"execution_commit={code_commit!r} is not in the accepted execution commit contract")
+        training_source_commit = ""
+        execution_classification = "unaccepted"
+    else:
+        errors.extend(verify_execution_commit_diff(code_commit, execution_info))
+        training_source_commit = TRAINING_COMMIT
+        execution_classification = str(execution_info.get("classification", ""))
     if as_bool(_first(summary.get("git_dirty"), run_manifest.get("git_dirty"))):
         errors.append("git_dirty is true")
 
@@ -122,6 +152,10 @@ def _canonical_row(
         errors.append(f"paper_method_recipe_id={method_id!r}, expected {expected_method_id!r}")
     if method_sha != expected_method_sha:
         errors.append("paper_method_recipe_sha256 does not match the locked method contract")
+
+    semantic_config_sha256 = _semantic_config_sha256(summary_payload)
+    if not semantic_config_sha256:
+        errors.append("run summary config is missing; cannot verify causal configuration")
 
     for field in REQUIRED_SUMMARY_FIELDS:
         if not str(summary.get(field, "") or "").strip():
@@ -165,6 +199,12 @@ def _canonical_row(
         "data_contract_sha256": data_contract_sha,
         "foundation_sha256": foundation_sha,
         "code_commit": code_commit,
+        "execution_commit": code_commit,
+        "execution_commit_classification": execution_classification,
+        "training_source_commit": training_source_commit,
+        "training_semantics_id": TRAINING_SEMANTICS_ID,
+        "semantic_config_sha256": semantic_config_sha256,
+        "pair_contract_sha256": str(summary.get("pair_contract_sha256", "") or ""),
         "paper_eligible": paper_eligible,
         "run_mode": run_mode,
         "run_directory": str(run_dir),
@@ -237,16 +277,39 @@ def audit_matrix(output_root: Path, paper_manifest: Path) -> Dict[str, Any]:
             read_json(run_manifest_path),
             read_json(result_manifest_path),
             read_last_csv_row(summary_path),
+            _latest_run_summary(run_dir),
         )
         rows.append(row)
         if errors:
             failures.append({"cell": [dataset, condition, seed], "errors": errors})
+
+    # A seed changes stochastic state and output paths, but it must not change
+    # the causal training configuration within a dataset/condition pair.
+    causal_groups: Dict[str, List[str]] = {}
+    for row in rows:
+        if row.get("status") != "pass":
+            continue
+        key = f"{row['dataset']}/{row['executable_condition']}"
+        causal_groups.setdefault(key, []).append(str(row.get("semantic_config_sha256", "")))
+    for key, hashes in sorted(causal_groups.items()):
+        unique_hashes = sorted(set(hashes))
+        causal_groups[key] = unique_hashes
+        if len(unique_hashes) != 1:
+            failures.append({
+                "cell": key,
+                "errors": [
+                    "causal configuration differs across seeds: "
+                    f"{unique_hashes!r}"
+                ],
+            })
 
     passed = not failures and len(rows) == len(required_set)
     return {
         "schema_version": 1,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "training_commit": TRAINING_COMMIT,
+        "training_semantics_id": TRAINING_SEMANTICS_ID,
+        "causal_configuration_groups": causal_groups,
         "paper_manifest": str(paper_manifest),
         "output_root": str(output_root),
         "expected_cell_count": len(required_set),
