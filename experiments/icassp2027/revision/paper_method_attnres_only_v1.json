@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "status": "locked",
+  "paper_eligible": true,
+  "condition": "full_attnres_only",
+  "method_id": "icassp2027_full_attnres_only_v1",
+  "paper_label": "Full FT + AttnRes",
+  "datasets": ["FACED", "ISRUC", "SEED-V", "PhysioNet-MI"],
+  "method": {
+    "trainability_mode": "full",
+    "attnres_variant": "pre_attn",
+    "attnres_start_layer": 0,
+    "attnres_gated": false,
+    "moe": false,
+    "use_component_lr": false
+  },
+  "audit_note": "Prespecified component-control recipe. Full CBraMod remains trainable; only pre-attention AttnRes is added, with no specialist or router branch. Dataset-specific optimization remains in the locked paper protocols."
+}

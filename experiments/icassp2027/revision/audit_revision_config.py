@@ -24,6 +24,11 @@ from paper_method_schema import (
     sha256_file as sha256_method_file,
     verify_args_against_method,
 )
+from paper_attnres_component_schema import (
+    load_recipe as load_attnres_recipe,
+    sha256_file as sha256_attnres_file,
+    verify_args as verify_attnres_args,
+)
 from verify_fresh_selective_recipe import verify_recipe as verify_fresh_recipe
 from verify_paper_protocol import (
     validate_args_against_protocol,
@@ -55,6 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
         '--paper-protocol',
         default='',
         help='Locked dataset-specific protocol required for paper-facing new rows.',
+    )
+    parser.add_argument(
+        '--paper-component-recipe',
+        default='',
+        help='Locked component-control recipe required for full_attnres_only.',
     )
     parser.add_argument(
         '--historical-candidate-smoke',
@@ -149,6 +159,18 @@ def main() -> None:
             }
         )
 
+    paper_component_info = {}
+    if args.revision_condition == 'full_attnres_only':
+        recipe_path = Path(str(args.paper_component_recipe or '')).expanduser().resolve()
+        recipe = load_attnres_recipe(recipe_path)
+        paper_component_info = verify_attnres_args(args, recipe)
+        paper_component_info.update(
+            {
+                'paper_component_recipe_path': str(recipe_path),
+                'paper_component_recipe_sha256': sha256_attnres_file(recipe_path),
+            }
+        )
+
     resolved = {
         'repository_root': str(REPO_ROOT),
         'git_commit': commit,
@@ -178,7 +200,11 @@ def main() -> None:
         'paper_method_recipe_path': str(
             Path(str(args.paper_method_recipe)).expanduser().resolve()
         ) if args.revision_condition == 'specialist_augmented_full' else '',
+        'paper_component_recipe_path': str(
+            Path(str(args.paper_component_recipe)).expanduser().resolve()
+        ) if args.revision_condition == 'full_attnres_only' else '',
         **paper_method_info,
+        **paper_component_info,
         **historical_candidate_info,
         'fresh_selective_recipe_path': os.path.realpath(os.path.abspath(args.fresh_selective_recipe))
         if args.revision_condition == 'selective_fresh' else '',

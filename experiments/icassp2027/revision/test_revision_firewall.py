@@ -39,6 +39,12 @@ def _args(condition: str):
                 Path(__file__).with_name('paper_method_specialist_augmented_full_v1.json')
             ),
         ])
+    if condition == 'full_attnres_only':
+        argv.extend([
+            '--paper_component_recipe', str(
+                Path(__file__).with_name('paper_method_attnres_only_v1.json')
+            ),
+        ])
     return _parser().parse_args(argv)
 
 
@@ -48,6 +54,11 @@ def main() -> None:
         'upper1': {'trainability_mode': 'upper1', 'attnres_variant': 'none', 'moe': False},
         'full': {'trainability_mode': 'full', 'attnres_variant': 'none', 'moe': False},
         'attnres_only': {'trainability_mode': 'attnres_only', 'attnres_variant': 'pre_attn', 'moe': False},
+        'full_attnres_only': {
+            'trainability_mode': 'full',
+            'attnres_variant': 'pre_attn',
+            'moe': False,
+        },
         'specialist_only': {
             'trainability_mode': 'specialist_only',
             'attnres_variant': 'none',

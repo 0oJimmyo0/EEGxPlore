@@ -292,7 +292,7 @@ def _excluded_artifacts(output_root: Path, primary_cells: set[Tuple[str, str, st
             reasons.append("seed_42_development")
         if condition in {"historical_candidate", "historical_selective"}:
             reasons.append("historical_candidate")
-        if condition in {"selective_fresh", "selective_paper", "combined", "specialist_only", "attnres_only"}:
+        if condition in {"selective_fresh", "selective_paper", "combined", "specialist_only", "attnres_only", "full_attnres_only"}:
             reasons.append("non_confirmatory_condition")
         if not reasons:
             reasons.append("outside_frozen_matrix")

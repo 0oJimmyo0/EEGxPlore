@@ -39,6 +39,7 @@ REQUIRE_CLEAN="${REQUIRE_CLEAN:-1}"
 FRESH_SELECTIVE_RECIPE_PATH="${FRESH_SELECTIVE_RECIPE_PATH:-$SCRIPT_DIR/fresh_selective_recipe.json}"
 HISTORICAL_CANDIDATE_RECIPE_PATH="${HISTORICAL_CANDIDATE_RECIPE_PATH:-${HISTORICAL_CANDIDATE_RECIPE:-}}"
 PAPER_METHOD_RECIPE_PATH="${PAPER_METHOD_RECIPE_PATH:-$SCRIPT_DIR/paper_method_specialist_augmented_full_v1.json}"
+PAPER_COMPONENT_RECIPE_PATH="${PAPER_COMPONENT_RECIPE_PATH:-$SCRIPT_DIR/paper_method_attnres_only_v1.json}"
 HISTORICAL_CANDIDATE_STAGE="${HISTORICAL_CANDIDATE_STAGE:-route}"
 HISTORICAL_CANDIDATE_SMOKE="${HISTORICAL_CANDIDATE_SMOKE:-0}"
 HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID="${HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID:-}"
@@ -91,6 +92,14 @@ if [[ "$CONDITION" == "specialist_augmented_full" ]]; then
   fi
   PAPER_METHOD_SHELL_EXPORTS="$($PYTHON_BIN "$SCRIPT_DIR/verify_paper_method.py" --recipe "$PAPER_METHOD_RECIPE_PATH" --emit-shell)"
   eval "$PAPER_METHOD_SHELL_EXPORTS"
+fi
+if [[ "$CONDITION" == "full_attnres_only" ]]; then
+  if [[ ! -f "$PAPER_COMPONENT_RECIPE_PATH" ]]; then
+    echo "paper component recipe is unavailable: $PAPER_COMPONENT_RECIPE_PATH" >&2
+    exit 2
+  fi
+  PAPER_COMPONENT_SHELL_EXPORTS="$($PYTHON_BIN "$SCRIPT_DIR/verify_paper_attnres_component.py" --recipe "$PAPER_COMPONENT_RECIPE_PATH" --emit-shell)"
+  eval "$PAPER_COMPONENT_SHELL_EXPORTS"
 fi
 if [[ "$CONDITION" == "historical_candidate" ]]; then
   if [[ "$RUN_MODE" != "internal" ]]; then
@@ -159,10 +168,10 @@ fi
 
 if [[ "$RUN_MODE" == "paper" || "$RUN_MODE" == "smoke" ]]; then
   case "$DATASET:$CONDITION" in
-    SEED-V:upper1|SEED-V:full|SEED-V:specialist_augmented_full|FACED:full|FACED:selective_paper|FACED:specialist_augmented_full|ISRUC:full|ISRUC:selective_paper|ISRUC:specialist_augmented_full|PhysioNet-MI:full|PhysioNet-MI:specialist_augmented_full) ;;
+    SEED-V:upper1|SEED-V:full|SEED-V:full_attnres_only|SEED-V:specialist_augmented_full|FACED:full|FACED:full_attnres_only|FACED:selective_paper|FACED:specialist_augmented_full|ISRUC:full|ISRUC:full_attnres_only|ISRUC:selective_paper|ISRUC:specialist_augmented_full|PhysioNet-MI:full|PhysioNet-MI:full_attnres_only|PhysioNet-MI:specialist_augmented_full) ;;
     *)
       echo "Paper-facing run is not in the frozen new-run matrix: $DATASET/$CONDITION" >&2
-      echo "Allowed: SEED-V/{upper1,full,specialist_augmented_full}, FACED/{full,selective_paper,specialist_augmented_full}, ISRUC/{full,selective_paper,specialist_augmented_full}, PhysioNet-MI/{full,specialist_augmented_full}" >&2
+      echo "Allowed: SEED-V/{upper1,full,full_attnres_only,specialist_augmented_full}, FACED/{full,full_attnres_only,selective_paper,specialist_augmented_full}, ISRUC/{full,full_attnres_only,selective_paper,specialist_augmented_full}, PhysioNet-MI/{full,full_attnres_only,specialist_augmented_full}" >&2
       echo "Use an archived launcher or RUN_MODE=internal for non-paper diagnostics." >&2
       exit 2
       ;;
@@ -400,6 +409,9 @@ RUN_ARGS=(
 if [[ "$CONDITION" == "specialist_augmented_full" ]]; then
   RUN_ARGS+=(--paper_method_recipe "$PAPER_METHOD_RECIPE_PATH")
 fi
+if [[ "$CONDITION" == "full_attnres_only" ]]; then
+  RUN_ARGS+=(--paper_component_recipe "$PAPER_COMPONENT_RECIPE_PATH")
+fi
 
 if [[ "$CONDITION" == "historical_candidate" ]]; then
   RUN_ARGS+=(
@@ -467,6 +479,9 @@ fi
 if [[ -n "$PAPER_PROTOCOL_PATH" ]]; then
   AUDIT_ARGS+=(--paper-protocol "$PAPER_PROTOCOL_PATH")
 fi
+if [[ "$CONDITION" == "full_attnres_only" ]]; then
+  AUDIT_ARGS+=(--paper-component-recipe "$PAPER_COMPONENT_RECIPE_PATH")
+fi
 if [[ "$REQUIRE_CLEAN" == "1" || "$REQUIRE_CLEAN" == "true" ]]; then
   AUDIT_ARGS+=(--require-clean)
 elif [[ "$REQUIRE_CLEAN" != "0" && "$REQUIRE_CLEAN" != "false" ]]; then
@@ -491,6 +506,10 @@ HISTORICAL_CANDIDATE_RECIPE_SHA256=""
 if [[ "$CONDITION" == "historical_candidate" ]]; then
   HISTORICAL_CANDIDATE_RECIPE_SHA256="$(sha256sum "$HISTORICAL_CANDIDATE_RECIPE_PATH" | awk '{print $1}')"
 fi
+PAPER_COMPONENT_RECIPE_SHA256=""
+if [[ "$CONDITION" == "full_attnres_only" ]]; then
+  PAPER_COMPONENT_RECIPE_SHA256="$(sha256sum "$PAPER_COMPONENT_RECIPE_PATH" | awk '{print $1}')"
+fi
 DATA_CONTRACT_SHA256="$(sha256sum "$DATA_CONTRACT_PATH" | awk '{print $1}')"
 GIT_COMMIT="$(git -C "$REPO_DIR" rev-parse HEAD)"
 GIT_DIRTY="$(git -C "$REPO_DIR" status --porcelain --untracked-files=all)"
@@ -501,7 +520,7 @@ fi
 RUN_MANIFEST="$MODEL_DIR/run_manifest.json"
 export EXPECTED_COMMIT ICASSP_EXECUTION_COMMIT="$GIT_COMMIT" ICASSP_EXECUTION_DIRTY="$GIT_DIRTY_FLAG"
 
-export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 PAPER_PROTOCOL_USE_COMPONENT_LR PAPER_METHOD_RECIPE_PATH PAPER_METHOD_RECIPE_ID PAPER_METHOD_RECIPE_SHA256 PAPER_METHOD_SEMANTICS_SHA256 COMPONENT_LR_ENABLED FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 HISTORICAL_CANDIDATE_RECIPE_PATH HISTORICAL_CANDIDATE_RECIPE_SHA256 HISTORICAL_CANDIDATE_STAGE HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
+export DATASET CONDITION PROTOCOL RUN_MODE SEED MODEL_DIR DATASET_DIR FOUNDATION_DIR MANIFEST_PATH PAPER_PROTOCOL_PATH PAPER_PROTOCOL_ID PAPER_PROTOCOL_SHA256 PAPER_PROTOCOL_USE_COMPONENT_LR PAPER_METHOD_RECIPE_PATH PAPER_METHOD_RECIPE_ID PAPER_METHOD_RECIPE_SHA256 PAPER_METHOD_SEMANTICS_SHA256 PAPER_COMPONENT_RECIPE_PATH PAPER_COMPONENT_RECIPE_ID PAPER_COMPONENT_RECIPE_SHA256 PAPER_COMPONENT_SEMANTICS_SHA256 COMPONENT_LR_ENABLED FRESH_SELECTIVE_RECIPE_PATH FRESH_SELECTIVE_RECIPE_SHA256 HISTORICAL_CANDIDATE_RECIPE_PATH HISTORICAL_CANDIDATE_RECIPE_SHA256 HISTORICAL_CANDIDATE_STAGE HISTORICAL_CANDIDATE_HISTORICAL_FAMILY_ID DATA_CONTRACT_PATH DATA_CONTRACT_SHA256 GIT_COMMIT
 "$PYTHON_BIN" - "$RUN_MANIFEST" "$GIT_COMMIT" "$GIT_DIRTY" "$FOUNDATION_SHA256" "$MANIFEST_SHA256" "${RUN_ARGS[@]}" <<'PY'
 import json
 import os
@@ -561,6 +580,22 @@ payload = {
     'paper_method_semantics_sha256': (
         os.environ.get('PAPER_METHOD_SEMANTICS_SHA256', '')
         if os.environ.get('CONDITION') == 'specialist_augmented_full' else ''
+    ),
+    'paper_component_recipe_path': (
+        os.environ.get('PAPER_COMPONENT_RECIPE_PATH', '')
+        if os.environ.get('CONDITION') == 'full_attnres_only' else ''
+    ),
+    'paper_component_recipe_id': (
+        os.environ.get('PAPER_COMPONENT_RECIPE_ID', '')
+        if os.environ.get('CONDITION') == 'full_attnres_only' else ''
+    ),
+    'paper_component_recipe_sha256': (
+        os.environ.get('PAPER_COMPONENT_RECIPE_SHA256', '')
+        if os.environ.get('CONDITION') == 'full_attnres_only' else ''
+    ),
+    'paper_component_semantics_sha256': (
+        os.environ.get('PAPER_COMPONENT_SEMANTICS_SHA256', '')
+        if os.environ.get('CONDITION') == 'full_attnres_only' else ''
     ),
     'use_component_lr': os.environ.get('COMPONENT_LR_ENABLED', '0') == '1',
     'fresh_selective_recipe_path': os.environ.get('FRESH_SELECTIVE_RECIPE_PATH', '') if os.environ['CONDITION'] == 'selective_fresh' else '',

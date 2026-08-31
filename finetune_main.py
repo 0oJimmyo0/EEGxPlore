@@ -89,6 +89,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
             'upper1',
             'full',
             'attnres_only',
+            'full_attnres_only',
             'specialist_only',
             'combined',
             'selective_fresh',
@@ -130,6 +131,12 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
         type=str,
         default='',
         help='Locked paper-facing architecture/method recipe for specialist_augmented_full.',
+    )
+    parser.add_argument(
+        '--paper_component_recipe',
+        type=str,
+        default='',
+        help='Locked paper-facing component-control recipe for full_attnres_only.',
     )
     parser.add_argument(
         '--fresh_selective_recipe_path',
@@ -585,6 +592,7 @@ REVISION_CONDITIONS = {
     'upper1',
     'full',
     'attnres_only',
+    'full_attnres_only',
     'specialist_only',
     'combined',
     'selective_fresh',
@@ -686,7 +694,7 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
     # protocol; ``historical_selective`` is archival and non-launchable.
     # ``historical_candidate`` is development-only and is overwritten by its
     # explicit candidate recipe below.
-    args.trainability_mode = 'full' if condition == 'specialist_augmented_full' else ('combined' if condition in {
+    args.trainability_mode = 'full' if condition in {'specialist_augmented_full', 'full_attnres_only'} else ('combined' if condition in {
         'selective_fresh',
         'selective_paper',
         'historical_selective',
@@ -694,6 +702,7 @@ def resolve_revision_condition(args: argparse.Namespace) -> None:
     } else condition)
     args.attnres_variant = 'pre_attn' if condition in {
         'attnres_only',
+        'full_attnres_only',
         'combined',
         'selective_fresh',
         'selective_paper',
@@ -775,6 +784,21 @@ def _validate_icassp_revision(args: argparse.Namespace) -> None:
         if not args.paper_method_recipe:
             raise ValueError(
                 '[icassp2027_revision] specialist_augmented_full requires a locked method recipe.'
+            )
+    if args.revision_condition == 'full_attnres_only':
+        if args.trainability_mode != 'full':
+            raise ValueError('[icassp2027_revision] full_attnres_only requires full trainability.')
+        if args.moe:
+            raise ValueError('[icassp2027_revision] full_attnres_only forbids specialist experts.')
+        if args.attnres_variant != 'pre_attn':
+            raise ValueError('[icassp2027_revision] full_attnres_only requires pre_attn AttnRes.')
+        if args.attnres_start_layer != 0 or args.attnres_gated:
+            raise ValueError(
+                '[icassp2027_revision] full_attnres_only requires ungated AttnRes starting at layer 0.'
+            )
+        if not args.paper_component_recipe:
+            raise ValueError(
+                '[icassp2027_revision] full_attnres_only requires a locked component recipe.'
             )
     if args.backbone != 'cbramod':
         raise ValueError('[icassp2027_revision] only the CBraMod backbone is allowed.')
@@ -1089,9 +1113,9 @@ def validate_args(args: argparse.Namespace) -> None:
         else:
             if effective_mode not in {'frozen', 'upper4', 'full', 'typed_conditional'}:
                 raise ValueError(f'[icassp2027] unsupported trainability mode: {effective_mode}')
-            if args.attnres_variant != 'none':
+            if args.attnres_variant != 'none' and args.revision_condition != 'full_attnres_only':
                 raise ValueError(
-                    '[icassp2027] only depth_aggregation may enable AttnRes; '
+                    '[icassp2027] only full_attnres_only or depth_aggregation may enable AttnRes; '
                     'standard baselines require attnres_variant=none.'
                 )
 

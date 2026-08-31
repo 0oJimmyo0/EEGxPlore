@@ -82,6 +82,17 @@ def main() -> None:
     assert any('spatial_router' in name for name in combined)
     assert not any('.moe_ffn.shared.' in name for name in combined)
 
+    attnres_params = _params('full_attnres_only')
+    resolve_revision_condition(attnres_params)
+    assert attnres_params.trainability_mode == 'full'
+    mode, _ = configure_trainability(model, attnres_params)
+    assert mode == 'full'
+    attnres_full = _names(model)
+    assert 'backbone.encoder.layers.0.weight' in attnres_full
+    assert 'backbone.encoder.layers.11.pre_attn_res.weight' in attnres_full
+    assert 'classifier.weight' in attnres_full
+    assert attnres_full == {name for name, _ in model.named_parameters()}
+
     fresh_params = _params('selective_fresh')
     resolve_revision_condition(fresh_params)
     assert fresh_params.trainability_mode == 'combined'

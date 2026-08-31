@@ -40,6 +40,10 @@ FIELDNAMES = [
     "paper_method_recipe_sha256",
     "paper_method_semantics_sha256",
     "paper_method_recipe_path",
+    "paper_component_recipe_id",
+    "paper_component_recipe_sha256",
+    "paper_component_semantics_sha256",
+    "paper_component_recipe_path",
     "paper_protocol_id",
     "paper_protocol_sha256",
     "paper_protocol_path",
@@ -334,6 +338,26 @@ def _row_for_run(
         "paper_method_recipe_path": str(
             manifest.get("paper_method_recipe_path")
             or result.get("paper_method_recipe_path")
+            or ""
+        ),
+        "paper_component_recipe_id": str(
+            manifest.get("paper_component_recipe_id")
+            or result.get("paper_component_recipe_id")
+            or ""
+        ),
+        "paper_component_recipe_sha256": str(
+            manifest.get("paper_component_recipe_sha256")
+            or result.get("paper_component_recipe_sha256")
+            or ""
+        ),
+        "paper_component_semantics_sha256": str(
+            manifest.get("paper_component_semantics_sha256")
+            or result.get("paper_component_semantics_sha256")
+            or ""
+        ),
+        "paper_component_recipe_path": str(
+            manifest.get("paper_component_recipe_path")
+            or result.get("paper_component_recipe_path")
             or ""
         ),
         "paper_protocol_id": str(
