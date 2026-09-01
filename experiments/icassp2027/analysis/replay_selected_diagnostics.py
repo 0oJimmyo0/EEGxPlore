@@ -67,6 +67,8 @@ def _load_state_dict(path: Path):
 def replay(run_root: Path, cuda: int) -> dict:
     summary_path = _find_summary(run_root)
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    manifest_path = run_root / "result_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else {}
     config = dict(summary.get("config") or {})
     if not config:
         raise RuntimeError(f"run summary has no config: {summary_path}")
@@ -89,9 +91,11 @@ def replay(run_root: Path, cuda: int) -> dict:
 
     result = {
         "dataset": dataset,
-        "condition": summary.get("revision_condition") or summary.get("condition"),
+        "condition": summary.get("revision_condition") or summary.get("condition") or manifest.get("condition"),
         "seed": config.get("seed"),
-        "paper_eligible": summary.get("paper_eligible"),
+        "paper_eligible": (
+            summary["paper_eligible"] if "paper_eligible" in summary else manifest.get("paper_eligible")
+        ),
         "run_root": str(run_root.resolve()),
         "summary_path": str(summary_path.resolve()),
         "summary_sha256": _sha256(summary_path),
