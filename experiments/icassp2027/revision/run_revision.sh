@@ -176,11 +176,11 @@ if [[ "$RUN_MODE" == "paper" || "$RUN_MODE" == "smoke" ]]; then
       exit 2
       ;;
   esac
-  if [[ "$CONDITION" == "specialist_augmented_full" || "$CONDITION" == "full" ]]; then
+  if [[ "$CONDITION" == "specialist_augmented_full" || "$CONDITION" == "full" || "$CONDITION" == "full_attnres_only" ]]; then
     case "$SEED" in
       3407|2024|2027) ;;
       *)
-        echo "Final full/specialist_augmented_full seed must be one of 3407, 2024, 2027 (got: $SEED)" >&2
+        echo "Final full/specialist_augmented_full/full_attnres_only seed must be one of 3407, 2024, 2027 (got: $SEED)" >&2
         exit 2
         ;;
     esac
