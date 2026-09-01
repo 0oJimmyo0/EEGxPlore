@@ -1,3 +1,4 @@
+import re
 from typing import Optional
 
 import numpy as np
@@ -35,6 +36,9 @@ class Evaluator:
     def _subject_from_sample_key(sample_key: str) -> str:
         """Extract the subject component from current or legacy SEED-V keys."""
         key = str(sample_key)
+        physio_match = re.match(r'^(S\d+)R\d+', key)
+        if physio_match:
+            return physio_match.group(1)
         if '_t' in key and '_g' in key:
             return key.split('_', 1)[0]
         prefix = key.rsplit('-', 2)[0]

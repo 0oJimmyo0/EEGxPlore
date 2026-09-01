@@ -13,8 +13,10 @@ class CustomDataset(Dataset):
             data_dir,
             mode='train',
             split_manifest_path: str = '',
+            return_sample_keys: bool = False,
     ):
         super(CustomDataset, self).__init__()
+        self.return_sample_keys = bool(return_sample_keys)
         self.db = lmdb.open(data_dir, readonly=True, lock=False, readahead=True, meminit=False)
         if split_manifest_path:
             if not os.path.isfile(split_manifest_path):
@@ -47,12 +49,17 @@ class CustomDataset(Dataset):
         # print(key)
         # print(data)
         # print(label)
+        if self.return_sample_keys:
+            return data/100, label, str(key)
         return data/100, label
 
     def collate(self, batch):
         x_data = np.array([x[0] for x in batch])
         y_label = np.array([x[1] for x in batch])
-        return to_tensor(x_data), to_tensor(y_label).long()
+        result = (to_tensor(x_data), to_tensor(y_label).long())
+        if self.return_sample_keys:
+            return result + ([str(x[2]) for x in batch],)
+        return result
 
 
 class LoadDataset(object):
@@ -62,9 +69,25 @@ class LoadDataset(object):
 
     def get_data_loader(self):
         split_manifest_path = str(getattr(self.params, 'icassp_split_manifest', '') or '')
-        train_set = CustomDataset(self.datasets_dir, mode='train', split_manifest_path=split_manifest_path)
-        val_set = CustomDataset(self.datasets_dir, mode='val', split_manifest_path=split_manifest_path)
-        test_set = CustomDataset(self.datasets_dir, mode='test', split_manifest_path=split_manifest_path)
+        return_sample_keys = bool(getattr(self.params, 'return_sample_keys', False))
+        train_set = CustomDataset(
+            self.datasets_dir,
+            mode='train',
+            split_manifest_path=split_manifest_path,
+            return_sample_keys=return_sample_keys,
+        )
+        val_set = CustomDataset(
+            self.datasets_dir,
+            mode='val',
+            split_manifest_path=split_manifest_path,
+            return_sample_keys=return_sample_keys,
+        )
+        test_set = CustomDataset(
+            self.datasets_dir,
+            mode='test',
+            split_manifest_path=split_manifest_path,
+            return_sample_keys=return_sample_keys,
+        )
         num_workers = int(getattr(self.params, 'num_workers', 0))
         pin_memory = bool(getattr(self.params, 'pin_memory', False))
         persistent_workers = bool(getattr(self.params, 'persistent_workers', False) and num_workers > 0)

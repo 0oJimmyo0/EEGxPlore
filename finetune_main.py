@@ -1232,7 +1232,7 @@ def build_dataset(args: argparse.Namespace):
         return isruc_dataset.LoadDataset(args).get_data_loader()
 
     if args.downstream_dataset == 'PhysioNet-MI':
-        args.return_sample_keys = False
+        args.return_sample_keys = bool(getattr(args, 'selected_checkpoint_diagnostics', False))
         args.return_domain_ids = False
         print('[PhysioNet-MI] using physio_dataset.LoadDataset in selective-adaptation finetune pipeline.')
         return physio_dataset.LoadDataset(args).get_data_loader()
