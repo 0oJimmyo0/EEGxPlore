@@ -1,0 +1,45 @@
+{
+  "provenance": "Frozen means reproduced from the finalized ICASSP class-wise diagnostic evidence.",
+  "datasets": {
+    "ISRUC": {
+      "classwise": {
+        "class_labels": ["W", "N1", "N2", "N3", "REM"],
+        "mean_sd": {
+          "delta_attnres": [
+            {"mean": 0.030},
+            {"mean": 0.022},
+            {"mean": 0.117},
+            {"mean": -0.072},
+            {"mean": 0.007}
+          ],
+          "delta_specialist_given_attnres": [
+            {"mean": -0.002},
+            {"mean": -0.011},
+            {"mean": -0.063},
+            {"mean": 0.044},
+            {"mean": -0.008}
+          ]
+        }
+      }
+    },
+    "PhysioNet-MI": {
+      "classwise": {
+        "class_labels": ["Class 0", "Class 1", "Class 2", "Class 3"],
+        "mean_sd": {
+          "delta_attnres": [
+            {"mean": -0.015},
+            {"mean": 0.003},
+            {"mean": 0.046},
+            {"mean": -0.017}
+          ],
+          "delta_specialist_given_attnres": [
+            {"mean": -0.031},
+            {"mean": -0.012},
+            {"mean": -0.061},
+            {"mean": 0.036}
+          ]
+        }
+      }
+    }
+  }
+}
