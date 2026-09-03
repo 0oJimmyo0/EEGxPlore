@@ -411,6 +411,96 @@ def _row_for_run(
     }
 
 
+def _frozen_rows(
+    audit_path: Optional[Path],
+    primary_cells: Optional[Set[Tuple[str, str, str]]],
+) -> List[Dict[str, str]]:
+    """Import rows from a passed frozen audit snapshot.
+
+    The frozen ICASSP package intentionally keeps the audited row-level
+    metadata and aggregate tables, but not every original run directory.  A
+    snapshot row is therefore evidence with complete audit provenance, not a
+    locally replayable run artifact.  Primary cells represented by this
+    snapshot replace matching rows discovered below the live output root.
+    """
+    if audit_path is None:
+        return []
+    payload = _read_json(audit_path)
+    source_rows = payload.get("rows")
+    if not payload.get("passed") or not isinstance(source_rows, list):
+        raise ValueError(f"frozen audit is not a passed row snapshot: {audit_path}")
+
+    rows: List[Dict[str, str]] = []
+    seen: Set[Tuple[str, str, str]] = set()
+    source_location = str(audit_path.resolve())
+    for source in source_rows:
+        if not isinstance(source, dict):
+            raise ValueError(f"frozen audit contains a non-object row: {audit_path}")
+        dataset = str(source.get("dataset", "") or "")
+        condition = str(source.get("executable_condition", "") or "")
+        seed = str(source.get("seed", "") or "")
+        cell = (dataset, condition, seed)
+        if cell in seen:
+            raise ValueError(f"duplicate frozen audit cell: {cell}")
+        seen.add(cell)
+        if primary_cells is not None and cell not in primary_cells:
+            raise ValueError(f"frozen audit row is outside the active paper manifest: {cell}")
+        if source.get("status") != "pass" or not source.get("paper_eligible"):
+            raise ValueError(f"frozen audit row is not paper-eligible: {cell}")
+
+        row = {field: "" for field in FIELDNAMES}
+        row.update({
+            "source_kind": "frozen_confirmatory_snapshot",
+            "provenance_class": "frozen_confirmatory",
+            "verification_level": "frozen_audit_passed",
+            "evidence_role": "confirmatory_frozen",
+            "paper_eligibility": "primary_new_evidence_audited",
+            "source_location": f"{source_location}::{dataset}/{condition}/seed_{seed}",
+            "run_mode": str(source.get("run_mode", "paper")),
+            "run_status": "complete",
+            "dataset": dataset,
+            "condition": condition,
+            "seed": seed,
+            "split": str(source.get("protocol_id", "") or ""),
+            "data_contract_sha256": str(source.get("data_contract_sha256", "") or ""),
+            "selection_rule": "validation kappa (frozen audit)",
+            "code_commit": str(source.get("code_commit", "") or ""),
+            "execution_commit": str(source.get("execution_commit", "") or ""),
+            "execution_commit_classification": str(source.get("execution_commit_classification", "") or ""),
+            "training_source_commit": str(source.get("training_source_commit", "") or ""),
+            "training_semantics_id": str(source.get("training_semantics_id", "") or ""),
+            "semantic_config_sha256": str(source.get("semantic_config_sha256", "") or ""),
+            "pair_contract_sha256": str(source.get("pair_contract_sha256", "") or ""),
+            "checkpoint_path": str(source.get("checkpoint_path", "") or ""),
+            "checkpoint_sha256": str(source.get("checkpoint_sha256", "") or ""),
+            "metric_files": "confirmatory_audit.json;confirmatory_seed_results.csv",
+            "trainable_parameter_count": str(source.get("trainable_parameters", "") or ""),
+            "runtime_seconds": str(source.get("runtime_seconds", "") or ""),
+            "gpu": "",
+            "peak_memory_mb": str(source.get("peak_cuda_memory_mb", "") or ""),
+            "test_balanced_accuracy": str(source.get("test_balanced_accuracy", "") or ""),
+            "test_macro_f1": str(source.get("test_macro_f1", "") or ""),
+            "test_weighted_f1": str(source.get("test_weighted_f1", "") or ""),
+            "test_kappa": str(source.get("test_kappa", "") or ""),
+            "tmlr_overlap_status": "unreviewed_pending_row_audit",
+            "reuse_decision": "eligible_frozen_snapshot",
+            "notes": "audited frozen snapshot; original run directory is external to this checkout",
+        })
+        if condition == "full":
+            row["paper_method_semantics_sha256"] = str(source.get("method_semantics_sha256", "") or "")
+        else:
+            row["paper_method_recipe_id"] = str(source.get("method_id", "") or "")
+            row["paper_method_recipe_sha256"] = str(source.get("method_sha256", "") or "")
+            row["paper_method_semantics_sha256"] = str(source.get("method_semantics_sha256", "") or "")
+        rows.append(row)
+
+    if primary_cells is not None and seen != primary_cells:
+        missing = sorted(primary_cells - seen)
+        extra = sorted(seen - primary_cells)
+        raise ValueError(f"frozen audit cells do not match active manifest; missing={missing}, extra={extra}")
+    return rows
+
+
 def _historical_rows(index_path: Optional[Path]) -> List[Dict[str, str]]:
     if index_path is None or not index_path.is_file():
         return []
@@ -442,13 +532,25 @@ def build_registry(
     hash_checkpoints: bool = False,
     historical_index: Optional[Path] = None,
     paper_manifest: Optional[Path] = None,
+    frozen_audit: Optional[Path] = None,
 ) -> int:
     manifests = sorted(output_root.rglob("run_manifest.json")) if output_root.is_dir() else []
     primary_cells = _primary_cells(paper_manifest)
+    frozen_rows = _frozen_rows(frozen_audit, primary_cells)
+    frozen_cells = {
+        (row["dataset"], row["condition"], row["seed"])
+        for row in frozen_rows
+    }
+    run_primary_cells = (
+        None
+        if primary_cells is None
+        else primary_cells - frozen_cells
+    )
     rows = [
-        _row_for_run(path, hash_checkpoints=hash_checkpoints, primary_cells=primary_cells)
+        _row_for_run(path, hash_checkpoints=hash_checkpoints, primary_cells=run_primary_cells)
         for path in manifests
     ]
+    rows.extend(frozen_rows)
     rows.extend(_historical_rows(historical_index))
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     with registry_path.open("w", newline="", encoding="utf-8") as handle:
@@ -479,6 +581,12 @@ def main() -> None:
         default=DEFAULT_PAPER_MANIFEST,
         help="Active paper manifest used to distinguish confirmatory rows from development artifacts.",
     )
+    parser.add_argument(
+        "--frozen-audit",
+        type=Path,
+        default=None,
+        help="Passed confirmatory_audit.json snapshot. Matching primary rows replace live run discovery.",
+    )
     args = parser.parse_args()
     count = build_registry(
         args.output_root,
@@ -486,6 +594,7 @@ def main() -> None:
         hash_checkpoints=args.hash_checkpoints,
         historical_index=args.historical_index,
         paper_manifest=args.paper_manifest,
+        frozen_audit=args.frozen_audit,
     )
     print(f"evidence registry: wrote {count} rows to {args.registry}")
 

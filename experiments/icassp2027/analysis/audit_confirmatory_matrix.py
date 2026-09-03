@@ -300,7 +300,77 @@ def _excluded_artifacts(output_root: Path, primary_cells: set[Tuple[str, str, st
     return excluded
 
 
+def _audit_frozen_snapshot(snapshot_path: Path, paper_manifest: Path) -> Dict[str, Any]:
+    """Strictly validate a frozen audit JSON when run directories are absent."""
+    expected = set(expected_primary_cells(paper_manifest))
+    payload = read_json(snapshot_path)
+    source_rows = payload.get("rows")
+    failures: List[Dict[str, Any]] = []
+    observed: set[Tuple[str, str, str]] = set()
+    if not payload.get("passed"):
+        failures.append({"cell": "frozen_snapshot", "errors": ["source frozen audit is not marked passed"]})
+    if not isinstance(source_rows, list):
+        failures.append({"cell": "frozen_snapshot", "errors": ["source frozen audit has no row list"]})
+        source_rows = []
+
+    for source in source_rows:
+        if not isinstance(source, dict):
+            failures.append({"cell": "frozen_snapshot", "errors": ["frozen snapshot contains a non-object row"]})
+            continue
+        cell = (
+            str(source.get("dataset", "")),
+            str(source.get("executable_condition", "")),
+            str(source.get("seed", "")),
+        )
+        if cell in observed:
+            failures.append({"cell": list(cell), "errors": ["duplicate frozen snapshot row"]})
+        observed.add(cell)
+        errors: List[str] = []
+        if source.get("status") != "pass":
+            errors.append(f"status={source.get('status')!r}, expected 'pass'")
+        if not as_bool(source.get("paper_eligible")):
+            errors.append("paper_eligible is not true")
+        for field in REQUIRED_METRICS + ("runtime_seconds", "peak_cuda_memory_mb", "trainable_parameters"):
+            if as_float(source.get(field)) is None:
+                errors.append(f"frozen row field is not finite: {field}")
+        for field in ("checkpoint_path", "checkpoint_sha256", "code_commit", "data_contract_sha256", "protocol_sha256"):
+            if not str(source.get(field, "") or "").strip():
+                errors.append(f"frozen row field missing: {field}")
+        if errors:
+            failures.append({"cell": list(cell), "errors": errors})
+
+    if observed != expected:
+        failures.append({
+            "cell": "frozen_snapshot",
+            "errors": [
+                f"snapshot cells differ from active manifest; missing={sorted(expected - observed)!r}, "
+                f"extra={sorted(observed - expected)!r}"
+            ],
+        })
+
+    return {
+        "schema_version": 1,
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "training_commit": payload.get("training_commit", TRAINING_COMMIT),
+        "training_semantics_id": payload.get("training_semantics_id", TRAINING_SEMANTICS_ID),
+        "paper_manifest": str(paper_manifest),
+        "output_root": str(snapshot_path.parent),
+        "snapshot_source": str(snapshot_path),
+        "expected_cell_count": len(expected),
+        "complete_cell_count": sum(
+            isinstance(row, dict) and row.get("status") == "pass" for row in source_rows
+        ),
+        "passed": not failures,
+        "failures": failures,
+        "rows": source_rows,
+        "excluded_artifacts": [],
+    }
+
+
 def audit_matrix(output_root: Path, paper_manifest: Path) -> Dict[str, Any]:
+    snapshot_path = output_root / "confirmatory_audit.json"
+    if snapshot_path.is_file() and not any(output_root.rglob("run_manifest.json")):
+        return _audit_frozen_snapshot(snapshot_path, paper_manifest)
     expected = expected_primary_cells(paper_manifest)
     expected_set = set(expected)
     required_set = {
