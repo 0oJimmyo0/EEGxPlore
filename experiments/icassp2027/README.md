@@ -15,8 +15,8 @@ The active scope is deliberately limited to:
 - SEED-V, FACED, ISRUC, and PhysioNet-MI;
 - the existing AttnRes and typed-specialist components;
 - one matched benchmark protocol;
-- a predeclared Full versus AttnRes + Typed Specialists comparison on FACED
-  and ISRUC over seeds `3407`, `2024`, and `2027`.
+- a predeclared Full versus AttnRes + Typed Specialists comparison on FACED,
+  ISRUC, SEED-V, and PhysioNet-MI over seeds `3407`, `2024`, and `2027`.
 
 TUEV and the subject-disjoint SEED-V protocol are archived evidence only.
 They are not part of the active ICASSP compute plan. The
@@ -89,6 +89,31 @@ focused revision launcher for paper-facing runs. In particular, do not
 aggregate results from `output/icassp2027_depth` into the main table. Smoke
 runs use `output/icassp2027_smoke` and are permanently ineligible for the
 paper registry.
+
+The final paper rows are preserved as an audited snapshot because some
+original run directories live in external training workspaces. Rebuild the
+row-level registry with:
+
+```bash
+python experiments/icassp2027/revision/build_evidence_registry.py \
+  --output-root output/icassp2027_revision \
+  --registry output/icassp2027_revision/evidence_registry_final_frozen.csv \
+  --paper-manifest experiments/icassp2027/revision/paper_table_manifest_v4.csv \
+  --historical-index experiments/icassp2027/revision/historical_candidates.csv \
+  --frozen-audit output/icassp2027_frozen_20260830/confirmatory_audit.json
+```
+
+Validate that snapshot independently with:
+
+```bash
+python experiments/icassp2027/analysis/audit_confirmatory_matrix.py \
+  --output-root output/icassp2027_frozen_20260830 --strict
+```
+
+The full-validation routing diagnostic is inference-only and is not part of
+the paper metric table. It aggregates actual soft probabilities over every
+validation batch at each selected specialist checkpoint. Submit it with
+`sbatch experiments/icassp2027/analysis/submit_full_validation_routing.slurm`.
 
 ## Separation rule
 
